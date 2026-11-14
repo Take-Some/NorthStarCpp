@@ -25,6 +25,23 @@ int main(int argc, char** argv)
         auto const root = std::filesystem::u8path(argv[1]);
         northstarcpp::AssetManager manager;
         manager.mount_shared_assets(root);
+        // The browser and streaming API must see every embedded ListFile
+        // entry, never silently substitute the first texture/drawable.
+        auto const texture_entries=northstarcpp::shared_assets::list_dictionary_entries(
+            manager,"textures/skydome.ytd");
+        auto const drawable_entries=northstarcpp::shared_assets::list_dictionary_entries(
+            manager,"models/skydome.ydd");
+        require(texture_entries.size()==5 && drawable_entries.size()==1,
+            "NEF8 ListFile entries were truncated during enumeration");
+        require(drawable_entries[0].name=="skydome_high",
+            "Drawable selector name differs from ListFile entry");
+        for(auto const& entry:texture_entries) {
+            auto loaded=manager.load_texture("textures/skydome.ytd@"+entry.name);
+            require(loaded.name==entry.name && !loaded.data.empty(),
+                "NEF8 dictionary selection returned the wrong texture");
+            require(loaded.data.size()==entry.size,
+                "NEF8 texture entry's byte length does not match its payload");
+        }
         std::string const sky_ref = "models/skydome.ydd@skydome_high";
         auto first = manager.request_drawable_resources(sky_ref, northstarcpp::AssetPriority::background);
         auto duplicate = manager.request_drawable_resources(sky_ref, northstarcpp::AssetPriority::critical);

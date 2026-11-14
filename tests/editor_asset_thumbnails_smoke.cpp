@@ -65,6 +65,12 @@ int main(int argc,char** argv) {
         auto materials=shared_assets::load_materials(assets,"materials/skydome.ymat");
         if(textures.empty()||drawables.empty()||materials.empty())return 7;
         auto const tex=thumbnail_texture(textures.front());
+        // An explicit dictionary@entry reference must preview THAT texture,
+        // rather than unconditionally rendering the dictionary's first item.
+        auto const moon=assets.load_texture("textures/skydome.ytd@moon_new");
+        if(moon.name!="moon_new" || moon.name==textures.front().name)return 10;
+        auto const moon_preview=thumbnail_texture(moon);
+        if(!moon_preview.valid() || moon_preview.bgra==tex.bgra)return 11;
         auto const mesh=thumbnail_drawable(drawables.front());
         auto const mat=thumbnail_material(materials.front());
         if(!tex.valid()||!mesh.valid()||!mat.valid())return 8;
