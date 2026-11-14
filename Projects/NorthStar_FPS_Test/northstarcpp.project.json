@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "engine": "NorthStarCpp",
+  "name": "NorthStar FPS Test",
+  "game_mode": "fps",
+  "category": "Games",
+  "template": "fps-test",
+  "description": "Native FPS arena regression with player, targets, moving targets, hazards, physics and NEF8 scenes.",
+  "tags": [
+    "FPS",
+    "Arena",
+    "Physics",
+    "Targets",
+    "NEF8",
+    "Regression"
+  ],
+  "startup_scene": "main.nscn",
+  "state": "playable-fps",
+  "genre": "first-person-target-shooter",
+  "level": "FPS Arena",
+  "asset_root": "assets",
+  "created_at": "2026-11-14T05:14:59+00:00",
+  "engine_version": "0.4.0"
+}

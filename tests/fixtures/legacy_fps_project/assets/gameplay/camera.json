@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "projection": {
+    "near": 0.08,
+    "far": 750,
+    "default_fov_y_degrees": 78,
+    "aimed_fov_y_degrees": 55,
+    "fov_y_degrees": 78
+  },
+  "third_person": {
+    "distance": 4.2,
+    "height": 1.5
+  }
+}

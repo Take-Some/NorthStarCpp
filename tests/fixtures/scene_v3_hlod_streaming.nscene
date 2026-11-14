@@ -1,0 +1,23 @@
+NorthStarCpp.Scene 3
+scene "NorthStar Scene V3 Runtime Acceptance"
+streaming 75 110 1
+stream_budget 4 2
+layer "Default" 1
+cell "Sector A" -20 -10 -20 80 20 40 1
+cell "Sector B" 250 -10 -20 340 20 40 0
+volume "Spawn safety" box -6 -2 -6 6 5 6 "streaming_source" 1
+portal "Test Gate" "Exterior" "Lobby" 24 -2 -5 26 5 5 1
+entity 1 0 "Player" "Default" "" "" "" 0 0 0 1 46b9d8 1 1 0 0 0 1 1 1 0 1000000 1 1
+entity 2 0 "StaticFacade1" "Default" "Sector A" "" "" 0 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 3 0 "StaticFacade2" "Default" "Sector A" "" "" 12 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 4 0 "StaticFacade3" "Default" "Sector A" "" "" 24 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 5 0 "StaticFacade4" "Default" "Sector A" "" "" 36 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 6 0 "StaticFacade5" "Default" "Sector A" "" "" 48 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 7 0 "StaticFacade6" "Default" "Sector A" "" "" 60 1 0 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 8 0 "StaticFacade7" "Default" "Sector A" "" "" 0 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 9 0 "StaticFacade8" "Default" "Sector A" "" "" 12 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 10 0 "StaticFacade9" "Default" "Sector A" "" "" 24 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 11 0 "StaticFacade10" "Default" "Sector A" "" "" 36 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 12 0 "StaticFacade11" "Default" "Sector A" "" "" 48 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 13 0 "StaticFacade12" "Default" "Sector A" "" "" 60 1 12 2 607080 0 0 0 0 0 1 1 1 0 1000000 1 1
+entity 14 0 "DistantMarker" "Default" "Sector B" "" "" 285 1 0 2 8a6a4d 0 0 0 0 0 1 1 1 0 1000000 1 1

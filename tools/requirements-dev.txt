@@ -1,0 +1,2 @@
+# Python-side NEF8 Scene ListFile BLAKE3 hashing and verification
+blake3>=1.0,<2.0

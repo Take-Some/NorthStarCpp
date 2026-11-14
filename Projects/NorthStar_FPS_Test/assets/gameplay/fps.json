@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "weapon": {
+    "magazine": 18,
+    "reserve": 108,
+    "fire_interval": 0.13,
+    "reload_seconds": 1.2,
+    "range": 55
+  },
+  "arena": {
+    "hazard_damage": 15,
+    "hit_color": "#40F0AD"
+  }
+}

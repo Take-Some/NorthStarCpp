@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+if(NOT TARGET NorthStarCpp::zlib)
+    add_library(NorthStarCpp::zlib STATIC IMPORTED)
+    set_target_properties(NorthStarCpp::zlib PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/sdk/lib/libz.a")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/NorthStarCppTargets.cmake")
+check_required_components(NorthStarCpp)

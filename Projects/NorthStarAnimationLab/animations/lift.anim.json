@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "type": "scene-transform",
+  "interpolation": "linear",
+  "keyframes": [
+    {
+      "time": 0,
+      "translation": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "time": 2,
+      "translation": [
+        0,
+        4,
+        0
+      ],
+      "rotation": [
+        0,
+        45,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

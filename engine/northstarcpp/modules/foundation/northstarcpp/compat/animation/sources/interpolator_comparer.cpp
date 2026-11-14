@@ -1,0 +1,85 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 02.04.2010
+//	Author		: Kayla Verner
+//	Copyright (C) Kayla's Systems - 2010
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#include "pch.h"
+#include "interpolator_comparer.h"
+#include "instant_interpolator.h"
+#include "linear_interpolator.h"
+#include "fermi_dirac_interpolator.h"
+
+using northstarcpp::animation::interpolator_comparer;
+using northstarcpp::animation::instant_interpolator;
+using northstarcpp::animation::linear_interpolator;
+using northstarcpp::animation::fermi_dirac_interpolator;
+
+void interpolator_comparer::dispatch	( instant_interpolator const& left, instant_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= equal;
+}
+
+void interpolator_comparer::dispatch	( instant_interpolator const& left, linear_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= less;
+}
+
+void interpolator_comparer::dispatch	( instant_interpolator const& left, fermi_dirac_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= less;
+}
+
+void interpolator_comparer::dispatch	( linear_interpolator const& left, instant_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= more;
+}
+
+void interpolator_comparer::dispatch	( linear_interpolator const& left, linear_interpolator const& right )
+{
+	float const left_transition_time	= left.transition_time();
+	float const right_transition_time	= right.transition_time();
+	result						= left_transition_time < right_transition_time ? less : left_transition_time > right_transition_time ? more : equal;
+}
+
+void interpolator_comparer::dispatch	( linear_interpolator const& left, fermi_dirac_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= less;
+}
+
+void interpolator_comparer::dispatch	( fermi_dirac_interpolator const& left, instant_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= more;
+}
+
+void interpolator_comparer::dispatch	( fermi_dirac_interpolator const& left, linear_interpolator const& right )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS(&left, &right );
+	result						= more;
+}
+
+void interpolator_comparer::dispatch	( fermi_dirac_interpolator const& left, fermi_dirac_interpolator const& right )
+{
+	float const left_transition_time	= left.transition_time();
+	float const right_transition_time	= right.transition_time();
+	if ( left_transition_time < right_transition_time ) {
+		result					= less;
+		return;
+	}
+
+	if ( right_transition_time < left_transition_time ) {
+		result					= more;
+		return;
+	}
+
+	float const left_epsilon	= left.epsilon();
+	float const right_epsilon	= right.epsilon();
+	result						= left_epsilon < right_epsilon ? less : left_epsilon > right_epsilon ? more : equal;
+}

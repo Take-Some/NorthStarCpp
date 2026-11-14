@@ -1,0 +1,11 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created 	: 31.10.2008
+//	Author		: Kayla Verner
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#include "pch.h"
+
+// there is no entry point
+// this is just a class/control/component library
+// go to the controls folder to see the stuff

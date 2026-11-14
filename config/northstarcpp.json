@@ -1,0 +1,19 @@
+{
+  "description": "NorthStarCpp GNU GCC / CMake / Ninja development shell",
+  "build_root": "out",
+  "default_build_type": "Debug",
+  "toolchain": {
+    "bin_dir": "C:\\msys64\\mingw64\\bin"
+  },
+  "engine_name": "NorthStarCpp",
+  "runtime": {
+    "executable": "",
+    "working_directory": "",
+    "required_paths": [
+      "resources",
+      "mounts"
+    ],
+    "args": [],
+    "native_scene_player": true
+  }
+}

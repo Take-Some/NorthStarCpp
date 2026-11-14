@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "description": "Native NorthStarCpp CTest capability coverage manifest. Tests derive from the current CMake inventory.",
+  "capabilities": {
+    "qa-and-release": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_engine_layout",
+        "northstarcpp_game_distribution",
+        "northstarcpp_qa_reporter",
+        "northstarcpp_qt_distribution"
+      ]
+    },
+    "core-math": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_legacy_random32",
+        "northstarcpp_math"
+      ]
+    },
+    "shader-toolchain": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_shader_generator",
+        "northstarcpp_shader_generator_resources"
+      ]
+    },
+    "scene-serialization": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_scene_animation",
+        "northstarcpp_scene_async_vfs",
+        "northstarcpp_scene_binary",
+        "northstarcpp_scene_chunk",
+        "northstarcpp_scene_chunked",
+        "northstarcpp_scene_chunked_stress",
+        "northstarcpp_scene_nef8_crosslang",
+        "northstarcpp_scene_obj_mesh",
+        "northstarcpp_scene_runtime_bullet",
+        "northstarcpp_scene_runtime_jolt",
+        "northstarcpp_scene_world_v3"
+      ]
+    },
+    "physics": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_bullet_physics",
+        "northstarcpp_bullet_residency",
+        "northstarcpp_bullet_selected",
+        "northstarcpp_camera_physics_bullet",
+        "northstarcpp_camera_physics_jolt",
+        "northstarcpp_exploration_bullet",
+        "northstarcpp_exploration_jolt",
+        "northstarcpp_jolt_physics",
+        "northstarcpp_jolt_residency",
+        "northstarcpp_jolt_selected"
+      ]
+    },
+    "ecs": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_ecs_provider_independent",
+        "northstarcpp_editor_ecs_provider_independent",
+        "northstarcpp_flecs_ecs"
+      ]
+    },
+    "renderer": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_camera_d3d11",
+        "northstarcpp_d3d11_memory_residency"
+      ]
+    },
+    "assets": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_asset_catalog",
+        "northstarcpp_assets_vfs",
+        "northstarcpp_editor_asset_pipeline",
+        "northstarcpp_editor_asset_thumbnails",
+        "northstarcpp_fps_assets",
+        "northstarcpp_player_asset_zones",
+        "northstarcpp_shared_assets"
+      ]
+    },
+    "scripting": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_project_gameplay_scripts",
+        "northstarcpp_script_service_override",
+        "northstarcpp_scripting_abi",
+        "northstarcpp_scripting_reject_incompatible"
+      ]
+    },
+    "input": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_input_provider_independent",
+        "northstarcpp_input_reject_incompatible",
+        "northstarcpp_input_win32"
+      ]
+    },
+    "logging": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_logger_application_lifecycle",
+        "northstarcpp_logger_bootstrap",
+        "northstarcpp_logger_console_colors",
+        "northstarcpp_logger_multisink",
+        "northstarcpp_logger_provider_swap",
+        "northstarcpp_logger_reject_incompatible"
+      ]
+    },
+    "perlin-and-worldgen": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_perlin",
+        "northstarcpp_perlin_json_service",
+        "northstarcpp_perlin_provider_precedence",
+        "northstarcpp_perlin_reject_incompatible",
+        "northstarcpp_perlin_world_export",
+        "northstarcpp_procedural_environment"
+      ]
+    },
+    "camera": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_camera_director",
+        "northstarcpp_camera_editor_smoke",
+        "northstarcpp_editor_camera_picking"
+      ]
+    },
+    "qt-editor": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_content_browser_qt",
+        "northstarcpp_qt_editor_authoring"
+      ]
+    },
+    "editor": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_editor_authoring",
+        "northstarcpp_editor_player",
+        "northstarcpp_editor_prefab",
+        "northstarcpp_editor_workspace_visual"
+      ]
+    },
+    "project-manager": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_project_manager_catalog",
+        "northstarcpp_project_manager_window"
+      ]
+    },
+    "fps-gameplay": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_fps_arena",
+        "northstarcpp_fps_player",
+        "northstarcpp_fps_ui"
+      ]
+    },
+    "player-runtime": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_exploration_player",
+        "northstarcpp_player_archive",
+        "northstarcpp_player_reject_invalid_scene",
+        "northstarcpp_player_scene_validation",
+        "northstarcpp_player_split_archive"
+      ]
+    },
+    "modules-and-capabilities": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_capability_swap"
+      ]
+    },
+    "crash-and-monitoring": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_bugtrap_smoke"
+      ]
+    },
+    "compatibility": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_logo_resources",
+        "northstarcpp_save_game"
+      ]
+    },
+    "other-engine-tests": {
+      "owner": "Kayla's Systems",
+      "tests": [
+        "northstarcpp_scene"
+      ]
+    }
+  },
+  "known_gaps": [
+    {
+      "id": "v8-certified-release",
+      "reason": "Signed, independently reviewed V8 SDK/provider attestation is not present."
+    },
+    {
+      "id": "clean-windows-acceptance",
+      "reason": "Final dist publication requires a signed, independent clean-Windows acceptance report."
+    },
+    {
+      "id": "real-world-gpu-benchmark",
+      "reason": "This test inventory does not establish p95/p99 FPS across a real production scene."
+    }
+  ],
+  "regression_targets": []
+}

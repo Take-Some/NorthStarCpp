@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "keyframes": [
+    {
+      "time": 0,
+      "position": [
+        0,
+        2,
+        -10.0
+      ],
+      "yaw": 0,
+      "pitch": 0,
+      "fov_y_degrees": 78
+    },
+    {
+      "time": 2,
+      "position": [
+        0,
+        2,
+        -5.0
+      ],
+      "yaw": 0,
+      "pitch": 0,
+      "fov_y_degrees": 70
+    },
+    {
+      "time": 4,
+      "position": [
+        0,
+        2,
+        0.0
+      ],
+      "yaw": 0,
+      "pitch": 0,
+      "fov_y_degrees": 60
+    }
+  ]
+}

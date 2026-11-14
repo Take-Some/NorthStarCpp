@@ -1,0 +1,3 @@
+// NorthStarCpp BugTrap icon, distinct from the engine icon.
+#include "resource_ids.h"
+IDI_BUGTRAP_APP ICON "@NORTHSTARCPP_BUG_ICON_FILE@"

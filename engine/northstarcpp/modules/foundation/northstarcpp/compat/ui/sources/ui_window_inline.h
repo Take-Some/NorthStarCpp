@@ -1,0 +1,9 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 30.01.2009
+//	Author		: Kayla Verner
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+#ifndef UI_WINDOW_INLINE_H_INCLUDED
+#define UI_WINDOW_INLINE_H_INCLUDED
+
+#endif //UI_WINDOW_INLINE_H_INCLUDED

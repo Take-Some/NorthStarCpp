@@ -1,0 +1,54 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 18.05.2010
+//	Author		: Armen Abroyan
+//	Copyright (C) Kayla's Systems - 2010
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#include "pch.h"
+
+#include "shader_compiler_application.h"
+
+#pragma comment( lib, "delayimp.lib" )
+
+
+static northstarcpp::uninitialized_reference<northstarcpp::shader_compiler::application>	s_application;
+
+static int s_exit_code			= 0;
+
+struct guard {
+	inline	guard				( )
+	{
+		NORTHSTARCPP_CONSTRUCT_REFERENCE( s_application, northstarcpp::shader_compiler::application );
+		s_application->initialize ( );
+	}
+
+	inline	~guard				( )
+	{
+		s_exit_code				= s_application->get_exit_code();
+		s_application->finalize	( );
+		NORTHSTARCPP_DESTROY_REFERENCE	( s_application );
+	}
+}; // struct guard
+
+static void	main_protected		( pvoid )
+{
+	guard						guard;
+
+	if ( s_application->get_exit_code() )
+		return;
+
+	s_application->execute		( );
+	if ( s_application->get_exit_code() )
+		return;
+
+}
+
+
+int main						( int const argc, pstr const argv[ ], pstr const env[ ] )
+{
+	NORTHSTARCPP_UNREFERENCED_PARAMETERS( argc, argv, env );
+	
+	northstarcpp::debug::protected_call	( &main_protected, 0 );
+	return						( s_exit_code );
+}

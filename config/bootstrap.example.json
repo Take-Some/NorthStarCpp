@@ -1,0 +1,22 @@
+{
+  "plugins": {
+    "path": "./"
+  },
+  "logging": {
+    "enabled": true,
+    "level": "INFO",
+    "directory": "",
+    "sinks": {
+      "text": true,
+      "structured": true,
+      "debugger": true
+    },
+    "console": {
+      "visible": false
+    },
+    "rotation": {
+      "maxBytes": 16777216,
+      "backups": 3
+    }
+  }
+}

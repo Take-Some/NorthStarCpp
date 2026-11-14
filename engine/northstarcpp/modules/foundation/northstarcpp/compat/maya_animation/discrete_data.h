@@ -1,0 +1,52 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 21.01.2010
+//	Author		: Kayla Verner
+//	Copyright (C) Kayla's Systems - 2010
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#ifndef DISCRETE_DATA_H_INCLUDED
+#define DISCRETE_DATA_H_INCLUDED
+
+namespace northstarcpp {
+
+namespace animation {
+	struct frame;
+	enum enum_channel_id;
+} // namespace animation
+
+namespace configs{
+	class lua_config_value;
+} // namespace configs
+
+namespace maya_animation {
+
+class discrete_data {
+
+public:
+	virtual			~discrete_data(){}
+
+public:
+	virtual	void	save	( northstarcpp::configs::lua_config_value & cfg ) const									= 0;
+	virtual	void	load	( northstarcpp::configs::lua_config_value const& cfg, bool bone_names_only = false )	= 0;
+	virtual	void	check	( northstarcpp::configs::lua_config_value &discrete_data ) const						= 0;
+
+public:
+	virtual void	add_frame		( u32 bone, animation::frame const& frame )									= 0;
+	virtual	void	calculate		( )																			= 0;
+
+	virtual void	get_frame		( u32 bone, u32 frame_number, float &time, animation::frame& frame )const	= 0;
+	virtual	float	*channel		( u32 bone,  animation::enum_channel_id ch )								= 0;
+	virtual u32		channel_size	( u32 bone,  animation::enum_channel_id ch )								= 0;
+	virtual u32		bone_count		( )const																	= 0;
+	virtual u32		frame_count		( )const																	= 0;
+	virtual void	set_bone_count	( u32 bc )																	= 0;
+	virtual float	precision		( u32 bone, animation::enum_channel_id channel )const						= 0;
+	virtual float	time_scale		()const																		= 0;
+
+}; // class discrete_data
+
+} // namespace maya_animation
+} // namespace northstarcpp
+
+#endif // #ifndef DISCRETE_DATA_H_INCLUDED

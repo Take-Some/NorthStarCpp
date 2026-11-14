@@ -1,0 +1,3 @@
+#include "resource_ids.h"
+// Dedicated NorthStar Editor icon, keeping the existing Windows icon resource ID.
+IDI_NORTHSTARCPP_APP ICON "@NORTHSTARCPP_EDITOR_ICON_FILE@"

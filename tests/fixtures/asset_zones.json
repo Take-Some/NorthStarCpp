@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "zones": [
+    {
+      "min": [-32, -32, -32],
+      "max": [32, 32, 32],
+      "drawables": ["models/skydome.ydd@skydome_high"]
+    }
+  ]
+}

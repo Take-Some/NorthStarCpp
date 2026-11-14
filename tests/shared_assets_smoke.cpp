@@ -1,0 +1,95 @@
+// NorthStarCpp
+// Author: Kayla Verner
+#include <northstarcpp/assets.hpp>
+
+#include <algorithm>
+#include <filesystem>
+#include <iostream>
+#include <stdexcept>
+
+namespace {
+
+void require(bool condition, char const* message)
+{
+    if (!condition)
+        throw std::runtime_error(message);
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    if (argc != 2)
+        return 2;
+    try {
+        auto const root = std::filesystem::u8path(argv[1]);
+        northstarcpp::AssetManager manager;
+        manager.mount_shared_assets(root);
+        std::string const sky_ref = "models/skydome.ydd@skydome_high";
+        auto first = manager.request_drawable_resources(sky_ref, northstarcpp::AssetPriority::background);
+        auto duplicate = manager.request_drawable_resources(sky_ref, northstarcpp::AssetPriority::critical);
+        auto const sky_resource = first.get();
+        require(first.ready() && sky_resource == duplicate.get(), "Identical streaming requests did not share their result");
+        auto const& sky = *sky_resource;
+        require(sky.drawable.meshes.size() == 1 && sky.materials.size() == 1 && sky.textures.size() == 3,
+            "Incomplete skydome resource graph");
+        require(sky.materials.front().reference == "materials/skydome.ymat@sky_cloud_clear",
+            "Skydome should reference a native YMAT material");
+        auto const& mesh = sky.drawable.meshes.front();
+        require(mesh.vertices.size() == 469 && mesh.indices.size() == 2784,
+            "Incorrect skydome mesh buffers");
+        require(sky.materials.front().asset.name == "sky_cloud_clear" &&
+            sky.materials.front().asset.shader == "pbr.unlit.sky" && sky.materials.front().asset.two_sided,
+            "Incorrect skydome material");
+        auto moon_request = manager.request_texture("textures/skydome.ytd@moon_new");
+        auto moon_resource = moon_request.get();
+        auto const& moon = *moon_resource;
+        require(moon.srgb && moon.mips.size() == 8 && moon.mips.front().width == 128 &&
+            moon.mips.back().width == 1 && moon.data.size() == 21872,
+            "Incorrect native texture payload");
+        auto const leaf = manager.load_material("materials/fps/game_ready_world.ymat@tree_leaf");
+        require(leaf.alpha_cutoff > 0.44f && leaf.alpha_cutoff < 0.46f &&
+            !leaf.parameters.empty(), "Incorrect FPS material");
+        auto const info = northstarcpp::shared_assets::inspect_directory(root);
+        require(info.materials >= 7 && info.drawables >= 1 && info.textures >= 5 &&
+            info.scripts >= 7 && info.shaders >= 4 &&
+            info.resolved_materials >= 1 && info.resolved_textures >= 3,
+            "Shared asset inventory is incomplete");
+        try {
+            manager.request_texture("textures/skydome.ytd@missing").get();
+            throw std::logic_error("Missing texture selector was accepted");
+        } catch (std::runtime_error const& error) {
+            require(std::string(error.what()).find("Asset entry not found") != std::string::npos,
+                "Wrong missing-selector error");
+        }
+
+        manager.set_streaming_budget(0);
+        moon_request = {};
+        require(manager.streaming_stats().resident == 2, "A live decoded handle must pin its resource");
+        moon_resource.reset();
+        require(manager.streaming_stats().resident == 1, "An unpinned texture was not evicted");
+
+        auto zones = northstarcpp::parse_asset_zones(R"({
+            "version":1,"zones":[
+                {"min":[0,0,0],"max":[10,10,10],"drawables":["models/skydome.ydd@skydome_high"]},
+                {"min":[5,0,0],"max":[20,10,10],"drawables":["models/skydome.ydd@skydome_high"]}
+            ]})");
+        northstarcpp::AssetZones streamer(manager, std::move(zones), 10.f);
+        streamer.update({-5.f, 0.f, 0.f});
+        require(streamer.find(sky_ref).get() == sky_resource, "Zone prefetch did not reuse loaded resources");
+        streamer.update({12.f, 0.f, 0.f});
+        require(streamer.find(sky_ref).get() == sky_resource, "Overlapping zones duplicated the resource");
+        streamer.update({100.f, 0.f, 0.f});
+        require(!streamer.find(sky_ref), "Exited zone did not release its request");
+
+        manager.mount_directory("test-overlay", root);
+        require(first.stale() && sky_resource->drawable.name == "skydome_high",
+            "Mount changes must invalidate cache without breaking existing handles");
+        auto refreshed = manager.request_drawable_resources(sky_ref);
+        require(!refreshed.stale() && refreshed.get() != sky_resource,
+            "A new VFS mount reused a stale resource");
+    } catch (std::exception const& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

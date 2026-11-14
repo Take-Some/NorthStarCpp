@@ -1,0 +1,39 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 05.03.2010
+//	Author		: 
+//	Copyright (C) Kayla's Systems - 2010
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#ifndef DISABLE_GROUP_NODES_H_INCLUDED
+#define DISABLE_GROUP_NODES_H_INCLUDED
+
+#include "particle_hypergraph.h"
+#include "particle_graph_node.h"
+
+namespace northstarcpp {
+	namespace editor {
+		namespace particle_graph_commands{
+
+			ref class controls::hypergraph::node;
+
+			public ref class disable_group_nodes : public northstarcpp::editor_base::command
+			{
+				typedef System::Collections::Generic::List<controls::hypergraph::node^ > nodes;
+			public:
+				disable_group_nodes	(particle_hypergraph^ h, nodes^ selected_nodes);
+				virtual						~disable_group_nodes	()					{};
+
+				virtual bool				commit				() override;
+				virtual void				rollback			() override;
+
+			private:
+				particle_hypergraph^		m_hypergraph;
+				nodes^						m_selected_nodes;				
+			}; // class add_group
+
+} //namespace particle_graph_commands
+} // namespace editor
+} // namespace northstarcpp
+
+#endif // #ifndef DISABLE_GROUP_NODES_H_INCLUDED

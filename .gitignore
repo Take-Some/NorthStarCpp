@@ -1,0 +1,10 @@
+out/
+__pycache__/
+*.bak-*
+
+# NorthStarCpp development logs
+.northstarcpp/
+
+# Reproducible release artifacts
+dist/
+distributable/
