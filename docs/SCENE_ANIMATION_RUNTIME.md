@@ -7,9 +7,9 @@ Copyright (c) 2026 Kayla's Systems — Kayla Verner.
 
 The active C++17 engine now includes a **scene-transform clip** module with
 project-authored animation resources. It is not the historical relocated
-animation system under `modules/foundation/.../compat/animation`.
+animation system under `modules/core/.../compat/animation`.
 
-- Public SDK: `include/northstarcpp/scene_animation.hpp`
+- Public SDK: `sdk/include/northstarcpp/scene_animation.hpp`
 - CPU sampling/playback: `modules/host/scene_animation.cpp`
 - AssetManager bridge: `modules/host/scene_animation_assets.cpp`
 - Player/Editor script bridge: `modules/editor/window.cpp`
@@ -58,7 +58,7 @@ The translation and rotation vectors are **additive offsets** to the entity's
 transform when playback begins; scale is component-wise multiplied. Each clip
 requires 2..8192 strictly increasing keyframes starting at 0 seconds, is
 limited to a duration of 3600 seconds and source size of 1 MiB.
-Interpolation is `linear` or `step` and sampling clamps at the endpoints.
+Interpolation supports `linear` (the default), `step`, and `fermi-dirac`. The Fermi-Dirac curve eases each keyframe interval using the engine animation transition. Sampling clamps at the clip endpoints.
 
 ### Project scripting API
 
@@ -134,3 +134,27 @@ This module is the first production-oriented **scene animation** layer;
 it is not a full character animation pipeline. Full animation requires
 imported skeletons, skinning, retargeting, blend spaces, state machines,
 root motion, collision synchronisation, GPU skinning and animation editing.
+
+
+## First-class camera track and timeline integration (2026-11-14)
+
+Camera spline evaluation, serialization and replay recording reside in
+engine/northstarcpp/modules/animation/camera_track.cpp, compiled into the
+first-class northstarcpp_animation library. The Asset Manager adapter stays
+in engine/northstarcpp/modules/host/camera_track_assets.cpp; no duplicate
+CameraTrack implementation is linked.
+
+The standalone Qt Camera Timeline Editor uses the shared engine QPC
+northstarcpp::timing::FrameClock instead of its private Qt elapsed clock.
+The animation library is shared by Player and Editor.
+
+The engine.* provider policy is defined in docs/ARCHITECTURE.md:
+an explicitly selected author DLL/SO takes precedence, then a compatible
+automatically discovered external provider, then the native builtin. An
+invalid explicit provider is a reported configuration error; silently
+ignoring it would hide the author's intent.
+
+Verification (Windows Release): Camera Timeline Editor and Player/Qt Editor
+linked; five focused CTest cases passed, including geometry external override
+and scene-animation playback. Linux SO discovery exists in the loader but
+has not been verified in this Windows QA run.

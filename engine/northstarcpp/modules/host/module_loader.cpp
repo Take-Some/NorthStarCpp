@@ -203,7 +203,8 @@ std::vector<fs::path> external_candidates(fs::path const& directory)
 
 } // namespace
 
-Module::Module(std::string capability) : capability_id(std::move(capability))
+Module::Module(std::string capability, std::string preferred_provider)
+    : capability_id(std::move(capability)), preferred_provider_id(lowercase(std::move(preferred_provider)))
 {
     constexpr std::string_view prefix = "engine.";
     if (capability_id.compare(0, prefix.size(), prefix) != 0 ||
@@ -281,7 +282,13 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
     auto const preferred = !script && capability_id == NORTHSTARCPP_CAPABILITY_PHYSICS
         ? lowercase(environment_path("NORTHSTARCPP_PHYSICS_PROVIDER").u8string()) : std::string{};
     auto accepts = [&](NorthStarModule const* module) {
-        return module && (preferred.empty() || lowercase(module->provider) == preferred);
+        if (!module || (!preferred.empty() && lowercase(module->provider) != preferred))
+            return false;
+        if (preferred_provider_id.empty()) return true;
+        auto const name = lowercase(module->provider);
+        return name == preferred_provider_id ||
+            (preferred_provider_id == "d3d11" && name == "direct3d 11") ||
+            (preferred_provider_id == "d3d12" && name == "direct3d 12");
     };
     for (auto const& candidate : external_candidates(directory)) {
         std::unique_ptr<void, CloseModule> library(load_module(candidate));
@@ -334,5 +341,12 @@ std::runtime_error Module::error(char const* action) const
 
 std::string Module::provider() const { return descriptor ? descriptor->provider : ""; }
 std::string Module::version() const { return descriptor ? descriptor->version : ""; }
+
+std::string Module::source() const {
+    return !descriptor ? std::string{} : (path.empty() ? "builtin" : path.u8string());
+}
+bool Module::is_external() const noexcept {
+    return descriptor && handle != nullptr;
+}
 
 } // namespace northstarcpp

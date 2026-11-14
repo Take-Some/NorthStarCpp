@@ -14,7 +14,7 @@ In the editor, **Mass (kg)** controls rigid-body behavior. A mass of 0 fixes the
 
 Version 2 of the `.nscene` format stores mass as the final number on each `cube` line. Version 1 scenes load with a default mass of 1 kg for the player and 0 kg for other objects. Newly saved scenes use version 2.
 
-The C++ runtime exposes `northstarcpp::PhysicsScene` from `<northstarcpp/physics.hpp>`. Rigid-body simulation uses a fixed 120 Hz timestep. The build includes `BulletDynamics`, `BulletCollision`, and `LinearMath` sources under `external/sdk/sources/bullet-3.25`. The source tag is `3.25` at commit `2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5`. Its license is at `external/sdk/sources/bullet-3.25/LICENSE.txt`.
+The C++ runtime exposes `northstarcpp::PhysicsScene` from `<northstarcpp/physics.hpp>`. Rigid-body simulation uses a fixed 120 Hz timestep. The build includes `BulletDynamics`, `BulletCollision`, and `LinearMath` sources under `sdk/vendor/sources/bullet-3.25`. The source tag is `3.25` at commit `2c204c49e56ed15ec5fcfa71d199ab6d6570b3f5`. Its license is at `sdk/vendor/sources/bullet-3.25/LICENSE.txt`.
 
 ## Command line
 

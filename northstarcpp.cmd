@@ -8,5 +8,5 @@ python -B -m tools.dev.cli %*
 exit /b %ERRORLEVEL%
 
 :browser
-call "%~dp0tools\dev\start.cmd"
+call "%~dp0tools\dev\start.cmd" %2
 exit /b %ERRORLEVEL%

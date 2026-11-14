@@ -46,6 +46,10 @@ int main(int argc,char** argv) {
         auto source=fs::path(argv[2]);
         fs::create_directories(root/"Assets"/"RealTextures");
         fs::create_directories(root/"Assets"/"RealModels");
+        fs::create_directories(root/"Assets"/"RealMaterials");
+        fs::copy_file(source/"materials/skydome.ymat",
+            root/"Assets/RealMaterials/skydome.ymat",
+            fs::copy_options::overwrite_existing);
         fs::copy_file(source/"textures/skydome.ytd",
             root/"Assets/RealTextures/skydome.ytd",
             fs::copy_options::overwrite_existing);
@@ -55,11 +59,14 @@ int main(int argc,char** argv) {
         catalog.scan(root/"Assets");
         auto const* ytd=catalog.find("RealTextures/skydome.ytd");
         auto const* ydd=catalog.find("RealModels/skydome.ydd");
+        auto const* ymat=catalog.find("RealMaterials/skydome.ymat");
         check(ytd && ytd->directory && ytd->is_list_file(),
               "Valid YTD must be a virtual directory");
         check(ydd && ydd->directory && ydd->is_list_file(),
               "Valid YDD must be a virtual directory");
-        std::size_t ytd_children=0,ydd_children=0;
+        check(ymat && ymat->directory && ymat->is_list_file(),
+              "Valid YMAT must be a virtual directory");
+        std::size_t ytd_children=0,ydd_children=0,ymat_children=0;
         for(auto const& record:catalog.entries()) {
             if(!record.is_virtual_entry())continue;
             if(record.container_path=="RealTextures/skydome.ytd") {
@@ -75,6 +82,14 @@ int main(int argc,char** argv) {
                 check(record.kind==AssetKind::mesh,
                       "YDD virtual child kind should be mesh");
             }
+            if(record.container_path=="RealMaterials/skydome.ymat") {
+                ++ymat_children;
+                check(record.kind==AssetKind::material,
+                      "YMAT virtual child must be material");
+                check(catalog.asset_reference(record.virtual_path)==
+                      record.container_path+"@"+record.entry_name,
+                      "YMAT material identity must be preserved");
+            }
             bool rejected=false;
             try {(void)catalog.resolve(record.virtual_path);}
             catch(std::invalid_argument const&){rejected=true;}
@@ -84,8 +99,9 @@ int main(int argc,char** argv) {
         }
         check(ytd_children==5,"All five skydome YTD entries must be visible");
         check(ydd_children==1,"Skydome YDD drawable must be visible");
-        check(catalog.entries().size()==15,
-              "Catalog must include two ListFile folders and six child entries");
+        check(ymat_children==3,"All three skydome YMAT materials must be visible");
+        check(catalog.entries().size()==20,
+              "Catalog must include all YDD, YTD and YMAT virtual folders and children");
         std::cout<<"Cross-platform asset catalog: PASS\n";
         return 0;
     } catch(std::exception const& e) {

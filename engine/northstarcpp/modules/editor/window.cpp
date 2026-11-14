@@ -26,6 +26,8 @@
 #include <northstarcpp/save_game.hpp>
 #include <fstream>
 #include <northstarcpp/scene_animation.hpp>
+#include <northstarcpp/frame_clock.hpp>
+#include <northstarcpp/provider_inspector.hpp>
 #include <northstarcpp/perlin.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
@@ -149,10 +151,12 @@ struct Options {
     bool warp = false;
     bool smoke = false;
     bool check_scene = false;
+    bool runtime_init_smoke = false;
     bool fps = false;
     bool explore = false;
     bool fps_ui_smoke = false;
     bool packaged_game = false;
+    bool inspect_providers = false;
 };
 
 Options options()
@@ -169,8 +173,12 @@ Options options()
             result.warp = true;
         else if (arg == L"--smoke")
             result.smoke = true;
+        else if (arg == L"--inspect-providers")
+            result.inspect_providers = true;
         else if (arg == L"--check-scene")
             result.check_scene = true;
+        else if (arg == L"--runtime-init-smoke")
+            result.runtime_init_smoke = true;
         else if (arg == L"--shared-assets" && i + 1 < count)
             result.shared_asset_root = args[++i];
         else if (arg == L"--asset-zones" && i + 1 < count)
@@ -201,13 +209,16 @@ Options options()
             result.smoke_output = args[++i];
         else
             throw std::runtime_error("Usage: --scene FILE, or --archive FILE [--archive-data FILE] --scene VIRTUAL_PATH. "
-                "Options: --warp, --smoke, --check-scene, --fps, --explore, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
+                "Options: --inspect-providers, --warp, --smoke, --check-scene, --fps, --explore, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
     }
     if ((!result.archive_path.empty() && result.scene_path.empty()) ||
         (!result.archive_data.empty() && result.archive_path.empty()))
         throw std::runtime_error("Use --archive FILE [--archive-data FILE] --scene VIRTUAL_PATH");
     if (result.check_scene && (editor || result.smoke || result.scene_path.empty()))
         throw std::runtime_error("--check-scene requires a player and --scene FILE");
+    if (result.runtime_init_smoke && (editor || result.smoke ||
+        result.check_scene || result.scene_path.empty()))
+        throw std::runtime_error("--runtime-init-smoke requires a player and --scene FILE");
     if (result.fps && editor)
         throw std::runtime_error("FPS mode is available in the standalone player");
     if (result.fps_ui_smoke && (!result.fps || result.scene_path.empty() || editor))
@@ -215,6 +226,17 @@ Options options()
     if (editor && result.smoke && result.smoke_output.empty())
         throw std::runtime_error("Editor smoke requires --smoke-output FILE");
     return result;
+}
+
+// Two existing paths may differ lexically yet resolve to the same assets
+// directory (relative paths, Windows case, junctions or symlinks). The VFS
+// deliberately rejects duplicate mounts, so game systems must avoid them
+// when an explicit --shared-assets root equals project/assets.
+bool same_asset_directory(fs::path const& a,fs::path const& b) {
+    if(a.empty() || b.empty())return false;
+    std::error_code ec;
+    bool same=fs::equivalent(a,b,ec);
+    return !ec && same;
 }
 
 Scene read_document(fs::path const& path)
@@ -890,10 +912,13 @@ private:
                 }
             }
         }
-        if (!root.empty())
+        auto const project = (!file_path.empty() && config.archive_path.empty())
+            ? fs::absolute(file_path).parent_path() / "assets" : fs::path{};
+        // The project root wins if both configuration slots alias the
+        // same directory. Mount once, not at two different priorities.
+        if (!root.empty() && !same_asset_directory(root,project))
             zone_assets->mount_shared_assets(root);
-        if (!file_path.empty() && config.archive_path.empty()) {
-            auto const project = fs::absolute(file_path).parent_path() / "assets";
+        if (!project.empty()) {
             if (fs::is_directory(project))
                 zone_assets->mount_directory("", project);
         } else if (!config.archive_path.empty()) {
@@ -978,6 +1003,7 @@ private:
         scene_asset_source.clear();
         auto store = std::make_unique<AssetManager>();
         bool mounted=false;
+        fs::path mounted_project;
 
         if (!config.archive_path.empty()) {
             store->mount_archive("",config.archive_path,
@@ -987,6 +1013,7 @@ private:
             auto const project = source.parent_path() / "assets";
             if (fs::is_directory(project)) {
                 store->mount_directory("",project);
+                mounted_project=project;
                 mounted=true;
             }
         }
@@ -1002,7 +1029,8 @@ private:
                 parent=next;
             }
         }
-        if (!common.empty() && fs::is_directory(common)) {
+        if (!common.empty() && fs::is_directory(common) &&
+            !same_asset_directory(common,mounted_project)) {
             store->mount_shared_assets(common);
             mounted=true;
         }
@@ -1241,7 +1269,7 @@ private:
             SetFocus(window);
             if (!show) capture_fps_cursor();
         }
-        frame_time = Clock::now();
+        frame_clock.start();
         update_fps_title();
     }
 
@@ -2611,7 +2639,7 @@ private:
                 if (!config.smoke)
                     play_start_sound();
             }
-            frame_time = Clock::now();
+            frame_clock.start();
             SetFocus(window);
             refresh();
             return;
@@ -3572,9 +3600,7 @@ private:
 
     void frame()
     {
-        auto const now = Clock::now();
-        float seconds = std::chrono::duration<float>(now - frame_time).count();
-        frame_time = now;
+        float seconds = static_cast<float>(frame_clock.restart_seconds());
         if (fps || scripted_first_person) seconds = std::clamp(seconds, 0.f, 0.05f);
         auto const state = input->poll();
         script_mouse_dx=state.mouse_dx;
@@ -3928,7 +3954,11 @@ private:
     NsEntity selected = 0;
     int exit_status = 0;
     bool dirty = false;
-    Clock::time_point frame_time = Clock::now();
+    timing::FrameClock frame_clock = [] {
+        timing::FrameClock clock;
+        clock.start();
+        return clock;
+    }();
 };
 
 } // namespace
@@ -3943,7 +3973,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
     try {
         auto settings = northstarcpp::options();
         arguments_parsed = true;
-        smoke = settings.smoke || settings.check_scene || settings.fps_ui_smoke || settings.check_shared_assets;
+        smoke = settings.smoke || settings.check_scene || settings.runtime_init_smoke ||
+                settings.fps_ui_smoke || settings.check_shared_assets ||
+                settings.inspect_providers;
         // Test/validation runs should not create logs in the user's profile.
         if (!smoke || northstarcpp::application_log_directory_overridden()) {
             try {
@@ -3959,6 +3991,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
                 std::fprintf(stderr, "Logger initialization: %s\n", error.what());
                 OutputDebugStringA(error.what());
             }
+        }
+        if (settings.inspect_providers) {
+            // Same ABI negotiation and provider precedence as the Qt Editor
+            // inspector. This mode never opens a window or creates a GPU device.
+            std::puts("Capability\tRequested\tProvider\tVersion\tABI\tSource\tStatus");
+            for (auto const& provider:northstarcpp::inspect_engine_providers()) {
+                std::printf("%s\t%s\t%s\t%s\t%u\t%s\t%s\n",
+                    provider.capability.c_str(),provider.requested_provider.c_str(),
+                    provider.provider.c_str(),provider.version.c_str(),
+                    provider.api_abi,provider.source.c_str(),
+                    provider.available?"OK":provider.error.c_str());
+            }
+            return 0;
         }
         if (settings.check_shared_assets) {
             auto const assets = northstarcpp::shared_assets::inspect_directory(settings.shared_asset_root);
@@ -3994,6 +4039,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
             return 0;
         }
 #endif
+        if(settings.runtime_init_smoke) {
+            // Exercise the REAL Player startup pipeline: physics, scene-v3
+            // streaming mounts, zones and scripts. Unlike --check-scene,
+            // this runs the App constructor but opens no window.
+            northstarcpp::App initialized(std::move(settings));
+            std::puts("Player runtime asset initialization: PASS");
+            return 0;
+        }
         int const result = northstarcpp::App(std::move(settings)).run(instance);
         if (process_logger) {
             try {

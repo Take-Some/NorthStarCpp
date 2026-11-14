@@ -12,13 +12,17 @@
 #include <northstarcpp/procedural_environment.hpp>
 #include <northstarcpp/render_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
+#include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/mesh_asset.hpp>
+#include <northstarcpp/geometry_scene.hpp>
+#include <northstarcpp/geometry_service.hpp>
 #include <northstarcpp/assets.hpp>
 #include "module_loader.hpp"
 
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -28,35 +32,83 @@ namespace northstarcpp {
 
 struct Viewport::State {
     State(HWND window, bool software)
+        : window_handle(window), software_renderer(software)
     {
-        renderer = api.create(window, software ? 1u : 0u);
-        if (!renderer)
-            throw module.error("Cannot create viewport");
-        triangle_api = module.query_extension<NorthStarRenderTrianglesApi>(
+        // Explicit path overrides are still resolved by Module; only the
+        // automatic default is retried with D3D11.
+        for (auto const* backend : {"d3d12", "d3d11"}) {
+            try {
+                auto candidate = std::make_unique<Module>(
+                    NORTHSTARCPP_CAPABILITY_RENDER, backend);
+                auto const* candidate_api =
+                    candidate->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
+                void* instance=candidate_api->create(window, software ? 1u : 0u);
+                if (!instance) throw candidate->error("Cannot create viewport");
+                module=std::move(candidate);
+                api=candidate_api;
+                renderer=instance;
+                break;
+            } catch (std::exception const&) {
+                if (std::string(backend)=="d3d11") throw;
+            }
+        }
+        triangle_api = module->query_extension<NorthStarRenderTrianglesApi>(
             NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI);
         if (!triangle_api) {
-            auto const query = module.symbol<NorthStarRenderGetTrianglesApi>(
+            auto const query = module->symbol<NorthStarRenderGetTrianglesApi>(
                 "northstar_render_get_triangles_api");
             auto const* candidate = query ? query(NORTHSTARCPP_RENDER_TRIANGLES_ABI) : nullptr;
             if (candidate && valid_api(*candidate))
                 triangle_api = candidate;
         }
+        surface_api=module->query_extension<NorthStarRenderSurfacesApi>(
+            NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI);
         try {
             cubes.reserve(max_scene_objects);
+            surface_ids.reserve(max_scene_objects);
         } catch (...) {
-            api.destroy(renderer);
+            api->destroy(renderer);
             throw;
         }
     }
 
-    ~State() { api.destroy(renderer); }
+    ~State() { if (renderer) api->destroy(renderer); }
 
-    Module module{NORTHSTARCPP_CAPABILITY_RENDER};
-    NorthStarRenderApi const& api = *module.query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
+    void fallback_to_d3d11() {
+        if (module && module->provider()!="d3d12") return;
+        auto next_module=std::make_unique<Module>(NORTHSTARCPP_CAPABILITY_RENDER,"d3d11");
+        auto next_api=next_module->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
+        // DXGI only permits one active flip-model swapchain per HWND.
+        // Release the D3D12 swapchain before creating the replacement.
+        if(renderer)api->destroy(renderer);
+        renderer=nullptr;
+        auto next_renderer=next_api->create(window_handle,software_renderer?1u:0u);
+        if(!next_renderer)throw next_module->error("Cannot initialize D3D11 fallback");
+        renderer=next_renderer;api=next_api;module=std::move(next_module);
+        triangle_api=module->query_extension<NorthStarRenderTrianglesApi>(
+            NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI);
+        if(!triangle_api) {
+            auto query=module->symbol<NorthStarRenderGetTrianglesApi>(
+                "northstar_render_get_triangles_api");
+            auto candidate=query?query(NORTHSTARCPP_RENDER_TRIANGLES_ABI):nullptr;
+            if(candidate&&valid_api(*candidate))triangle_api=candidate;
+        }
+        surface_api=module->query_extension<NorthStarRenderSurfacesApi>(
+            NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI);
+    }
+    HWND window_handle=nullptr;
+    bool software_renderer=false;
+    std::unique_ptr<Module> module;
+    NorthStarRenderApi const* api = nullptr;
     std::vector<NorthStarRenderCube> cubes;
+    std::vector<std::uint32_t> surface_ids;
+    NorthStarRenderSurfacesApi const* surface_api = nullptr;
+    bool world_surfaces_ready = false;
     std::unique_ptr<AssetStore> project_assets;
     std::filesystem::path source_project_root;
     std::unordered_map<std::string,MeshAsset> cached_meshes;
+    std::unordered_map<std::string,GeometryData> cached_geometry;
+    std::unique_ptr<GeometryService> geometry_service;
     std::vector<NorthStarRenderTriangleVertex> mesh_vertices;
     NorthStarRenderTrianglesApi const* triangle_api = nullptr;
     void* renderer = nullptr;
@@ -79,6 +131,58 @@ void Viewport::set_asset_sources(std::filesystem::path const& root,
         std::filesystem::path{};
     state->cached_meshes.clear();
     state->mesh_vertices.clear();
+    state->world_surfaces_ready=false;
+    // Optional authored terrain dictionary normalized from original YTD.
+    // Original malformed bytes remain unchanged.
+    constexpr char dictionary[]="assets/textures/world_surfaces_runtime.ytd";
+    bool available=false;
+    try {available=state->project_assets->size(dictionary)>0;}
+    catch(std::exception const&) {available=false;}
+    if(available) {
+        // D3D12 providers without the extension select the current D3D11
+        // backend, rather than silently rendering an untextured surface.
+        if(!state->surface_api && state->module->provider()=="d3d12")
+            state->fallback_to_d3d11();
+        if(!state->surface_api)
+            throw std::runtime_error(
+                "Selected engine.render provider lacks world-surface extension");
+        auto const textures=shared_assets::load_textures(*state->project_assets,
+                                                           dictionary);
+        static constexpr char const* names[9]{
+            "ground_sand","ground_sand_normal","ground_sand_roughness",
+            "rock_moss","rock_moss_normal","rock_moss_roughness",
+            "terrain_forest_floor","terrain_forest_floor_normal",
+            "terrain_forest_floor_roughness"};
+        if(textures.size()!=9)
+            throw std::runtime_error("Expected 9 original world surface maps");
+        for(std::uint32_t i=0;i<9;++i) {
+            auto it=std::find_if(textures.begin(),textures.end(),
+                [&](auto const& texture){return texture.name==names[i];});
+            if(it==textures.end() || it->mips.empty() ||
+                it->format_id!=(i%3==0?102:105) ||
+                it->srgb!=(i%3==0))
+                throw std::runtime_error("World surface texture format/name mismatch");
+            std::vector<NorthStarSurfaceMip> mips;
+            mips.reserve(it->mips.size());
+            for(auto const& mip:it->mips) {
+                if(mip.offset>UINT32_MAX || mip.size>UINT32_MAX)
+                    throw std::runtime_error("World surface mip exceeds GPU ABI");
+                mips.push_back({mip.width,mip.height,
+                    static_cast<std::uint32_t>(mip.offset),
+                    static_cast<std::uint32_t>(mip.size)});
+            }
+            if(it->data.size()>UINT32_MAX)
+                throw std::runtime_error("World surface texture exceeds GPU ABI");
+            NorthStarSurfaceTexture texture{
+                i,it->format_id,it->srgb?1u:0u,
+                static_cast<std::uint32_t>(mips.size()),
+                mips.data(),it->data.data(),
+                static_cast<std::uint32_t>(it->data.size())};
+            if(!state->surface_api->set_texture(state->renderer,&texture))
+                throw state->module->error("GPU world texture upload failed");
+        }
+        state->world_surfaces_ready=true;
+    }
 }
 
 
@@ -131,10 +235,36 @@ void Viewport::set_sky(shared_assets::DrawableResources const& resources)
         mesh.indices.data(), static_cast<std::uint32_t>(mesh.indices.size()),
         pixels, width, height,
         tint[0],tint[1],tint[2]};
-    if (!state->api.set_sky(state->renderer, &sky))
-        throw state->module.error("Cannot initialize texture-mapped skydome");
+    if (!state->api->set_sky(state->renderer, &sky)) {
+        if(state->module->provider()!="d3d12")
+            throw state->module->error("Cannot initialize texture-mapped skydome");
+        state->fallback_to_d3d11();
+        if(!state->api->set_sky(state->renderer,&sky))
+            throw state->module->error("Cannot initialize D3D11 skydome fallback");
+    }
 }
 
+
+// Optional per-entity authoring component uses one of the native YTD
+// albedo entry names. Unspecified map proxies derive their surface from
+// existing scene layer/actor names without changing collision or transforms.
+static std::uint32_t world_surface_category(std::string name) {
+    std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if(name=="rock_moss" || name.find("rock")!=std::string::npos ||
+       name.find("cliff")!=std::string::npos ||
+       name.find("perimeter")!=std::string::npos)return 2;
+    if(name=="terrain_forest_floor" ||
+       name.find("forest")!=std::string::npos ||
+       name.find("grass")!=std::string::npos)return 3;
+    if(name=="ground_sand" || name.find("sand")!=std::string::npos ||
+       name.find("terrain")!=std::string::npos ||
+       name.find("ground")!=std::string::npos ||
+       name.find("deck")!=std::string::npos ||
+       name.find("platform")!=std::string::npos)return 1;
+    return 0;
+}
 
 void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, PhysicsScene const* physics,
                     FpsArena const* fps, bool paused, CameraPose const* camera_pose,
@@ -143,8 +273,33 @@ void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, Physic
 {
     auto& cubes = state->cubes;
     cubes.clear();
+    auto& surface_ids = state->surface_ids;
+    surface_ids.clear();
+    std::unordered_map<std::uint64_t,std::uint32_t> surface_overrides;
+    if(state->world_surfaces_ready) {
+        for(auto const& component:scene.components) {
+            if(component.type=="engine.world.surface" &&
+               component.version==1 && component.entity_id!=0 &&
+               component.payload.size()<=48) {
+                std::string const name(component.payload.begin(),
+                                       component.payload.end());
+                // Plugin authoring uses exact dictionary entry names.
+                // Keep heuristic name matching only for legacy scene actors.
+                auto const id=name=="ground_sand"?1u:
+                    name=="rock_moss"?2u:
+                    name=="terrain_forest_floor"?3u:0u;
+                if(id)surface_overrides[component.entity_id]=id;
+            }
+        }
+    }
     auto& mesh_vertices=state->mesh_vertices;
     mesh_vertices.clear();
+    // Components are serialized by stable authored ID. This lookup is
+    // shared by both the Qt GPU Editor and Player frame composition.
+    std::unordered_map<std::uint64_t,SceneComponentBlob const*> procedural;
+    for(auto const& component:scene.components)
+        if(component.type==geometry_primitive_component && component.entity_id)
+            procedural.emplace(component.entity_id,&component);
     auto focus = Vector3(0.f, 0.f, 0.f);
     int selected_render_index = -1;
     bool const streaming = scene_world && scene_world->update_generation() > 0 &&
@@ -212,8 +367,52 @@ void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, Physic
                 for (unsigned column = 0; column != 3; ++column)
                     cube.rotation[row * 3 + column] *= scale[column];
         }
-        // The optional geometry ABI lets scene assets render as actual meshes.
-        // Existing renderer providers keep the previous primitive-cube fallback.
+        // First-party foundation geometry, authored from the active Qt
+        // Editor palette. The GPU triangle stream is shared with game runtime
+        // and remains behind WorldPartition's verified visibility check.
+        auto const native_shape=procedural.find(object.node.id);
+        if(state->triangle_api && native_shape!=procedural.end() &&
+           object.node.asset.empty()) {
+            auto const& component=*native_shape->second;
+            auto found=state->cached_geometry.find(component.payload);
+            if(found==state->cached_geometry.end()) {
+                NorthStarGeometryRequest request{};
+                if(!decode_geometry_primitive_component(component,request))
+                    throw std::runtime_error("Unsupported engine.geometry component");
+                if(!state->geometry_service)
+                    state->geometry_service=std::make_unique<GeometryService>();
+                if(state->cached_geometry.size()>=128)
+                    state->cached_geometry.clear();
+                auto geometry=state->geometry_service->generate(request);
+                found=state->cached_geometry.emplace(component.payload,
+                                                       std::move(geometry)).first;
+            }
+            auto const& geometry=found->second;
+            if(geometry.indices.size()%3!=0 ||
+               mesh_vertices.size()+geometry.indices.size()>300000)
+                throw std::runtime_error("Scene procedural geometry triangle budget exceeded");
+            std::uint32_t const color=static_cast<int>(i)==selected ?
+                0xffd474u : object.color;
+            for(auto const vertex:geometry.indices) {
+                auto const offset=static_cast<std::size_t>(vertex)*3u;
+                float const x=geometry.xyz[offset]*object.size;
+                float const y=geometry.xyz[offset+1u]*object.size;
+                float const z=geometry.xyz[offset+2u]*object.size;
+                mesh_vertices.push_back({
+                    object.position.x+cube.rotation[0]*x+cube.rotation[1]*y+
+                        cube.rotation[2]*z,
+                    object.position.y+cube.rotation[3]*x+cube.rotation[4]*y+
+                        cube.rotation[5]*z,
+                    object.position.z+cube.rotation[6]*x+cube.rotation[7]*y+
+                        cube.rotation[8]*z,
+                    color});
+            }
+            if(static_cast<int>(i)==selected || (selected==-2 && object.player))
+                focus=position;
+            continue;
+        }
+        // Authored OBJ assets retain the existing mesh path.
+        // A provider without the triangle extension falls back to cubes.
         if (state->triangle_api && state->project_assets &&
             object.node.asset.rfind("assets/models/",0)==0 &&
             object.node.asset.size()>4 &&
@@ -259,6 +458,14 @@ void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, Physic
             focus = position;
         } else if (selected == -2 && object.player) {
             focus = position;
+        }
+        if(state->world_surfaces_ready) {
+            auto const over=surface_overrides.find(object.node.id);
+            auto const id=over!=surface_overrides.end()?over->second:
+                world_surface_category(object.node.layer.empty()?object.name:
+                    object.node.layer+" "+object.name);
+            surface_ids.push_back(id);
+            if(id)cube.rgb=0xffffffu; // preserve source surface albedo
         }
         cubes.push_back(cube);
     }
@@ -421,13 +628,26 @@ void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, Physic
         camera_pose ? camera_pose->near_plane : 0.1f,
         camera_pose ? camera_pose->far_plane :
             (scene.version>=3 ? 1500.f : 250.f)};
-    if (state->triangle_api &&
-        !state->triangle_api->set_triangles(state->renderer,
-            mesh_vertices.empty()?nullptr:mesh_vertices.data(),
-            static_cast<std::uint32_t>(mesh_vertices.size())))
-        throw state->module.error("Cannot submit scene mesh triangles");
-    if (!state->api.draw(state->renderer, &frame))
-        throw state->module.error("Cannot render frame");
+    auto submit=[&] {
+        if(state->surface_api && state->world_surfaces_ready) {
+            surface_ids.resize(cubes.size(),0u); // debug/HLOD/gizmo neutral
+            if(!state->surface_api->set_cube_surfaces(state->renderer,
+                surface_ids.data(),static_cast<std::uint32_t>(surface_ids.size())))
+                throw state->module->error("Cannot submit world surface selectors");
+        }
+        if(state->triangle_api &&
+           !state->triangle_api->set_triangles(state->renderer,
+               mesh_vertices.empty()?nullptr:mesh_vertices.data(),
+               static_cast<std::uint32_t>(mesh_vertices.size())))
+            throw state->module->error("Cannot submit scene mesh triangles");
+        return state->api->draw(state->renderer,&frame)!=0;
+    };
+    if(!submit()) {
+        if(state->module->provider()!="d3d12")
+            throw state->module->error("Cannot render frame");
+        state->fallback_to_d3d11();
+        if(!submit())throw state->module->error("Cannot render frame after D3D12 fallback");
+    }
 }
 
 } // namespace northstarcpp

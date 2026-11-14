@@ -1,79 +1,87 @@
-# NorthStarCpp — Source Layout
+# NorthStarCpp — Canonical Source Layout
 
-**Reorganized:** November 13, 2026  
-**Rule:** `engine/northstarcpp/` contains only `CMakeLists.txt` and the unified `modules/` directory. Vendored sources and archives belong elsewhere.
+Updated: 2026-11-14
 
-## Repository root
+Refer to ARCHITECTURE.md for the directory contract, dependency direction
+and extension rules. The machine-readable owner/target catalog is
+architecture/module_catalog.json.
 
-| Path | Purpose |
-| --- | --- |
-| `northstarcpp.cmd` | Opens the native Win32/C++ Project Manager without arguments; accepts CLI commands with arguments |
-| `CMakeLists.txt` | Main CMake entry point |
-| `engine/northstarcpp/modules/` | Host, editor, and provider sources |
-| `include/northstarcpp/` | Public C/C++ headers |
-| `external/` | Third-party dependencies and compatibility layer |
-| `tools/` | Python utilities; launcher in `tools/dev/` and CMake helpers in `tools/cmake/` |
-| `config/`, `docs/`, `examples/`, `tests/` | Configuration, documentation, samples, and tests |
-| `Projects/` | User projects |
-| `out/`, `distributable/`, `dist/` | Build outputs and distributable packages |
+- First-party source: engine/northstarcpp/modules/
+- First-party resources: engine/northstarcpp/resources/
+- Public SDK: engine/northstarcpp/modules/api/include/northstarcpp/
+- Third-party SDK and libraries: sdk/vendor/
+- Build and release automation: tools/
+- Validation and regression: tests/
+- Projects and game assets: Projects/ and sharedAssets/
+- Generated objects: out/; release packages: dist/
 
-## Module tree
+All source-root variables used by CMake are declared in
+tools/cmake/NorthStarPaths.cmake. The provider registry is implemented in
+tools/cmake/NorthStarModules.cmake.
 
-```text
-engine/
-└── northstarcpp/
-    ├── CMakeLists.txt                # Module build and registration
-    └── modules/
-        ├── host/                     # Core, loader, VFS/scenes, subsystem host
-        ├── editor/                   # Editor and player entry point
-        ├── viewport/                 # Scene viewing and rendering integration
-        ├── shared/                   # Shared provider implementation code
-        ├── ecs/flecs/                # Flecs through ECS API v2
-        ├── physics/bullet/           # Bullet Physics
-        ├── physics/jolt/             # Jolt Physics
-        ├── audio/winmm/              # WinMM audio
-        ├── render/d3d11/            # Direct3D 11
-        └── input/win32/             # Win32/XInput
-```
+Run:
 
-The public C/C++ SDK stays in `include/northstarcpp/` because these files define **public contracts**, not specific provider implementations. The host depends on capability APIs, not on concrete Flecs, Bullet, or WinMM implementations.
+    python tools/verify_architecture.py --json
+    cmake -S . -B out/layout-validation -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build out/layout-validation --parallel 4
+    ctest --test-dir out/layout-validation --output-on-failure
 
-## Third-party dependencies
+The historical tools/organize_engine_layout.py was a one-time migration utility
+for an older layout. Do NOT call --apply again. The current SDK migration has
+its own journal at .northstarcpp/migrations/sdk-layout-v2.json, and does not
+depend on the older journal being present.
 
-```text
-external/
-├── flecs/                  # Flecs ECS
-├── northstarcpp/compat/    # Compatibility layer
-└── sdk/                    # Bullet, Jolt, and other SDK dependencies
-    ├── include/
-    ├── libraries/
-    └── sources/
-```
 
-The compatibility layer was **relocated, not deleted**. CMake still builds math sources from `engine/northstarcpp/modules/foundation/northstarcpp/compat/core/sources` and installs the required SDK headers under the public `northstarcpp/compat/...` include paths.
+## Native foundation runtime integration (2026-11-14)
 
-## Archived files
+Original first-party engine source:
 
-Older IDE files (`NorthStarCpp.Source.sln/.suo`) and unused ECS duplicates are archived under `.northstarcpp/archive/engine-layout-2026-11-13/`. Previous configurations are in `.northstarcpp/backups/engine-layout-*/`; the move log is `.northstarcpp/migrations/engine-layout-v1.json`.
+    engine/northstarcpp/modules/core/northstarcpp/
 
-`tools/organize_engine_layout.py --verify` checks moved paths and archive checksums. It does not modify third-party library sources.
+This source tree is now owned by the engine. The previous
+northstarcpp/compat include prefix was migrated to
+northstarcpp/foundation. Do not reintroduce a separate compat tree.
 
-## Rules for new modules
+Directly compiled original translation units (no compatibility bridge):
 
-Put new implementations only under `engine/northstarcpp/modules/<capability>/<provider>/`. Register them through `northstarcpp_module(...)` and `tools/cmake/NorthStarModules.cmake`, rather than hardcoding DLL paths in the host.
+- northstarcpp_math contains 12 original math and geometry source units.
+- northstarcpp_core compiles the original geometry_utils.cpp,
+  strings_functions.cpp, buffer_string.cpp, fs_path.cpp, fs_path_win.cpp.
+- northstarcpp_runtime PUBLICLY links both libraries as first-party
+  runtime dependencies. The five core objects are really present in
+  libfoundation_core.a, not merely registered as header-only sources.
 
-Built DLLs go automatically to `out/gcc-debug/modules/<capability>/`; installed DLLs go to `bin/modules/<capability>/`.
+SDK packaging:
 
-Do not duplicate plugins beside `CMakeLists.txt`, put project-owned modules under `external/`, edit vendor sources merely to rename them, or treat `Scene::objects` as the editor's primary state source instead of ECS.
+- All original headers are installed to engine/northstarcpp/modules/api/include/northstarcpp.
+- Original implementation sources are installed to
+  sdk/src/northstarcpp.
+- The old install rule deleting compat headers is removed.
+- Exported SDK libraries include libmath.a and libfoundation_core.a.
 
-## Verification
+Coverage: 1,150 original C++ translation units and 1,585 .h headers
+currently remain in the tree. 17 original C++ units are now compiled
+directly, while 1,133 still require porting or appropriate classification.
+PS3/Xbox variants, obsolete editor tools and Maya integrations are
+not runtime implementations for the current Windows build. The original
+animation, collision, physics, audio, networking, rendering and resource
+managers require a deliberate subsystem migration; bulk-linking all of
+them would conflict with existing modern provider implementations.
 
-```powershell
-.\northstarcpp.cmd doctor
-.\northstarcpp.cmd configure
-.\northstarcpp.cmd build
-.\northstarcpp.cmd test
-python tools/organize_engine_layout.py --verify
-```
+Any additional port must compile the ORIGINAL C++ implementation directly
+within its native engine target, preserve ABI contracts, fix platform
+dependencies, and pass native runtime tests. No compatibility wrapper
+or blind duplicate algorithm implementation should be substituted.
 
-`tests/engine_layout_smoke.cmake` validates the module layout. CMake also validates the directory of every newly registered provider.
+Verified in QA build out/compat-native-qa-20261114:
+
+- CMake configuration PASS.
+- northstarcpp_math CTest PASS: original strings, buffer strings, FS paths
+  and geometric algorithms are exercised directly.
+- northstarcpp_runtime, northstarcpp_viewport, northstarcpp_projects build PASS.
+- Engine layout, architecture and math tests PASS (3/3).
+- Isolated CMake SDK install PASS with both libraries, all source files
+  and all original headers.
+
+The full northstarcpp_player clean build, complete native legacy source
+migration and production dist replacement are NOT complete.

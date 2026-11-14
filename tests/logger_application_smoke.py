@@ -73,11 +73,10 @@ def run(bin_dir: Path, scene: Path) -> None:
             ["--check-scene", "--scene", str(scene)],
             ("game player starting", "Application exited with code 0")
         ),
-        "editor": (
-            "northstarcpp_editor.exe",
-            ["--warp", "--smoke", "--smoke-output", str(folder / "editor.nscn")],
-            ("editor starting", "Application exited with code 0")
-        ),
+        # Qt Editor has an independent QProcess/Qt log panel; its startup
+        # and Player handoff are verified in northstarcpp_qt_editor_authoring
+        # and northstarcpp_qt_editor_player_launch. Only engine.logger
+        # consumers belong in this .log/.ulog lifecycle contract.
         "manager": (
             "northstarcpp_project_manager.exe",
             ["--smoke"],

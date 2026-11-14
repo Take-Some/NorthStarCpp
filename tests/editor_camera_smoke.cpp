@@ -2,6 +2,7 @@
 #include "editor_camera.hpp"
 #include "editor_tools.hpp"
 #include <cmath>
+#include <limits>
 int main() {
     using namespace northstarcpp;
     using namespace northstarcpp::editor_tools;
@@ -30,5 +31,19 @@ int main() {
     if(c.pose.pitch< -1.52001f)return 7;
     c.pose.pitch=0.f;c.frame({0.f,0.f,0.f},10.f);
     if(std::abs(c.pose.position.z+10.f)>1e-4f)return 8;
+    c.pose.position={0.f,0.f,0.f};
+    c.pose.pitch=.5f;
+    c.fly(0.f,3.f,0.f);
+    if(std::abs(c.pose.position.y-3.f)>1e-5f ||
+       std::abs(c.pose.position.z)>1e-5f)return 9;
+    c.fly(2.f,0.f,0.f);
+    if(std::abs(c.pose.position.x-2.f)>1e-5f ||
+       std::abs(c.pose.position.y-3.f)>1e-5f)return 10;
+    c.fly(0.f,0.f,5.f);
+    if(c.pose.position.y<=3.f || c.pose.position.z<=0.f)return 11;
+    auto const old=c.pose.position;
+    c.fly(std::numeric_limits<float>::infinity(),0.f,0.f);
+    if(c.pose.position.x!=old.x || c.pose.position.y!=old.y ||
+       c.pose.position.z!=old.z)return 12;
     return 0;
 }

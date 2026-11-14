@@ -37,8 +37,13 @@ def inspect(pin_path: Path, build_root: Path, *, check_remote=False) -> dict:
     # locally even if later setup can provision them.
     bins={name:shutil.which(name) for name in
           ("git","fetch","gclient","gn","ninja","clang-cl","cl","cmake")}
-    vc=Path("C:/Program Files (x86)/Microsoft Visual Studio")
-    vc_detected=vc.exists() and any(vc.rglob("cl.exe"))
+    # VS2022 installs in Program Files on most current Windows systems;
+    # previous check only looked under Program Files (x86).
+    vc_roots=(Path("C:/Program Files/Microsoft Visual Studio"),
+              Path("C:/Program Files (x86)/Microsoft Visual Studio"))
+    vc_detected=any(
+        base.exists() and any(base.glob("*/**/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"))
+        for base in vc_roots)
     check={
         "disk_space_30_gib":free >= MINIMUM_FREE_GIB*1024**3,
         "git":bool(bins["git"]),

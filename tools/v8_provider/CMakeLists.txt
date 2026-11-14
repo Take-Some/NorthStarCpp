@@ -20,7 +20,7 @@ set(NORTHSTARCPP_ENGINE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH
 set(NORTHSTARCPP_V8_ROOT "" CACHE PATH "Root of an MSYS2 UCRT64 V8 SDK")
 option(NORTHSTARCPP_V8_POINTER_COMPRESSION "Match MSYS2 V8 pointer compression" ON)
 option(NORTHSTARCPP_V8_SANDBOX "Match MSYS2 V8 sandbox" ON)
-if(NOT IS_DIRECTORY "${NORTHSTARCPP_ENGINE_ROOT}/include/northstarcpp"
+if(NOT IS_DIRECTORY "${NORTHSTARCPP_ENGINE_ROOT}/engine/northstarcpp/modules/api/include/northstarcpp"
    OR NOT EXISTS "${NORTHSTARCPP_V8_ROOT}/include/v8.h"
    OR NOT EXISTS "${NORTHSTARCPP_V8_ROOT}/include/libplatform/libplatform.h")
     message(FATAL_ERROR "Specify valid NORTHSTARCPP_ENGINE_ROOT and NORTHSTARCPP_V8_ROOT (include/v8.h)")
@@ -45,7 +45,7 @@ if(NORTHSTARCPP_V8_SANDBOX)
     target_compile_definitions(northstarcpp_scripting_v8 PRIVATE V8_ENABLE_SANDBOX)
 endif()
 target_include_directories(northstarcpp_scripting_v8 PRIVATE
-    "${NORTHSTARCPP_ENGINE_ROOT}/include"
+    "${NORTHSTARCPP_ENGINE_ROOT}/engine/northstarcpp/modules/api/include"
     "${NORTHSTARCPP_ENGINE_ROOT}/engine/northstarcpp/modules/shared")
 target_include_directories(northstarcpp_scripting_v8 SYSTEM PRIVATE
     "${NORTHSTARCPP_V8_ROOT}/include")

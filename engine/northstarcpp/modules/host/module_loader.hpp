@@ -19,7 +19,7 @@ extern BuiltinModule const builtin_modules[];
 
 class Module {
 public:
-    explicit Module(std::string capability);
+    explicit Module(std::string capability, std::string preferred_provider = {});
     ~Module();
     Module(Module const&) = delete;
     Module& operator=(Module const&) = delete;
@@ -53,6 +53,9 @@ public:
     std::runtime_error error(char const* action) const;
     std::string provider() const;
     std::string version() const;
+    // Resolution provenance: for diagnostics only (not a hot-swap operation).
+    std::string source() const;
+    bool is_external() const noexcept;
 
 private:
     enum class Mode { required, optional, legacy };
@@ -69,6 +72,7 @@ private:
 
     std::filesystem::path path;
     std::string capability_id;
+    std::string preferred_provider_id;
     void* handle = nullptr;
     NorthStarModuleQuery selected_query = nullptr;
     NorthStarModule const* descriptor = nullptr;

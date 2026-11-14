@@ -11,8 +11,8 @@
 - **Verified:** behavioral contract demonstrated in repeatable tests.
 - **Release-ready:** verified with a clean distribution and SDK consumer, dependency audit and redistribution permissions.
 
-Historical sources were imported from `external/northstarcpp/compat/` into
-`engine/northstarcpp/modules/foundation/northstarcpp/compat/`.
+Historical sources were imported from `external/northstarcpp/` into
+`engine/northstarcpp/modules/core/northstarcpp/`.
 
 The import manifest `.northstarcpp/migrations/compat-foundation-v1.json` records
 3,037 original files and their checksums. Running

@@ -27,7 +27,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.build_dist import verify_manifest as verify_engine, parse_registry
+from tools.build_dist import V8_SIDECAR_FILES, parse_registry, verify_manifest as verify_engine
 from tools.dev.scene_binary import validate_nef8_scene, scene_entity_references
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -432,6 +432,9 @@ def verify_game(folder: Path) -> dict:
         raise GameBuildError("Packaged scripting status or script file count mismatch")
     if script_files and "engine.scripting" not in available:
         raise GameBuildError("Packaged scripts require an engine.scripting provider")
+    if any(p.get("path") == "bin/scripting_v8_sidecar.dll" for p in plugins):
+        if not set(V8_SIDECAR_FILES).issubset(expected):
+            raise GameBuildError("Packaged V8 sidecar runtime is incomplete")
     actual_animation_files = [path for path in expected
         if path.startswith("game/animations/") and path.endswith(".anim.json")]
     if (type(data.get("animation_files", 0)) is not int or
@@ -453,16 +456,19 @@ def verify_game(folder: Path) -> dict:
     return data
 
 
-def launch_smoke(folder: Path, mode: str = "scene") -> None:
+def launch_smoke(folder: Path, mode: str = "scene", scripted: bool = False) -> None:
     runtime = folder / "bin/northstarcpp_player.exe"
     scene = folder / ("game/main.nscn" if (folder / "game/main.nscn").exists()
                       else "game/main.nscene")
     env = os.environ.copy()
     for key in ("NORTHSTARCPP_ECS_PLUGIN", "NORTHSTARCPP_PHYSICS_PROVIDER",
                 "NORTHSTARCPP_RENDER_PLUGIN", "NORTHSTARCPP_AUDIO_PLUGIN",
-                "NORTHSTARCPP_INPUT_PLUGIN", "NORTHSTARCPP_ASSETS_PLUGIN", "NORTHSTARCPP_LOGGER_PLUGIN"):
+                "NORTHSTARCPP_INPUT_PLUGIN", "NORTHSTARCPP_ASSETS_PLUGIN", "NORTHSTARCPP_LOGGER_PLUGIN",
+                "NORTHSTARCPP_SCRIPTING_PLUGIN", "NORTHSTARCPP_V8_D8_EXECUTABLE",
+                "NORTHSTARCPP_V8_SIDECAR_WORKER"):
         env.pop(key, None)
-    command = [str(runtime), "--warp", "--check-scene", "--scene", str(scene)]
+    check = "--runtime-init-smoke" if scripted else "--check-scene"
+    command = [str(runtime), "--warp", check, "--packaged-game", "--scene", str(scene)]
     if mode == "fps":
         command.append("--fps")
     elif mode == "explore":
@@ -531,10 +537,13 @@ def release(project: Path, engine: Path, output: Path, physics: str, zip_package
     source_scripts=(project / "scripts").is_dir() and any(
         f.is_file() and f.suffix.lower() in (".js", ".mjs")
         for f in (project / "scripts").rglob("*"))
-    if (source_scripts or scene_script_refs(scene)) and not any(
+    scripted = bool(source_scripts or scene_script_refs(scene))
+    if scripted and not any(
         p["capability"] == "engine.scripting" and
-        p["provider"].casefold() == "v8" for p in plugins):
+        p["provider"].casefold() in ("v8", "v8_sidecar") for p in plugins):
         raise GameBuildError("JavaScript game export requires an installed, selected V8 scripting provider")
+    if not scripted:
+        plugins = [p for p in plugins if p["capability"] != "engine.scripting"]
     if engine_manifest.get("build_type") != "Release" and not allow_debug:
         raise GameBuildError("Final game export requires a Release engine; use --allow-debug only for tests")
     version = engine_manifest["version"]
@@ -560,6 +569,14 @@ def release(project: Path, engine: Path, output: Path, physics: str, zip_package
                 src = engine / item["path"]
                 shutil.copy2(src, bindir / src.name)
         copy_bundled_runtime(engine, bindir, engine_manifest, plugins)
+        if any(p.get("path") == "bin/scripting_v8_sidecar.dll" for p in plugins):
+            for relative in V8_SIDECAR_FILES:
+                if relative not in engine_manifest["files"]:
+                    raise GameBuildError("Unverified V8 sidecar file: " + relative)
+                if relative.startswith("bin/"):
+                    destination = stage / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(engine / relative, destination)
         # A scene is playable through the provider-neutral engine.assets API.
         count = copy_game_assets(project, stage / "game", scene)
         script_count = copy_game_scripts(project, stage / "game", scene)
@@ -588,7 +605,7 @@ def release(project: Path, engine: Path, output: Path, physics: str, zip_package
         build_manifest(stage, name, engine_manifest, physics, plugins,
                        count, mode, script_count, animation_count)
         verify_game(stage)
-        launch_smoke(stage, mode)
+        launch_smoke(stage, mode, scripted)
         shutil.copytree(stage, final)
         verify_game(final)
         if zip_package:

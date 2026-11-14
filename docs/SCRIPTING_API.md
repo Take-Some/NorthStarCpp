@@ -17,6 +17,26 @@ The host/runtime library does not link to V8. When a suitable V8 provider DLL
 is present, the loader discovers `engine.scripting` dynamically and validates
 the capability string, host ABI, provider ABI and API-table size.
 
+## Windows development and QA
+
+Windows builds without a native V8 SDK select the bundled V8 15.8.62
+development provider. The Player discovers `scripting_v8_sidecar.dll`
+beside its executable. The provider starts `bin/scripting/v8/d8.exe`
+from the package with its local worker and runtime data. Both direct
+Player launch and Play in Qt Editor use this layout.
+
+Building Player, Qt Editor, or Project Browser also builds the provider
+and stages its runtime beside the executables. The build restores missing
+runtime files on the next invocation, even when the DLL and applications
+are already up to date. The source-checkout launcher runs this incremental
+build before opening Project Browser.
+
+To use a local copy of the pinned archive, set
+`NORTHSTARCPP_V8_SIDECAR_ARCHIVE` to its path at CMake configure time.
+`NORTHSTARCPP_V8_SIDECAR=OFF` disables the developer bundle. The sidecar
+runs trusted project scripts. Public release promotion uses the reviewed
+native provider.
+
 ## Native V8 SDK and build
 
 The main engine remains MinGW-w64 MINGW64/MSVCRT, C++17. For MSYS2's

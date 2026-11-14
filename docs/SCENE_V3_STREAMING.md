@@ -12,7 +12,7 @@ queries and debugging. NorthStarCpp implements equivalent *categories* through
 its own C++ scene API, **without copying the archive's platform-dependent source
 or binding gameplay/editor objects to Flecs implementation classes**.
 
-The document model (`include/northstarcpp/scene.hpp`) is provider-neutral.
+The document model (`sdk/include/northstarcpp/scene.hpp`) is provider-neutral.
 `EcsWorld` exposes the stable ECS abstraction through `NsEcsApi`; scene I/O,
 the authoring graph, physics providers, asset providers, and rendering remain
 separate responsibilities.

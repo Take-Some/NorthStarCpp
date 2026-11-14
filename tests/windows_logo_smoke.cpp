@@ -23,7 +23,7 @@ bool verify(wchar_t const* path)
 {
     auto const filename = std::filesystem::path(path).filename();
     bool const is_bugtrap = filename == L"bugtrap.exe";
-    bool const is_editor = filename == L"northstarcpp_editor.exe";
+    bool const is_editor = filename == L"northstarcpp_editor_qt.exe";
     unsigned const expected_id = is_bugtrap ? IDI_BUGTRAP_APP : IDI_NORTHSTARCPP_APP;
     unsigned const unexpected_id = is_bugtrap ? IDI_NORTHSTARCPP_APP : IDI_BUGTRAP_APP;
     std::set<unsigned> const expected_dimensions = is_bugtrap

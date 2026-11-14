@@ -29,19 +29,23 @@ def read_marker(root: Path, slot: str) -> dict[str, Any]:
     return json.loads(rows[3])
 
 
-def run(player: Path, provider: Path, project: Path,
+def run(player: Path, provider: Path | None, project: Path,
         archive: Path | None = None, seconds: int = 35) -> dict[str, Any]:
     player = player.resolve(strict=True)
-    provider = provider.resolve(strict=True)
     project = project.resolve(strict=True)
     scene = project / "main.nscene"
     if not scene.is_file():
         raise RuntimeError("QA project startup scene missing")
     exe_dir = player.parent
-    provider_dir = provider.parent
     env = os.environ.copy()
-    env["NORTHSTARCPP_SCRIPTING_PLUGIN"] = str(provider)
-    env["PATH"] = str(provider_dir) + os.pathsep + str(exe_dir) + os.pathsep + env.get("PATH", "")
+    if provider is None:
+        for key in ("NORTHSTARCPP_SCRIPTING_PLUGIN", "NORTHSTARCPP_V8_D8_EXECUTABLE",
+                    "NORTHSTARCPP_V8_SIDECAR_WORKER"):
+            env.pop(key, None)
+    else:
+        provider = provider.resolve(strict=True)
+        env["NORTHSTARCPP_SCRIPTING_PLUGIN"] = str(provider)
+        env["PATH"] = str(provider.parent) + os.pathsep + str(exe_dir) + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory(prefix="northstar-player-v8-") as tmp:
         working = Path(tmp)
         appdata = working / "LocalAppData"
@@ -59,11 +63,11 @@ def run(player: Path, provider: Path, project: Path,
                                     text=True, errors="replace", timeout=seconds)
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"{mode} player did not quit within {seconds}s") from e
+        if result.returncode != 0:
+            raise RuntimeError(f"{mode} player exit code {result.returncode}: {result.stderr[-1500:]}")
         markers = {}
         for name in ("scripting_start", "scripting_update", "scripting_stop"):
             markers[name] = read_marker(appdata, name)
-        if result.returncode != 0:
-            raise RuntimeError(f"{mode} player exit code {result.returncode}: {result.stderr[-500:]}")
         if any(token in (result.stdout + result.stderr) for token in (
                 "Cannot locate asset", "Asset not found:", "Plugin ABI mismatch",
                 "Unhandled project script error")):

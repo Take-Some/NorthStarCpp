@@ -6,7 +6,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QDockWidget>
-#include <QElapsedTimer>
+#include <northstarcpp/frame_clock.hpp>
 #include <QFile>
 #include <QFileDialog>
 #include <QHeaderView>
@@ -183,7 +183,7 @@ public:
             updatePreview();
         });
         connect(&timer_,&QTimer::timeout,this,[this]{
-            auto dt=elapsed_.restart()/1000.f;
+            auto dt=elapsed_.restart_seconds();
             cursor_+=std::clamp(float(dt),0.f,0.25f);
             if(cursor_>=track_.duration()) {
                 cursor_=track_.duration();
@@ -370,7 +370,7 @@ private:
     TrackPreview* preview_=nullptr;
     QAction* play_action_=nullptr;
     QTimer timer_;
-    QElapsedTimer elapsed_;
+    northstarcpp::timing::FrameClock elapsed_;
     CameraTrack track_;
     QString path_;
     float cursor_=0.f;

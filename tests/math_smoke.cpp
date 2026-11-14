@@ -4,7 +4,12 @@
 
 #include <northstarcpp/collision_queries.hpp>
 #include <northstarcpp/geometry.hpp>
-#include <northstarcpp/compat/core/math_standalone.h>
+#include <northstarcpp/core/math_standalone.h>
+#include <northstarcpp/geometry_utils.h>
+#include <northstarcpp/strings_functions.h>
+#include <northstarcpp/buffer_string.h>
+#include <northstarcpp/fs_path.h>
+#include <cstring>
 
 #include <limits>
 #include <stdexcept>
@@ -116,5 +121,35 @@ int main()
     if (perspective.test_inexact(box) != intersection_outside)
         return 17;
 
+    // Verify the original, directly compiled foundation implementations.
+    if (!northstarcpp::strings::compare_with_wildcards("engine_*","engine_scene") ||
+        northstarcpp::strings::compare_insensitive("AbC","aBc")!=0)
+        return 18;
+    float parsed=0.f;
+    if(!northstarcpp::strings::convert_string_to_number("12.5",&parsed) ||
+       parsed!=12.5f) return 19;
+    char text_data[128]{};
+    northstarcpp::buffer_string text(text_data,128);
+    text += "original foundation";
+    text.make_uppercase();
+    if(std::strcmp(text.c_str(),"ORIGINAL FOUNDATION")!=0)return 20;
+    text.make_lowercase();
+    if(std::strcmp(text.c_str(),"original foundation")!=0)return 21;
+    auto portable=northstarcpp::fs::convert_to_portable("C:\\Engine\\Scene");
+    if(std::strcmp(portable.c_str(),"C:/Engine/Scene")!=0)return 22;
+    auto native=northstarcpp::fs::convert_to_native("C:/Engine/Scene");
+    if(std::strcmp(native.c_str(),"C:/Engine/Scene")!=0)return 23;
+    northstarcpp::geometry_utils::geom_vertices_type source_vertices;
+    northstarcpp::geometry_utils::geom_indices_type source_indices;
+    float4x4 original_transform;
+    original_transform.identity();
+    if(!northstarcpp::geometry_utils::create_cube(
+           source_vertices,source_indices,original_transform,float3(2,3,4))
+        || source_vertices.size()!=8 || source_indices.size()!=36)
+        return 24;
+    if(!northstarcpp::geometry_utils::create_torus(
+           source_vertices,source_indices,original_transform,2.f,0.5f,12,12)
+        || source_vertices.size()!=144 || source_indices.size()!=864)
+        return 25;
     return 0;
 }

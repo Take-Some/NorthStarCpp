@@ -1,0 +1,300 @@
+{
+  "schema": 1,
+  "project": "NorthStarCpp",
+  "source_root": "engine/northstarcpp/modules",
+  "public_sdk": "engine/northstarcpp/modules/api/include/northstarcpp",
+  "vendor_root": "sdk/vendor",
+  "resource_root": "engine/northstarcpp/resources",
+  "modules": [
+    {
+      "id": "api",
+      "kind": "engine",
+      "directory": "api",
+      "targets": [
+        "northstarcpp_api"
+      ],
+      "contract": "module.h",
+      "role": "Engine-owned public C/C++ module APIs; sdk/include is an installation output only"
+    },
+    {
+      "id": "core",
+      "kind": "engine",
+      "directory": "core",
+      "targets": [
+        "northstarcpp_math",
+        "northstarcpp_core"
+      ],
+      "contract": "math.hpp",
+      "role": "Engine-owned C++ core: mathematics, containers, geometry and platform primitives, compiled as first-class targets"
+    },
+    {
+      "id": "host",
+      "kind": "engine",
+      "directory": "host",
+      "targets": [
+        "northstarcpp_runtime"
+      ],
+      "contract": "module.h",
+      "role": "Scene IO, NEF8, module registry, runtime dispatch and service contracts"
+    },
+    {
+      "id": "shared",
+      "kind": "engine",
+      "directory": "shared",
+      "targets": [
+        "northstarcpp_crash"
+      ],
+      "role": "Shared internal helpers, error reporting and provider infrastructure"
+    },
+    {
+      "id": "editor",
+      "kind": "application",
+      "directory": "editor",
+      "targets": [
+        "northstarcpp_editor_qt",
+        "northstarcpp_player"
+      ],
+      "role": "Qt authoring tools, Player frontend and scene viewport composition"
+    },
+    {
+      "id": "viewport",
+      "kind": "engine",
+      "directory": "viewport",
+      "targets": [
+        "northstarcpp_viewport"
+      ],
+      "contract": "render_plugin.h",
+      "role": "Scene visibility, draw submission and CPU geometry cache"
+    },
+    {
+      "id": "project_manager",
+      "kind": "application",
+      "directory": "project_manager",
+      "targets": [
+        "northstarcpp_project_manager",
+        "northstarcpp_projects"
+      ],
+      "contract": "project_catalog.hpp",
+      "role": "Project discovery, lifecycle and launch handoff"
+    },
+    {
+      "id": "tools",
+      "kind": "tool",
+      "directory": "tools",
+      "targets": [
+        "northstarcpp_scene_convert",
+        "perlin_world_generator"
+      ],
+      "role": "Native offline authoring and conversion tools"
+    },
+    {
+      "id": "assets_directory",
+      "kind": "provider",
+      "directory": "assets/directory",
+      "targets": [
+        "northstarcpp_assets_directory"
+      ],
+      "contract": "assets_plugin.h",
+      "capability": "assets",
+      "role": "Directory and FAT/DB VFS reads, including optional range ABI"
+    },
+    {
+      "id": "ecs_flecs",
+      "kind": "provider",
+      "directory": "ecs/flecs",
+      "targets": [
+        "northstarcpp_ecs_flecs"
+      ],
+      "contract": "ecs_plugin.h",
+      "capability": "ecs",
+      "role": "Flecs runtime entity/component provider"
+    },
+    {
+      "id": "physics_bullet",
+      "kind": "provider",
+      "directory": "physics/bullet",
+      "targets": [
+        "northstarcpp_physics_bullet"
+      ],
+      "contract": "physics_plugin.h",
+      "capability": "physics",
+      "role": "Bullet simulation and static collision residency"
+    },
+    {
+      "id": "physics_jolt",
+      "kind": "provider",
+      "directory": "physics/jolt",
+      "targets": [
+        "northstarcpp_physics_jolt"
+      ],
+      "contract": "physics_plugin.h",
+      "capability": "physics",
+      "role": "Jolt simulation and static collision residency"
+    },
+    {
+      "id": "render_d3d11",
+      "kind": "provider",
+      "directory": "render/d3d11",
+      "targets": [
+        "northstarcpp_render_d3d11"
+      ],
+      "contract": "render_plugin.h",
+      "capability": "render",
+      "role": "D3D11 render provider"
+    },
+    {
+      "id": "render_d3d12",
+      "kind": "provider",
+      "directory": "render/d3d12",
+      "targets": [
+        "northstarcpp_render_d3d12"
+      ],
+      "contract": "render_plugin.h",
+      "capability": "render",
+      "role": "D3D12 render provider with fallback paths"
+    },
+    {
+      "id": "audio_winmm",
+      "kind": "provider",
+      "directory": "audio/winmm",
+      "targets": [
+        "northstarcpp_audio_winmm"
+      ],
+      "contract": "audio_plugin.h",
+      "capability": "audio",
+      "role": "Audio provider for Windows"
+    },
+    {
+      "id": "input_win32",
+      "kind": "provider",
+      "directory": "input/win32",
+      "targets": [
+        "northstarcpp_input_win32"
+      ],
+      "contract": "input_plugin.h",
+      "capability": "input",
+      "role": "Win32/XInput input provider"
+    },
+    {
+      "id": "logger_multisink",
+      "kind": "provider",
+      "directory": "logger/multisink",
+      "targets": [
+        "northstarcpp_logger_multisink"
+      ],
+      "contract": "logger_plugin.h",
+      "capability": "logger",
+      "role": "Logger output provider"
+    },
+    {
+      "id": "perlin_improved",
+      "kind": "provider",
+      "directory": "perlin/improved",
+      "targets": [
+        "northstarcpp_perlin_improved"
+      ],
+      "contract": "perlin_plugin.h",
+      "capability": "perlin",
+      "role": "Improved Perlin generation provider"
+    },
+    {
+      "id": "scripting_v8",
+      "kind": "optional_provider",
+      "directory": "scripting/v8",
+      "targets": [
+        "northstarcpp_scripting_v8"
+      ],
+      "contract": "scripting_plugin.h",
+      "capability": "scripting",
+      "role": "Optional native V8 provider; requires externally provisioned V8 SDK"
+    },
+    {
+      "id": "scripting_v8_sidecar",
+      "kind": "optional_provider",
+      "directory": "scripting/v8_sidecar",
+      "targets": [
+        "scripting_v8_sidecar"
+      ],
+      "contract": "scripting_plugin.h",
+      "capability": "scripting",
+      "role": "Optional external sidecar scripting implementation"
+    },
+    {
+      "id": "time_qpc",
+      "kind": "provider",
+      "directory": "time/qpc",
+      "targets": [
+        "northstarcpp_time_qpc"
+      ],
+      "contract": "time_plugin.h",
+      "capability": "time",
+      "role": "Monotonic engine clock using the original Windows foundation counter"
+    },
+    {
+      "id": "geometry",
+      "kind": "provider",
+      "directory": "geometry",
+      "targets": [
+        "northstarcpp_geometry"
+      ],
+      "contract": "geometry_plugin.h",
+      "capability": "geometry",
+      "role": "Native builtin/external engine.geometry provider using original owned geometry algorithms"
+    },
+    {
+      "id": "models",
+      "kind": "engine",
+      "directory": "models",
+      "targets": [
+        "northstarcpp_models"
+      ],
+      "contract": "mesh_asset.hpp",
+      "role": "First-class mesh loading and decoding used by game and Qt editor"
+    },
+    {
+      "id": "animation",
+      "kind": "engine",
+      "directory": "animation",
+      "targets": [
+        "northstarcpp_animation"
+      ],
+      "contract": "scene_animation.hpp",
+      "role": "First-class transform animation playback and original Fermi-Dirac easing"
+    },
+    {
+      "id": "ui",
+      "kind": "engine",
+      "directory": "ui",
+      "targets": [
+        "northstarcpp_ui"
+      ],
+      "role": "Native UI layout geometry shared by D3D11/D3D12 HUD rendering"
+    }
+  ],
+  "submodules": [
+    {
+      "path": "sdk/vendor/flecs",
+      "url": "https://github.com/SanderMertens/flecs.git"
+    },
+    {
+      "path": "sdk/vendor/sources/JoltPhysics",
+      "url": "https://github.com/jrouwe/JoltPhysics.git"
+    },
+    {
+      "path": "sdk/vendor/sources/libvorbis",
+      "url": "https://github.com/xiph/vorbis.git"
+    }
+  ],
+  "ownership_rules": {
+    "engine_code": "engine/northstarcpp/modules",
+    "engine_resources": "engine/northstarcpp/resources",
+    "public_contracts": "engine/northstarcpp/modules/api/include/northstarcpp",
+    "third_party_sources": "sdk/vendor",
+    "developer_tools": "tools",
+    "integration_tests": "tests",
+    "projects": "Projects",
+    "runtime_assets": "sharedAssets",
+    "generated_files": "out",
+    "release_packages": "dist"
+  }
+}

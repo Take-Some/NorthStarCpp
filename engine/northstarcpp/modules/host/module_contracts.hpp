@@ -6,8 +6,12 @@
 #include <northstarcpp/input_plugin.h>
 #include <northstarcpp/logger_plugin.h>
 #include <northstarcpp/perlin_plugin.h>
+#include <northstarcpp/geometry_plugin.h>
+#include <northstarcpp/collision_plugin.h>
+#include <northstarcpp/time_plugin.h>
 #include <northstarcpp/physics_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
+#include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
 
@@ -45,6 +49,12 @@ inline bool valid_api(NorthStarRenderTrianglesApi const& api)
     return api.abi_version == NORTHSTARCPP_RENDER_TRIANGLES_ABI && api.set_triangles;
 }
 
+inline bool valid_api(NorthStarRenderSurfacesApi const& api)
+{
+    return api.abi_version == NORTHSTARCPP_RENDER_SURFACES_ABI &&
+        api.set_texture && api.set_cube_surfaces;
+}
+
 inline bool valid_api(NorthStarAudioApi const& api)
 {
     return api.create && api.destroy && api.play && api.stop;
@@ -74,6 +84,21 @@ inline bool valid_api(NorthStarAssetsRangeApi const& api)
 inline bool valid_api(NorthStarLoggerApi const& api)
 {
     return api.create && api.destroy && api.write && api.flush && api.set_minimum_level;
+}
+
+inline bool valid_api(NorthStarGeometryApi const& api)
+{
+    return api.generate != nullptr;
+}
+
+inline bool valid_api(NorthStarCollisionApi const& api)
+{
+    return api.ray_aabb != nullptr && api.ray_triangles != nullptr;
+}
+
+inline bool valid_api(NorthStarTimeApi const& api)
+{
+    return api.read_counter && api.read_frequency;
 }
 
 inline bool valid_api(NorthStarPerlinApi const& api)

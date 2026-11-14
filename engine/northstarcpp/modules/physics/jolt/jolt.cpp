@@ -2,7 +2,7 @@
 // Author: Kayla Verner
 // Updated: 2026
 // Alternative physics provider: Jolt Physics by Jorrit Rouwe (MIT).
-// Jolt upstream copyrights and license are retained in external/sdk/sources/JoltPhysics.
+// Jolt upstream copyrights and license are retained in sdk/vendor/sources/JoltPhysics.
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>

@@ -3,9 +3,11 @@
 // Updated: 2026
 
 #include <northstarcpp/geometry.hpp>
-#include <northstarcpp/compat/core/math_standalone.h>
+#include <northstarcpp/core/math_standalone.h>
 #include <northstarcpp/render_plugin.h>
+#include <ui_quad.h>
 #include <northstarcpp/render_triangles_api.h>
+#include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/scene.hpp>
 #include "module_provider.hpp"
 
@@ -27,6 +29,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <vector>
+#include <unordered_set>
 
 namespace {
 
@@ -68,6 +71,7 @@ void check(HRESULT result, char const* action)
 
 struct Vertex {
     float x, y, z, r, g, b;
+    float surface=0.f; // 0 untextured; 1..3 world material triplets
 };
 
 struct SkyVertex {
@@ -77,16 +81,76 @@ static_assert(sizeof(SkyVertex) == sizeof(NorthStarSkyVertex));
 
 constexpr char shader_code[] = R"(
 cbuffer Camera : register(b0) { row_major float4x4 view_projection; };
-struct Vertex { float3 position : POSITION; float3 color : COLOR; };
-struct Pixel { float4 position : SV_Position; float3 color : COLOR; };
+struct Vertex {
+    float3 position : POSITION;
+    float3 color : COLOR;
+    float surface : TEXCOORD1;
+};
+struct Pixel {
+    float4 position : SV_Position;
+    float3 color : COLOR;
+    float3 world : TEXCOORD0;
+    float surface : TEXCOORD1;
+};
+Texture2D sand_albedo : register(t1);
+Texture2D sand_normal : register(t2);
+Texture2D sand_roughness : register(t3);
+Texture2D rock_albedo : register(t4);
+Texture2D rock_normal : register(t5);
+Texture2D rock_roughness : register(t6);
+Texture2D forest_albedo : register(t7);
+Texture2D forest_normal : register(t8);
+Texture2D forest_roughness : register(t9);
+SamplerState world_sampler : register(s0);
 Pixel vertex_main(Vertex v) {
     Pixel p;
     p.position = mul(float4(v.position, 1.0), view_projection);
     p.color = v.color;
+    p.world = v.position;
+    p.surface = v.surface;
     return p;
 }
+float3 surface_triplanar(Texture2D tex,float3 world,float3 weights) {
+    float3 yz=tex.Sample(world_sampler,world.yz * 0.16).rgb;
+    float3 xz=tex.Sample(world_sampler,world.xz * 0.16).rgb;
+    float3 xy=tex.Sample(world_sampler,world.xy * 0.16).rgb;
+    return yz*weights.x+xz*weights.y+xy*weights.z;
+}
 float4 pixel_main(Pixel p) : SV_Target {
-    return float4(p.color, 1.0);
+    if(p.surface<0.5)
+        return float4(p.color,1.0);
+    float3 normal=normalize(cross(ddy(p.world),ddx(p.world)));
+    float3 weights=pow(abs(normal),4.0);
+    weights/=max(dot(weights,1.0),0.0001);
+    float3 albedo;
+    float3 normalData;
+    float roughness;
+    if(p.surface<1.5) {
+        albedo=surface_triplanar(sand_albedo,p.world,weights);
+        normalData=surface_triplanar(sand_normal,p.world,weights);
+        roughness=surface_triplanar(sand_roughness,p.world,weights).r;
+    } else if(p.surface<2.5) {
+        albedo=surface_triplanar(rock_albedo,p.world,weights);
+        normalData=surface_triplanar(rock_normal,p.world,weights);
+        roughness=surface_triplanar(rock_roughness,p.world,weights).r;
+    } else {
+        albedo=surface_triplanar(forest_albedo,p.world,weights);
+        normalData=surface_triplanar(forest_normal,p.world,weights);
+        roughness=surface_triplanar(forest_roughness,p.world,weights).r;
+    }
+    // Conservative terrain detail lighting, not a full PBR BRDF.
+    float2 tangentNormal=normalData.rg*2.0-1.0;
+    float3 worldNormal=normalize(normal + float3(tangentNormal.x,0.0,tangentNormal.y)*0.18);
+    float lighting=0.56+0.36*saturate(dot(abs(worldNormal),
+                                          normalize(float3(0.35,0.85,0.25))));
+    float brightness=lerp(0.92,1.05,saturate(roughness));
+    float3 litRgb=saturate(albedo*p.color*lighting*brightness);
+    // The backbuffer is DXGI_FORMAT_R8G8B8A8_UNORM rather than SRGB.
+    // sRGB BC1 samples are converted to linear by the GPU, so encode
+    // the final lit material color before writing to the backbuffer.
+    float3 encoded=lerp(litRgb*12.92,
+        1.055*pow(litRgb,1.0/2.4)-0.055,step(0.0031308,litRgb));
+    return float4(saturate(encoded),1.0);
 }
 )";
 
@@ -227,8 +291,9 @@ struct Renderer {
         D3D11_INPUT_ELEMENT_DESC const elements[]{
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, x), D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, r), D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT, 0, offsetof(Vertex, surface), D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
-        check(device->CreateInputLayout(elements, 2, code->GetBufferPointer(), code->GetBufferSize(),
+        check(device->CreateInputLayout(elements, 3, code->GetBufferPointer(), code->GetBufferSize(),
             layout.put()), "Create vertex layout");
         compile("pixel_main", "ps_4_0", code);
         check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
@@ -345,12 +410,24 @@ struct Renderer {
         check(context->Map(copy.get(), 0, D3D11_MAP_READ, 0, &data), "Map viewport readback");
         unsigned colored = 0;
         unsigned sky_samples = 0, sky_pixels = 0;
+        std::unordered_set<std::uint32_t> world_colors;
+        bool const verify_surfaces=sky_index_count==0 &&
+            std::any_of(surface_ids.begin(),surface_ids.end(),
+                        [](auto id){return id>0;});
         for (unsigned y = 0; y < height; ++y) {
             auto const* row = static_cast<unsigned char const*>(data.pData) + y * data.RowPitch;
             for (unsigned x = 0; x < width; ++x) {
                 auto const* pixel = row + x * 4;
                 if (pixel[0] > 110 || pixel[1] > 110 || pixel[2] > 110)
                     ++colored;
+                // The untextured geometry has only a few flat face colors.
+                // Real world texture sampling produces dozens of distinct
+                // albedo variations even at a 4-pixel readback stride.
+                if(verify_surfaces && !(x%4) && !(y%4) &&
+                   (pixel[0]>40 || pixel[1]>40 || pixel[2]>40))
+                    world_colors.insert((unsigned(pixel[0])>>3) |
+                        ((unsigned(pixel[1])>>3)<<5) |
+                        ((unsigned(pixel[2])>>3)<<10));
                 // Validate sky coverage away from health/ammo HUD, and avoid
                 // passing merely because world cubes or reticle are colored.
                 if (sky_index_count && y < height / 5 &&
@@ -361,9 +438,33 @@ struct Renderer {
                 }
             }
         }
+        if(verify_surfaces) {
+            if(auto* capture=std::getenv("NORTHSTARCPP_WORLD_SURFACE_QA_PPM")) {
+                if(auto* out=std::fopen(capture,"wb")) {
+                    std::fprintf(out,"P6\n%u %u\n255\n",width,height);
+                    for(unsigned y=0;y<height;++y) {
+                        auto const* row=static_cast<unsigned char const*>(data.pData)+
+                            y*data.RowPitch;
+                        for(unsigned x=0;x<width;++x) {
+                            auto const* bgra=row+x*4;
+                            unsigned char const rgb[3]{bgra[2],bgra[1],bgra[0]};
+                            std::fwrite(rgb,1,3,out);
+                        }
+                    }
+                    std::fclose(out);
+                }
+            }
+        }
         context->Unmap(copy.get(), 0);
-        if (colored < 100)
+        if (!verify_surfaces && colored < 100)
             throw std::runtime_error("Viewport readback did not contain a rendered object");
+        if(verify_surfaces && world_colors.size()<32)
+            throw std::runtime_error(
+                "World surface GPU readback lacks varied texture coverage: "+
+                std::to_string(world_colors.size())+
+                " quantized colors, "+std::to_string(colored)+
+                " bright pixels, "+std::to_string(surface_ids.size())+
+                " surface selectors");
         if (sky_index_count && (!sky_samples || sky_pixels * 10 < sky_samples))
             throw std::runtime_error("Skydome GPU readback lacks textured sky coverage");
     }
@@ -381,12 +482,11 @@ struct Renderer {
         triangles.reserve(270);
         auto rect = [&](float x0, float y0, float x1, float y1,
                         float r, float g, float b) {
-            triangles.push_back({x0,y0,0.f,r,g,b});
-            triangles.push_back({x1,y0,0.f,r,g,b});
-            triangles.push_back({x1,y1,0.f,r,g,b});
-            triangles.push_back({x0,y0,0.f,r,g,b});
-            triangles.push_back({x1,y1,0.f,r,g,b});
-            triangles.push_back({x0,y1,0.f,r,g,b});
+            auto const corners = northstarcpp::ui::quad_corners(x0, y0, x1, y1);
+            for (auto index : northstarcpp::ui::quad_triangle_corners) {
+                auto const& corner = corners[index];
+                triangles.push_back({corner.x, corner.y, 0.f, r, g, b});
+            }
         };
         auto segment = [&](float x0, float y0, float x1, float y1) {
             constexpr float r = 0.38f, g = 0.94f, b = 0.88f;
@@ -618,6 +718,58 @@ struct Renderer {
         mesh_triangles.swap(submitted);
     }
 
+    void set_surface_texture(NorthStarSurfaceTexture const& image) {
+        if(image.slot>=9 || (image.format_id!=102 && image.format_id!=105) ||
+           !image.data || !image.mips || image.mip_count==0 ||
+           image.mip_count>15 || image.data_bytes>32u*1024u*1024u)
+            throw std::invalid_argument("Invalid world surface texture descriptor");
+        DXGI_FORMAT const format=image.format_id==102 ?
+            (image.srgb?DXGI_FORMAT_BC1_UNORM_SRGB:DXGI_FORMAT_BC1_UNORM):
+            DXGI_FORMAT_BC5_UNORM;
+        D3D11_TEXTURE2D_DESC info{};
+        info.Width=image.mips[0].width;
+        info.Height=image.mips[0].height;
+        info.MipLevels=image.mip_count;
+        info.ArraySize=1;
+        info.Format=format;
+        info.SampleDesc.Count=1;
+        info.Usage=D3D11_USAGE_IMMUTABLE;
+        info.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        std::vector<D3D11_SUBRESOURCE_DATA> levels;
+        levels.reserve(image.mip_count);
+        unsigned width=info.Width,height=info.Height;
+        for(std::uint32_t i=0;i<image.mip_count;++i) {
+            auto const& mip=image.mips[i];
+            auto const row=((width+3)/4)*(image.format_id==102?8:16);
+            auto const size=row*((height+3)/4);
+            if(!width || !height || width>16384 || height>16384 ||
+               mip.width!=width || mip.height!=height ||
+               mip.bytes!=size || mip.offset>image.data_bytes ||
+               mip.bytes>image.data_bytes-mip.offset)
+                throw std::invalid_argument("Invalid world surface mip layout");
+            levels.push_back({image.data+mip.offset,row,size});
+            width=std::max(1u,width/2);
+            height=std::max(1u,height/2);
+        }
+        Com<ID3D11Texture2D> texture;
+        check(device->CreateTexture2D(&info,levels.data(),texture.put()),
+              "Create world surface BCn texture");
+        Com<ID3D11ShaderResourceView> srv;
+        check(device->CreateShaderResourceView(texture.get(),nullptr,srv.put()),
+              "Create world surface shader resource");
+        surface_textures[image.slot].swap(texture);
+        surface_views[image.slot].swap(srv);
+    }
+    void set_cube_surfaces(std::uint32_t const* ids,std::uint32_t count) {
+        if(count>northstarcpp::max_scene_objects || (count && !ids))
+            throw std::invalid_argument("Invalid world surface cube selectors");
+        if(count)surface_ids.assign(ids,ids+count);
+        else surface_ids.clear();
+        if(std::any_of(surface_ids.begin(),surface_ids.end(),
+                       [](std::uint32_t id){return id>3;}))
+            throw std::invalid_argument("World surface ID exceeds available materials");
+    }
+
     void draw(NorthStarRenderFrame const& frame)
     {
         RECT client{};
@@ -692,7 +844,14 @@ struct Renderer {
             bounds += 0.05f;
             if (visible_region.test_inexact(bounds) == intersection_outside)
                 continue;
+            auto const first=vertices.size();
             add_cube(vertices, transform, static_cast<std::int32_t>(i) == frame.selected ? 0xffd474u : cube.rgb);
+            if(i<surface_ids.size() && surface_ids[i] &&
+               surface_views[(surface_ids[i]-1)*3].get()) {
+                auto const category=float(surface_ids[i]);
+                for(std::size_t v=first;v<vertices.size();++v)
+                    vertices[v].surface=category;
+            }
         }
         if (mesh_triangles.size()>max_vertex_capacity-vertices.size())
             throw std::runtime_error("Mesh geometry exceeds transient GPU budget");
@@ -728,6 +887,14 @@ struct Renderer {
         context->VSSetShader(vertex_shader.get(), nullptr, 0);
         context->VSSetConstantBuffers(0, 1, &constants);
         context->PSSetShader(pixel_shader.get(), nullptr, 0);
+        // t0 remains reserved for the independent sky shader. Binding
+        // all nine terrain material maps allows the shared world pixel
+        // shader to select sand/rock/forest without per-object draw calls.
+        ID3D11ShaderResourceView* world_views[9]{};
+        for(unsigned i=0;i<9;++i)world_views[i]=surface_views[i].get();
+        context->PSSetShaderResources(1,9,world_views);
+        auto* sampler=sky_sampler.get();
+        context->PSSetSamplers(0,1,&sampler);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
         if (!frame.first_person) {
             context->Draw(grid_vertices, 0);
@@ -773,6 +940,9 @@ struct Renderer {
     std::uint64_t sky_gpu_bytes=0;
     std::vector<Vertex> vertices;
     std::vector<Vertex> mesh_triangles;
+    std::array<Com<ID3D11Texture2D>,9> surface_textures;
+    std::array<Com<ID3D11ShaderResourceView>,9> surface_views;
+    std::vector<std::uint32_t> surface_ids;
 };
 
 void* create(void* window, uint32_t software)
@@ -818,6 +988,23 @@ int set_render_triangles(void* renderer,
         static_cast<Renderer*>(renderer)->set_triangles(vertices,count);
     });
 }
+int set_world_surface_texture(void* renderer,
+                              NorthStarSurfaceTexture const* image) {
+    return guarded([&] {
+        if(!renderer || !image)throw std::invalid_argument("Missing surface texture");
+        static_cast<Renderer*>(renderer)->set_surface_texture(*image);
+    });
+}
+int set_world_surface_cubes(void* renderer,
+                            std::uint32_t const* ids,std::uint32_t count) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing surface renderer");
+        static_cast<Renderer*>(renderer)->set_cube_surfaces(ids,count);
+    });
+}
+const NorthStarRenderSurfacesApi surfaces_api{
+    NORTHSTARCPP_RENDER_SURFACES_ABI,
+    set_world_surface_texture,set_world_surface_cubes};
 const NorthStarRenderTrianglesApi triangles_api{
     NORTHSTARCPP_RENDER_TRIANGLES_ABI,set_render_triangles};
 const NorthStarRenderMemoryApi memory_api{
@@ -832,6 +1019,13 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if (version == NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "Direct3D 11","5.1.0",NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI,
+            sizeof(surfaces_api),&surfaces_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if (version == NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_RENDER, "Direct3D 11", "5.0.0",

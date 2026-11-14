@@ -219,7 +219,7 @@ def evaluate(build: Path, sdk: Path, provider: Path, attestation: Path | None,
           cache.read_text(errors="replace") and complete_clean and build_current,
           "Complete fresh Release Ninja graph and clean build log required")
     exe = build / "northstarcpp_player.exe"
-    editor = build / "northstarcpp_editor.exe"
+    editor = build / "northstarcpp_editor_qt.exe"
     check("player_and_editor", exe.is_file() and editor.is_file(),
           "Both release executables are present")
     check("v8_provider", provider.is_file(),

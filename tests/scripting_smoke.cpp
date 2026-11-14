@@ -159,6 +159,10 @@ void v8_test(char const* asset_root) {
                 what.find("example.js") != std::string::npos;
     }
     check(threw, "V8 exception lacks origin or message");
+    // A normal JS exception must not discard the persistent context; this is
+    // especially important for process-isolated V8 workers.
+    check(js.evaluate("counter") == "12",
+          "V8 lost the JavaScript context after an ordinary exception");
     threw = false;
     try { js.evaluate("while(true) {}", "loop.js"); }
     catch (std::runtime_error const& e) {

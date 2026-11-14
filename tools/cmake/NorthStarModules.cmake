@@ -54,7 +54,7 @@ function(northstarcpp_test_perlin_override runtime)
         add_library(northstarcpp_perlin_${_variant} MODULE
             "${PROJECT_SOURCE_DIR}/tests/perlin_override_provider.cpp")
         target_compile_definitions(northstarcpp_perlin_${_variant} PRIVATE NORTHSTARCPP_MODULE_BUILD)
-        target_include_directories(northstarcpp_perlin_${_variant} PRIVATE "${PROJECT_SOURCE_DIR}/include")
+        target_include_directories(northstarcpp_perlin_${_variant} PRIVATE "${PROJECT_SOURCE_DIR}/engine/northstarcpp/modules/api/include")
         set_target_properties(northstarcpp_perlin_${_variant} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/test_modules"
             LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/test_modules")

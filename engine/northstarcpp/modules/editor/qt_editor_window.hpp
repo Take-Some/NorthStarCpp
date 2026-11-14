@@ -2,11 +2,13 @@
 #pragma once
 #include "editor_tools.hpp"
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/geometry_plugin.h>
 #include <QMainWindow>
 #include <QVector3D>
 #include <QString>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <cstddef>
 class QDockWidget;
 class QTreeWidget;
@@ -16,6 +18,8 @@ class QDoubleSpinBox;
 class QCheckBox;
 class QPlainTextEdit;
 class QAction;
+class QProcess;
+class QDialog;
 namespace northstarcpp::editor {
 class QtContentBrowser;
 class QtEditorViewport;
@@ -26,6 +30,11 @@ public:
     bool openScene(QString const& file);
     bool saveScene(QString file={});
     bool runSmoke(QString const& root);
+    bool runGpuSmoke(QString const& root);
+    bool runPlayerCheckSmoke(QString const& root);
+    QString playerExecutable() const;
+    void playGame();
+    void stopGame();
     int objectCount() const noexcept {return static_cast<int>(scene_.objects.size());}
     QtContentBrowser* contentBrowser() const {return browser_;}
 protected:
@@ -37,10 +46,14 @@ private:
     editor_tools::GizmoOptions gizmoOptions_;
     int selection_=-1;
     bool dirty_=false, uiSync_=false;
+    std::optional<Scene> gizmoBefore_;
+    bool gizmoChanged_=false;
     QtEditorViewport* viewport_{};
     QtContentBrowser* browser_{};
     QTreeWidget* outliner_{};
     QTreeWidget* dependencies_{};
+    QTreeWidget* providers_{};
+    QTreeWidget* components_{};
     QLineEdit* outlinerSearch_{};
     QLineEdit* objectName_{};
     QLineEdit* assetPath_{};
@@ -48,16 +61,32 @@ private:
     QDoubleSpinBox *rx_{},*ry_{},*rz_{},*sx_{},*sy_{},*sz_{};
     QCheckBox *visible_{},*collision_{};
     QPlainTextEdit* messages_{};
-    QDockWidget *outlinerDock_{},*detailsDock_{},*contentDock_{},*dependencyDock_{};
+    QDockWidget *outlinerDock_{},*detailsDock_{},*contentDock_{},*dependencyDock_{},*providerDock_{};
     QAction *undoAction_{},*redoAction_{},*saveAction_{};
+    QAction *playAction_{},*stopAction_{};
+    QProcess* playerProcess_{};
+    QString configuredPlayerPath_;
+    QAction* exploreModeAction_{};
+    QAction* fpsModeAction_{};
+    void choosePlayerExecutable();
     void setupUi();
     void updateAll();
     void updateOutliner();
     void updateInspector();
+    void updateComponentInspector();
+    void editComponent(bool create);
+    void deleteComponent();
     void updateDependencies();
+    void refreshProviderInspector();
     void chooseObject(int index);
+    void renameSelected();
+    void duplicateSelected();
+    void deleteSelected();
     void editScene(std::function<void(Scene&)> change,int selectedAfter=-2);
     void createActor(QString const& asset,QVector3D position);
+    void createProceduralActor(QString const& title,
+                               NorthStarGeometryRequest request,
+                               QVector3D position={0,0,0});
     void createMaterial();
     void undo();
     void redo();

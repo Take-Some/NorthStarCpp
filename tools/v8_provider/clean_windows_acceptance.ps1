@@ -132,10 +132,10 @@ Record-Check 'manifest_sha256' {
 }
 $bin=Join-Path $package 'bin'
 $qt=Join-Path $bin 'qt_tools'
-Record-Check 'native_editor' {
+Record-Check 'qt_editor' {
     $scene=Join-Path $env:TEMP ('northstar-clean-'+[Guid]::NewGuid().ToString('N')+'.nscn')
     try {
-        Launch-Checked (Join-Path $bin 'northstarcpp_editor.exe') @('--warp','--smoke','--smoke-output',$scene)
+        Launch-Checked (Join-Path $qt 'northstarcpp_editor_qt.exe') @('--smoke','--smoke-output',$scene)
         if (-not (Test-Path -LiteralPath $scene -PathType Leaf)) { throw 'Editor did not serialize scene' }
         Launch-Checked (Join-Path $bin 'northstarcpp_player.exe') @('--warp','--smoke','--scene',$scene)
     } finally {
@@ -150,10 +150,7 @@ Record-Check 'qt_tools' {
     )) {
         Launch-Checked (Join-Path $qt $cmd[0]) @($cmd[1])
     }
-    $optional=Join-Path $qt 'northstarcpp_editor_qt.exe'
-    if (Test-Path -LiteralPath $optional -PathType Leaf) {
-        Launch-Checked $optional @('--smoke')
-    }
+
 }
 Record-Check 'source_project_gameplay' {
     if (-not (Test-Path -LiteralPath (Join-Path $source 'main.nscene') -PathType Leaf)) {

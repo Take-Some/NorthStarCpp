@@ -1,9 +1,18 @@
 #include "qt_editor_viewport.hpp"
 #include "editor_tools.hpp"
+#include <northstarcpp/collision_service.hpp>
+#include <northstarcpp/geometry_service.hpp>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QKeyEvent>
+#include <QFocusEvent>
+#include <QTimer>
+#include <QResizeEvent>
+#include <QCoreApplication>
+#include <QPaintEngine>
+#include <QPolygonF>
 #include <QLineF>
 #include <QFont>
 #include <QPainter>
@@ -16,17 +25,222 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <stdexcept>
+#ifdef _WIN32
+#include "../viewport/viewport.hpp"
+#endif
 namespace northstarcpp::editor {
+#ifdef _WIN32
+// Native Qt child HWND dedicated to the engine swapchain. The parent stays
+// a normal Qt QWidget and remains responsible for input, DnD and toolbars.
+class GpuSurface final : public QWidget {
+public:
+    explicit GpuSurface(QWidget* parent):QWidget(parent) {
+        setAttribute(Qt::WA_NativeWindow,true);
+        setAttribute(Qt::WA_PaintOnScreen,true);
+        setAttribute(Qt::WA_NoSystemBackground,true);
+        setAcceptDrops(true);
+        setFocusPolicy(Qt::NoFocus);
+    }
+    QPaintEngine* paintEngine() const override {return nullptr;}
+protected:
+    void paintEvent(QPaintEvent*) override {}
+};
+struct QtEditorViewport::GpuState {
+    std::unique_ptr<northstarcpp::Viewport> renderer;
+    explicit GpuState(WId nativeWindow) :
+        renderer(std::make_unique<northstarcpp::Viewport>(
+            reinterpret_cast<HWND>(nativeWindow),false)) {}
+};
+#else
+struct QtEditorViewport::GpuState {};
+#endif
+QtEditorViewport::~QtEditorViewport() {
+    if(gpu_timer_)gpu_timer_->stop();
+    // Destroy swapchain before its native child window is destroyed.
+    gpu_.reset();
+}
 QtEditorViewport::QtEditorViewport(QWidget* parent):QWidget(parent) {
     setObjectName("sceneViewport");
     setMinimumSize(300,240);
     setAcceptDrops(true);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
+    gpu_timer_=new QTimer(this);
+    gpu_timer_->setInterval(16);
+    connect(gpu_timer_,&QTimer::timeout,this,[this] {
+        if(gpu_dirty_ && isVisible())drawGpu();
+    });
+    fly_timer_=new QTimer(this);
+    fly_timer_->setTimerType(Qt::PreciseTimer);
+    fly_timer_->setInterval(16); // time-integrated input independent of FPS
+    connect(fly_timer_,&QTimer::timeout,this,[this] {
+        if(!rotating_) {fly_timer_->stop();held_keys_.clear();return;}
+        float const dt=std::clamp(float(fly_clock_.restart_seconds()),0.f,.05f);
+        advanceFly(dt);
+    });
 }
-void QtEditorViewport::setScene(Scene const* scene) {scene_=scene;update();}
-void QtEditorViewport::setSelected(int index) {selected_=index;update();}
-void QtEditorViewport::setGizmoMode(int index) {gizmo_=std::clamp(index,0,2);update();}
+bool QtEditorViewport::gpuActive() const noexcept {
+    return draw_mode_==DrawMode::EngineGpu && gpu_ && gpu_surface_;
+}
+bool QtEditorViewport::renderGpuNow() {
+    if(!gpuActive())return false;
+    gpu_dirty_=true;
+    drawGpu();
+    return gpuActive() && !gpu_dirty_;
+}
+void QtEditorViewport::setAssetSources(std::filesystem::path root) {
+    asset_root_=std::move(root);
+#ifdef _WIN32
+    if(gpu_ && !asset_root_.empty()) {
+        try {gpu_->renderer->set_asset_sources(asset_root_);}
+        catch(std::exception const& e) {emit gpuUnavailable(QString::fromUtf8(e.what()));}
+    }
+#endif
+    gpu_dirty_=true;
+}
+void QtEditorViewport::ensureGpu() {
+#ifdef _WIN32
+    if(!gpu_surface_) {
+        gpu_surface_=new GpuSurface(this);
+        gpu_surface_->setObjectName("engineGpuSurface");
+        gpu_surface_->setGeometry(rect());
+        gpu_surface_->installEventFilter(this);
+        gpu_surface_->show();
+    }
+    if(!gpu_) {
+        auto renderer=std::make_unique<GpuState>(gpu_surface_->winId());
+        if(!asset_root_.empty())
+            renderer->renderer->set_asset_sources(asset_root_);
+        gpu_=std::move(renderer);
+    }
+    gpu_surface_->show();
+    gpu_surface_->raise();
+    gpu_dirty_=true;
+    if(!gpu_timer_->isActive())gpu_timer_->start();
+#else
+    throw std::runtime_error(
+        "Native GPU viewport surface is not yet available on this platform.");
+#endif
+}
+void QtEditorViewport::drawGpu() {
+#ifdef _WIN32
+    if(!gpuActive() || !scene_)return;
+    try {
+        auto const& pose=camera_.pose;
+        northstarcpp::ViewportGizmo gizmo;
+        gizmo.mode=unsigned(gizmo_);
+        gizmo.active_axis=drag_axis_;
+        gpu_->renderer->draw(*scene_,selected_,false,nullptr,nullptr,false,
+                             &pose,nullptr,false,false,&gizmo);
+        gpu_dirty_=false;
+    } catch(std::exception const& e) {
+        auto error=QString::fromUtf8(e.what());
+        gpu_timer_->stop();
+        // Engine renderer can be swapped/reloaded; safely release the
+        // existing swapchain before returning to cross-platform proxy.
+        gpu_.reset();
+        if(gpu_surface_)gpu_surface_->hide();
+        draw_mode_=DrawMode::Shaded;
+        emit gpuUnavailable(error);
+        update();
+    }
+#endif
+}
+bool QtEditorViewport::eventFilter(QObject* object,QEvent* event) {
+    if(object==gpu_surface_) {
+        switch(event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
+        case QEvent::DragEnter:
+        case QEvent::DragMove:
+        case QEvent::Drop:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+            // Surface is aligned to the parent's (0,0), so its local
+            // pointer coordinates equal authoring Viewport coordinates.
+            QCoreApplication::sendEvent(this,event);
+            return true;
+        default:break;
+        }
+    }
+    return QWidget::eventFilter(object,event);
+}
+void QtEditorViewport::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if(gpu_surface_)gpu_surface_->setGeometry(rect());
+    gpu_dirty_=true;
+}
+void QtEditorViewport::setScene(Scene const* scene) {
+    scene_=scene;
+    gpu_dirty_=true;
+    update();
+}
+void QtEditorViewport::setCameraPose(CameraPose pose) {
+    if(!std::isfinite(pose.position.x)||!std::isfinite(pose.position.y)||
+       !std::isfinite(pose.position.z)||!std::isfinite(pose.yaw)||
+       !std::isfinite(pose.pitch))return;
+    pose.pitch=std::clamp(pose.pitch,-1.52f,1.52f);
+    pose.position.x=std::clamp(pose.position.x,-900000.f,900000.f);
+    pose.position.y=std::clamp(pose.position.y,-900000.f,900000.f);
+    pose.position.z=std::clamp(pose.position.z,-900000.f,900000.f);
+    camera_.pose=pose;
+    gpu_dirty_=true;update();
+}
+void QtEditorViewport::setSelected(int index) {
+    selected_=index;gpu_dirty_=true;update();
+}
+void QtEditorViewport::setGizmoMode(int index) {
+    gizmo_=std::clamp(index,0,2);gpu_dirty_=true;update();
+}
+void QtEditorViewport::setDrawMode(DrawMode mode) {
+    if(int(mode)<0 || int(mode)>3)return;
+    if(mode==DrawMode::EngineGpu) {
+        try {ensureGpu();}
+        catch(std::exception const& e) {
+            gpu_.reset();
+            if(gpu_surface_)gpu_surface_->hide();
+            mode=DrawMode::Shaded;
+            emit gpuUnavailable(QString::fromUtf8(e.what()));
+        }
+    } else {
+        if(gpu_timer_)gpu_timer_->stop();
+        if(gpu_surface_)gpu_surface_->hide();
+        gpu_.reset();
+    }
+    draw_mode_=mode;
+    gpu_dirty_=true;
+    update();
+}
+void QtEditorViewport::setShowGrid(bool enabled) {show_grid_=enabled;update();}
+void QtEditorViewport::setFlySpeed(float value) {
+    if(!std::isfinite(value))return;
+    auto const next=std::clamp(value,0.1f,2000.f);
+    if(next==fly_speed_)return;
+    fly_speed_=next;
+    emit flySpeedChanged(fly_speed_);
+    update();
+}
+void QtEditorViewport::advanceFly(float elapsedSeconds) {
+    if(!rotating_ || !std::isfinite(elapsedSeconds) || elapsedSeconds<=0.f)return;
+    float const sideways=float(held_keys_.contains(Qt::Key_D))-
+                         float(held_keys_.contains(Qt::Key_A));
+    float const forward=float(held_keys_.contains(Qt::Key_W))-
+                        float(held_keys_.contains(Qt::Key_S));
+    float const vertical=float(held_keys_.contains(Qt::Key_E))-
+                         float(held_keys_.contains(Qt::Key_Q));
+    float const length=std::sqrt(sideways*sideways+forward*forward+
+                                  vertical*vertical);
+    if(length<=0.f)return;
+    float speed=fly_speed_;
+    if(held_keys_.contains(Qt::Key_Shift))speed*=3.f;
+    if(held_keys_.contains(Qt::Key_Control))speed*=.25f;
+    float const step=std::min(0.1f,elapsedSeconds)*speed/length;
+    camera_.fly(sideways*step,vertical*step,forward*step);
+    gpu_dirty_=true;update();
+}
 QPointF QtEditorViewport::projected(Vector3 point) const {
     auto position=camera_.project(point,float(width()),float(height()));
     return position?QPointF(position->x,position->y):
@@ -46,12 +260,62 @@ Vector3 QtEditorViewport::groundAt(QPoint p) const {
     return {0.f,0.f,0.f};
 }
 void QtEditorViewport::frameSelected() {
-    if(scene_ && selected_>=0 && std::size_t(selected_)<scene_->objects.size())
-        camera_.frame(scene_->objects[static_cast<std::size_t>(selected_)].position,12.f);
-    else camera_.frame({0,0,0},18.f);
-    update();
+    if(!scene_ || selected_<0 ||
+       std::size_t(selected_)>=scene_->objects.size()) {
+        frameAll();
+        return;
+    }
+    auto const& object=scene_->objects[std::size_t(selected_)];
+    auto size=std::max(.01f,object.size);
+    if(scene_->version==3)
+        size*=std::max({std::abs(object.node.scale.x),
+                         std::abs(object.node.scale.y),
+                         std::abs(object.node.scale.z),.01f});
+    Vector3 const center{object.position.x,
+                         object.position.y+size*.5f,object.position.z};
+    // Fit the actor proxy in the smaller viewport dimension, rather than
+    // placing every actor at the same hardcoded 12-meter distance.
+    float const fov=std::clamp(camera_.pose.fov_y_degrees,15.f,120.f);
+    float const radians=fov*3.14159265f/180.f;
+    float const distance=std::max(2.5f,size*.9f/std::tan(radians*.5f));
+    camera_.frame(center,distance);
+    gpu_dirty_=true;update();
+}
+void QtEditorViewport::frameAll() {
+    if(!scene_ || scene_->objects.empty()) {
+        camera_.frame({0,0,0},18.f);
+        update();
+        return;
+    }
+    Vector3 lo{900000.f,900000.f,900000.f};
+    Vector3 hi{-900000.f,-900000.f,-900000.f};
+    for(auto const& object:scene_->objects) {
+        if(scene_->version==3 && !object.node.visible)continue;
+        float extent=std::max(.01f,object.size);
+        if(scene_->version==3)
+            extent*=std::max({std::abs(object.node.scale.x),
+                              std::abs(object.node.scale.y),
+                              std::abs(object.node.scale.z),.01f});
+        lo.x=std::min(lo.x,object.position.x-extent);
+        lo.y=std::min(lo.y,object.position.y-extent);
+        lo.z=std::min(lo.z,object.position.z-extent);
+        hi.x=std::max(hi.x,object.position.x+extent);
+        hi.y=std::max(hi.y,object.position.y+extent);
+        hi.z=std::max(hi.z,object.position.z+extent);
+    }
+    if(lo.x>hi.x) {camera_.frame({0,0,0},18.f);update();return;}
+    Vector3 const center{(lo.x+hi.x)*.5f,
+                         (lo.y+hi.y)*.5f,
+                         (lo.z+hi.z)*.5f};
+    float const size=std::max({hi.x-lo.x,hi.y-lo.y,hi.z-lo.z,1.f});
+    auto const radians=std::clamp(camera_.pose.fov_y_degrees,15.f,120.f)*
+                       3.14159265f/180.f;
+    camera_.frame(center,std::max(10.f,
+        size*.85f/std::tan(radians*.5f)));
+    gpu_dirty_=true;update();
 }
 void QtEditorViewport::paintEvent(QPaintEvent*) {
+    if(gpuActive()) {gpu_dirty_=true;return;}
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing,true);
     QLinearGradient bg(0,0,0,height());
@@ -62,7 +326,7 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     painter.setClipRect(rect().adjusted(2,2,-2,-2));
     // Basic editor grid. This is a cross-platform authoring fallback and
     // does NOT pretend to render source materials or the game's Vulkan output.
-    for(int coordinate=-100;coordinate<=100;coordinate+=5) {
+    if(show_grid_)for(int coordinate=-100;coordinate<=100;coordinate+=5) {
         QColor grid=coordinate==0?QColor("#64819b"):QColor("#314259");
         painter.setPen(QPen(grid,coordinate==0?1.5:0.8));
         for(int pass=0;pass<2;++pass) {
@@ -94,25 +358,100 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
         if(visible.size()>4000)visible.resize(4000);
         constexpr std::array<std::pair<int,int>,12> edges{{{0,1},{1,3},{3,2},{2,0},
             {4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7}}};
+        constexpr std::array<std::array<int,4>,6> faces{{
+            {{0,2,3,1}},{{4,5,7,6}},{{0,1,5,4}},
+            {{2,6,7,3}},{{0,4,6,2}},{{1,3,7,5}}
+        }};
         for(auto const& item:visible) {
             auto const& object=scene_->objects[item.index];
-            float h=object.size*0.5f;
-            if(scene_->version>=3)h*=std::max({object.node.scale.x,
-                object.node.scale.y,object.node.scale.z,0.1f});
+            float const size=std::max(.001f,object.size);
             auto const p=object.position;
-            QPointF vertices[8];
-            for(int i=0;i<8;++i) {
-                auto projectedPoint=Vector3{p.x+((i&1)?h:-h),
-                                            p.y+((i&4)?h:-h),
-                                            p.z+((i&2)?h:-h)};
-                vertices[i]=projected(projectedPoint);
+            auto const isV3=scene_->version>=3;
+            // Respect authored non-uniform scale and rotation in proxy view.
+            auto const xAxis=isV3?editor_tools::gizmo_axis(object,
+                editor_tools::GizmoAxis::x,true):Vector3{1.f,0.f,0.f};
+            auto const yAxis=isV3?editor_tools::gizmo_axis(object,
+                editor_tools::GizmoAxis::y,true):Vector3{0.f,1.f,0.f};
+            auto const zAxis=isV3?editor_tools::gizmo_axis(object,
+                editor_tools::GizmoAxis::z,true):Vector3{0.f,0.f,1.f};
+            float const sx=isV3?size*object.node.scale.x:size;
+            float const sy=isV3?size*object.node.scale.y:size;
+            float const sz=isV3?size*object.node.scale.z:size;
+            Vector3 const center{p.x,p.y+sy*.5f,p.z};
+            QPointF screen[8];
+            Vector3 world[8];
+            bool hasBehind=false;
+            auto const direction=camera_.forward();
+            auto const cameraPosition=camera_.pose.position;
+            for(int k=0;k<8;++k) {
+                float x=((k&1)? .5f:-.5f)*sx;
+                float y=((k&4)? .5f:-.5f)*sy;
+                float z=((k&2)? .5f:-.5f)*sz;
+                world[k]=Vector3{
+                    center.x+xAxis.x*x+yAxis.x*y+zAxis.x*z,
+                    center.y+xAxis.y*x+yAxis.y*y+zAxis.y*z,
+                    center.z+xAxis.z*x+yAxis.z*y+zAxis.z*z};
+                Vector3 diff{world[k].x-cameraPosition.x,
+                             world[k].y-cameraPosition.y,
+                             world[k].z-cameraPosition.z};
+                if(diff.x*direction.x+diff.y*direction.y+
+                   diff.z*direction.z<=camera_.pose.near_plane)
+                    hasBehind=true;
+                screen[k]=projected(world[k]);
             }
-            bool chosen=selected_==static_cast<int>(item.index);
-            QColor shade=QColor::fromRgb(object.color);
-            painter.setPen(QPen(chosen?QColor("#ffc95b"):shade.lighter(120),
-                                chosen?2.3:1.0));
-            for(auto const& edge:edges)
-                painter.drawLine(vertices[edge.first],vertices[edge.second]);
+            if(hasBehind)continue; // Never project geometry behind near plane.
+            bool const chosen=selected_==static_cast<int>(item.index);
+            QColor const color=QColor::fromRgb(object.color);
+            if(draw_mode_!=DrawMode::Wireframe) {
+                struct Face {float depth;int index;float brightness;};
+                std::array<Face,6> sortedFaces{};
+                for(int face=0;face<6;++face) {
+                    auto const& indexes=faces[face];
+                    Vector3 const a=world[indexes[0]],b=world[indexes[1]],
+                        c=world[indexes[2]];
+                    Vector3 u{b.x-a.x,b.y-a.y,b.z-a.z};
+                    Vector3 v{c.x-a.x,c.y-a.y,c.z-a.z};
+                    Vector3 n{u.y*v.z-u.z*v.y,u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x};
+                    float norm=std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);
+                    float shade=.45f;
+                    if(norm>.0000001f) {
+                        n.x/=norm;n.y/=norm;n.z/=norm;
+                        shade=std::clamp(.35f+
+                            .55f*std::abs(n.x*(-.35f)+n.y*.82f+n.z*.45f),
+                            .25f,1.f);
+                    }
+                    float depth=0.f;
+                    for(int index:indexes) {
+                        auto const& vtx=world[index];
+                        Vector3 diff{vtx.x-cameraPosition.x,
+                            vtx.y-cameraPosition.y,vtx.z-cameraPosition.z};
+                        depth+=diff.x*direction.x+diff.y*direction.y+
+                            diff.z*direction.z;
+                    }
+                    sortedFaces[face]={depth*.25f,face,shade};
+                }
+                std::sort(sortedFaces.begin(),sortedFaces.end(),
+                    [](Face lhs,Face rhs){return lhs.depth>rhs.depth;});
+                for(auto const& face:sortedFaces) {
+                    QPolygonF poly;
+                    for(auto const index:faces[face.index])poly<<screen[index];
+                    painter.setPen(draw_mode_==DrawMode::ShadedWireframe?
+                        QPen(color.lighter(135),.8):Qt::NoPen);
+                    QColor filled=color;
+                    // QColor::lighter percentage is a stable proxy for studio
+                    // directional shading, not the game's PBR shader.
+                    filled=filled.darker(int(100.f/std::max(.25f,face.brightness)));
+                    painter.setBrush(filled);
+                    painter.drawPolygon(poly);
+                }
+                painter.setBrush(Qt::NoBrush);
+            }
+            if(draw_mode_!=DrawMode::Shaded || chosen) {
+                painter.setPen(QPen(chosen?QColor("#ffc95b"):color.lighter(120),
+                                    chosen?2.3:1.0));
+                for(auto const& edge:edges)
+                    painter.drawLine(screen[edge.first],screen[edge.second]);
+            }
             if(chosen) {
                 painter.setPen(QColor("#f5f0d9"));
                 painter.drawText(projected(p)+QPointF(9,-12),
@@ -138,17 +477,32 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     painter.setPen(QColor("#c1d7ec"));
     painter.setFont(QFont("Segoe UI",9));
     painter.drawText(QRect(14,10,width()-28,26),Qt::AlignLeft|Qt::AlignVCenter,
-        "PERSPECTIVE  |  C++ AUTHORING PREVIEW  |  RMB Orbit  |  Wheel Zoom  |  W/E/R Gizmo");
+        "PERSPECTIVE  |  PROXY VIEWPORT  |  RMB + WASD FLY  |  Q/E UP-DOWN  |  MMB PAN");
     painter.setPen(QColor("#8ea6c2"));
     painter.drawText(QRect(14,height()-31,width()-28,22),
         Qt::AlignLeft|Qt::AlignVCenter,
-        QString("Objects: %1  |  Preview: proxy geometry (GPU render integration pending)")
-            .arg(scene_?scene_->objects.size():0));
+        QString("Objects: %1  |  %2  |  Fly: %3 m/s  |  Shift ×3, Ctrl ×0.25  |  F Focus")
+            .arg(scene_?scene_->objects.size():0)
+            .arg(draw_mode_==DrawMode::Wireframe?"Wireframe":
+                 draw_mode_==DrawMode::Shaded?"Shaded proxy":"Shaded + edges")
+            .arg(fly_speed_,0,'f',1));
 }
 void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
     previous_=event->position().toPoint();
     if(event->button()==Qt::RightButton) {
-        rotating_=true;setCursor(Qt::ClosedHandCursor);return;
+        setFocus(Qt::MouseFocusReason);
+        rotating_=true;
+        held_keys_.clear();
+        fly_clock_.start();
+        fly_timer_->start();
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+    if(event->button()==Qt::MiddleButton) {
+        panning_=true;
+        setCursor(Qt::SizeAllCursor);
+        event->accept();return;
     }
     if(event->button()!=Qt::LeftButton || !scene_)return;
     if(selected_>=0 && static_cast<std::size_t>(selected_)<scene_->objects.size()) {
@@ -162,12 +516,26 @@ void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
             auto dist=QLineF(p,event->position()).length();
             if(dist<best){best=dist;drag_axis_=axis;}
         }
-        if(drag_axis_>=0)return;
+        if(drag_axis_>=0) {
+            emit gizmoDragStarted();
+            event->accept();
+            return;
+        }
     }
     auto ray=camera_.screen_ray(float(event->position().x()),
                                 float(event->position().y()),
                                 float(width()),float(height()));
-    auto index=editor_tools::pick_actor(*scene_,ray);
+    std::optional<std::size_t> index;
+    try {
+        static northstarcpp::CollisionService collision;
+        static northstarcpp::GeometryService geometry;
+        index=editor_tools::pick_actor_geometry(*scene_,ray,collision,geometry);
+    } catch(std::exception const& exception) {
+        // Do not silently select an AABB when exact mesh selection fails:
+        // a disabled or invalid collision plugin must be diagnosed.
+        emit gpuUnavailable(QString::fromUtf8(exception.what()));
+        return;
+    }
     selected_=index?static_cast<int>(*index):-1;
     emit selectionChanged(selected_);
     update();
@@ -177,8 +545,17 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
     auto difference=current-previous_;
     previous_=current;
     if(rotating_) {
+        if(!event->buttons().testFlag(Qt::RightButton)) {
+            rotating_=false;held_keys_.clear();fly_timer_->stop();
+            unsetCursor();return;
+        }
         camera_.look(float(difference.x()),float(-difference.y()));
-        update();
+        gpu_dirty_=true;update();
+    } else if(panning_ && event->buttons().testFlag(Qt::MiddleButton)) {
+        float const scale=fly_speed_*.002f;
+        camera_.move(float(-difference.x())*scale,
+                     float(difference.y())*scale,0.f);
+        gpu_dirty_=true;update();
     } else if(drag_axis_>=0 && event->buttons().testFlag(Qt::LeftButton)) {
         float distance=float(difference.x()-difference.y())*0.035f;
         if(std::abs(distance)>0.0001f)emit gizmoDelta(gizmo_,drag_axis_,distance);
@@ -186,12 +563,68 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
-    if(event->button()==Qt::RightButton) {rotating_=false;unsetCursor();}
-    if(event->button()==Qt::LeftButton)drag_axis_=-1;
+    if(event->button()==Qt::RightButton) {
+        rotating_=false;held_keys_.clear();fly_timer_->stop();unsetCursor();
+        event->accept();
+    }
+    if(event->button()==Qt::MiddleButton) {panning_=false;unsetCursor();}
+    if(event->button()==Qt::LeftButton) {
+        if(drag_axis_>=0)emit gizmoDragFinished();
+        drag_axis_=-1;
+    }
 }
 void QtEditorViewport::wheelEvent(QWheelEvent* event) {
-    camera_.dolly(float(event->angleDelta().y())/120.f*0.8f);
-    update();
+    float const notches=float(event->angleDelta().y())/120.f;
+    if(rotating_)setFlySpeed(fly_speed_*std::pow(1.15f,notches));
+    else camera_.dolly(notches*std::clamp(fly_speed_*.18f,.1f,75.f));
+    gpu_dirty_=true;update();
+    event->accept();
+}
+void QtEditorViewport::keyPressEvent(QKeyEvent* event) {
+    if(event->key()==Qt::Key_Escape && rotating_) {
+        rotating_=false;held_keys_.clear();fly_timer_->stop();
+        unsetCursor();event->accept();return;
+    }
+    if(!rotating_ && !event->isAutoRepeat() && event->modifiers()==Qt::NoModifier) {
+        if(event->key()==Qt::Key_W || event->key()==Qt::Key_E ||
+           event->key()==Qt::Key_R) {
+            emit gizmoModeRequested(event->key()==Qt::Key_W?0:
+                                   event->key()==Qt::Key_E?1:2);
+            event->accept();
+            return;
+        }
+        if(event->key()==Qt::Key_F) {
+            frameSelected();
+            event->accept();
+            return;
+        }
+    }
+    if(rotating_ && !event->isAutoRepeat()) {
+        switch(event->key()) {
+        case Qt::Key_W:case Qt::Key_A:case Qt::Key_S:case Qt::Key_D:
+        case Qt::Key_Q:case Qt::Key_E:
+        case Qt::Key_Shift:case Qt::Key_Control:
+            held_keys_.insert(event->key());
+            event->accept();return;
+        default:break;
+        }
+    }
+    QWidget::keyPressEvent(event);
+}
+void QtEditorViewport::keyReleaseEvent(QKeyEvent* event) {
+    if(!event->isAutoRepeat() && held_keys_.contains(event->key())) {
+        held_keys_.remove(event->key());
+        event->accept();return;
+    }
+    QWidget::keyReleaseEvent(event);
+}
+void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
+    if(drag_axis_>=0)emit gizmoDragFinished();
+    rotating_=false;panning_=false;drag_axis_=-1;
+    held_keys_.clear();
+    if(fly_timer_)fly_timer_->stop();
+    unsetCursor();
+    QWidget::focusOutEvent(event);
 }
 void QtEditorViewport::dragEnterEvent(QDragEnterEvent* event) {
     if(event->mimeData()->hasFormat("application/x-northstar-asset-reference"))

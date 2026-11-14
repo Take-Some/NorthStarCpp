@@ -3,6 +3,9 @@
 #include "qt_content_browser.hpp"
 #include <northstarcpp/assets.hpp>
 #include "editor_asset_thumbnails.hpp"
+#include "qt_asset_preview_dialog.hpp"
+#include "editor_asset_material_source.hpp"
+#include "qt_asset_card_delegate.hpp"
 
 #include <QtConcurrent/QtConcurrent>
 #include <QAction>
@@ -46,18 +49,26 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+// The Qt RCC entry point has global linkage. This initializer must be
+// declared in the global namespace (not even an anonymous namespace).
+static void ensureFolderArtResource() {
+    Q_INIT_RESOURCE(northstar_folder_icons);
+}
+
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
 namespace {
-constexpr int role_path=Qt::UserRole+1;
-constexpr int role_directory=Qt::UserRole+2;
-constexpr int role_kind=Qt::UserRole+3;
-constexpr int role_reference=Qt::UserRole+4;
+constexpr int role_path=asset_card_roles::path;
+constexpr int role_directory=asset_card_roles::directory;
+constexpr int role_kind=asset_card_roles::kind;
+constexpr int role_reference=asset_card_roles::reference;
 QString qt(fs::path const& path) {
     auto u8=path.generic_u8string();
     return QString::fromUtf8(u8.data(),static_cast<int>(u8.size()));
@@ -80,20 +91,111 @@ QString bytesText(std::uintmax_t count) {
 struct Palette {QColor fill;QString text;};
 Palette asset_palette(AssetKind kind) {
     switch(kind) {
-    case AssetKind::folder:return {QColor("#ce9b50"),"DIR"};
-    case AssetKind::mesh:return {QColor("#58a7db"),"3D"};
-    case AssetKind::material:return {QColor("#a678d0"),"MAT"};
-    case AssetKind::texture:return {QColor("#5cbf99"),"TEX"};
-    case AssetKind::audio:return {QColor("#d9ab5a"),"WAV"};
-    case AssetKind::scene:return {QColor("#72b6c4"),"LVL"};
-    case AssetKind::script:return {QColor("#d7849a"),"JS"};
-    case AssetKind::animation:return {QColor("#80bc72"),"ANIM"};
-    case AssetKind::shader:return {QColor("#6fb8d2"),"HLSL"};
+    case AssetKind::folder:return {QColor("#C99A52"),"DIR"};
+    case AssetKind::mesh:return {QColor("#58A7DB"),"3D"};
+    case AssetKind::material:return {QColor("#A66AD6"),"MAT"};
+    case AssetKind::texture:return {QColor("#4DBA87"),"TEX"};
+    case AssetKind::audio:return {QColor("#D8A24E"),"WAV"};
+    case AssetKind::scene:return {QColor("#70B7C6"),"LVL"};
+    case AssetKind::script:return {QColor("#D97893"),"JS"};
+    case AssetKind::animation:return {QColor("#7DBD68"),"ANIM"};
+    case AssetKind::shader:return {QColor("#6FAFD7"),"HLSL"};
     default:return {QColor("#718198"),"FILE"};
     }
 }
+// A read-only disk dictionary may be previewed before engine.assets is
+// installed. Cache the last parsed ListFile per thumbnail worker thread,
+// invalidating on file change to avoid repeated NEF8 inflate per item.
+QImage directListFileThumbnail(fs::path const& root,std::string const& key,
+                               AssetKind kind) {
+    auto const separator=key.find('@');
+    if(separator==std::string::npos ||
+       (kind!=AssetKind::texture && kind!=AssetKind::mesh &&
+        kind!=AssetKind::material))return {};
+    auto const relative=key.substr(0,separator);
+    auto const name=key.substr(separator+1);
+    if(kind==AssetKind::material) {
+        // NEF8 material previews share a codec/Qt worker backend. Protect
+        // the material-decoding section pending a full sanitizer audit,
+        // while leaving texture and model thumbnails parallel.
+        static std::mutex materialPreviewMutex;
+        std::lock_guard<std::mutex> guard(materialPreviewMutex);
+        auto resources=loadMaterialPreviewSource(root,key);
+        if(!resources.material)return {};
+        auto sphere=northstarcpp::editor_tools::preview_material(
+            *resources.material,resources.textures,256);
+        if(!sphere.valid())return {};
+        QImage bitmap(reinterpret_cast<uchar const*>(sphere.argb.data()),
+             sphere.width,sphere.height,sphere.width*4,QImage::Format_ARGB32);
+        return bitmap.copy();
+    }
+    if(!safe_virtual_path(relative) || name.empty() ||
+       name.find_first_of("@/\\\\:")!=std::string::npos)return {};
+    auto const full=root/fs::u8path(relative);
+    std::error_code ec;
+    auto const canonical_root=fs::weakly_canonical(root,ec);
+    if(ec)return {};
+    auto const canonical_file=fs::weakly_canonical(full,ec);
+    if(ec)return {};
+    auto base=canonical_root.begin();
+    auto entry=canonical_file.begin();
+    for(;base!=canonical_root.end();++base,++entry)
+        if(entry==canonical_file.end() || *entry!=*base)return {};
+    if(fs::is_symlink(fs::symlink_status(full,ec)) || ec)return {};
+    auto const bytes_count=fs::file_size(full,ec);
+    if(ec || bytes_count<128 || bytes_count>64u*1024u*1024u)return {};
+    auto const modified=fs::last_write_time(full,ec);
+    if(ec)return {};
+    struct Cache {
+        fs::path file;
+        fs::file_time_type modified{};
+        std::uintmax_t bytes=0;
+        std::vector<northstarcpp::shared_assets::Texture> textures;
+        std::vector<northstarcpp::shared_assets::Drawable> drawables;
+    };
+    static thread_local Cache cache;
+    if(cache.file!=full || cache.modified!=modified || cache.bytes!=bytes_count) {
+        std::ifstream input(full,std::ios::binary);
+        if(!input)return {};
+        std::vector<std::uint8_t> encoded(static_cast<std::size_t>(bytes_count));
+        if(!input.read(reinterpret_cast<char*>(encoded.data()),
+                       static_cast<std::streamsize>(encoded.size())))return {};
+        Cache updated;
+        updated.file=full;updated.modified=modified;updated.bytes=bytes_count;
+        if(kind==AssetKind::texture)
+            updated.textures=northstarcpp::shared_assets::load_textures_from_bytes(encoded,relative);
+        else
+            updated.drawables=northstarcpp::shared_assets::load_drawables_from_bytes(encoded,relative);
+        cache=std::move(updated);
+    }
+    northstarcpp::editor_tools::AssetPreviewImage preview;
+    if(kind==AssetKind::texture) {
+        auto found=std::find_if(cache.textures.begin(),cache.textures.end(),
+            [&](auto const& item){return item.name==name;});
+        if(found==cache.textures.end())return {};
+        preview=northstarcpp::editor_tools::preview_texture(*found,256);
+    } else {
+        auto found=std::find_if(cache.drawables.begin(),cache.drawables.end(),
+            [&](auto const& item){return item.name==name;});
+        if(found==cache.drawables.end())return {};
+        preview=northstarcpp::editor_tools::preview_drawable(
+            *found,256,256,.62f,.27f,1.f,false);
+    }
+    if(!preview.valid())return {};
+    QImage image(reinterpret_cast<uchar const*>(preview.argb.data()),
+                 preview.width,preview.height,preview.width*4,
+                 QImage::Format_ARGB32);
+    return image.copy();
+}
 QImage engineThumbnail(fs::path const& root,std::string const& key, AssetKind kind) {
     try {
+        if(key.find('@')!=std::string::npos &&
+           (kind==AssetKind::texture || kind==AssetKind::mesh ||
+            kind==AssetKind::material)) {
+            // Embedded items have their own identity; never substitute
+            // the first entry or a generic icon on successful decode.
+            return directListFileThumbnail(root,key,kind);
+        }
         AssetManager assets;
         assets.mount_directory("",root,0);
         // Authored resources can refer to the engine's shared asset package.
@@ -159,6 +261,7 @@ public:
 };
 }
 QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
+    ensureFolderArtResource();
     setObjectName("northstarContentBrowser");
     pool_.setMaxThreadCount(2);
     auto* root=new QVBoxLayout(this);
@@ -226,9 +329,12 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     grid_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     entries_=new AssetGridModel(this);
     grid_->setModel(entries_);
-    grid_->setIconSize(QSize(96,96));
-    grid_->setGridSize(QSize(150,142));
-    grid_->setSpacing(7);
+    auto* cards=new AssetCardDelegate(grid_);
+    auto* listItems=new QStyledItemDelegate(grid_);
+    grid_->setItemDelegate(cards);
+    grid_->setIconSize(QSize(144,144)); // Only the classic ListMode uses icons.
+    grid_->setGridSize(cards->cellSize());
+    grid_->setSpacing(10);
     grid_->setMinimumWidth(260);
 
     auto* details=new QWidget(splitter_);
@@ -241,6 +347,7 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     cap->setObjectName("detailsCaption");
     dl->addWidget(cap);
     preview_icon_=new QLabel(details);
+    preview_icon_->setObjectName("assetPreviewIcon");
     preview_icon_->setAlignment(Qt::AlignCenter);
     preview_icon_->setMinimumHeight(150);
     preview_icon_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
@@ -273,8 +380,8 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     bottom->addWidget(status_,1);
     bottom->addWidget(new QLabel("Thumbnail Size",this));
     zoom_=new QSlider(Qt::Horizontal,this);
-    zoom_->setRange(64,160);
-    zoom_->setValue(96);
+    zoom_->setRange(80,240);
+    zoom_->setValue(144);
     zoom_->setMaximumWidth(130);
     bottom->addWidget(zoom_);
     root->addLayout(bottom);
@@ -338,18 +445,23 @@ QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
     connect(search_,&QLineEdit::textChanged,this,&QtContentBrowser::populateItems);
     connect(types_,QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,[this](int){populateItems();});
-    connect(zoom_,&QSlider::valueChanged,this,[this](int size) {
-        grid_->setIconSize(QSize(size,size));
-        grid_->setGridSize(QSize(size+60,size+55));
+    connect(zoom_,&QSlider::valueChanged,this,[this,cards](int size) {
+        cards->setPreviewSize(size);
+        if(grid_->viewMode()==QListView::IconMode) {
+            grid_->setGridSize(cards->cellSize());
+            grid_->doItemsLayout();
+        }
         scheduleThumbnails();
     });
-    connect(list_mode_,&QToolButton::clicked,this,[this] {
-        bool list=grid_->viewMode()==QListView::IconMode;
+    connect(list_mode_,&QToolButton::clicked,this,[this,cards,listItems] {
+        bool const list=grid_->viewMode()==QListView::IconMode;
         grid_->setViewMode(list?QListView::ListMode:QListView::IconMode);
         grid_->setFlow(list?QListView::TopToBottom:QListView::LeftToRight);
         grid_->setWrapping(!list);
+        grid_->setItemDelegate(list?listItems:cards);
         grid_->setIconSize(list?QSize(28,28):QSize(zoom_->value(),zoom_->value()));
-        grid_->setGridSize(list?QSize():QSize(zoom_->value()+60,zoom_->value()+55));
+        grid_->setGridSize(list?QSize():cards->cellSize());
+        grid_->doItemsLayout();
         scheduleThumbnails();
     });
     connect(folders_,&QTreeWidget::itemClicked,this,
@@ -359,7 +471,7 @@ QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
     connect(grid_,&QListView::doubleClicked,this,[this](QModelIndex const& index) {
         auto ref=itemPath(index);
         if(index.data(role_directory).toBool())openFolder(ref);
-        else if(!ref.isEmpty())emit assetActivated(ref);
+        else if(!ref.isEmpty())openAssetPreview(ref);
     });
     connect(grid_->selectionModel(),&QItemSelectionModel::currentChanged,
             this,[this](QModelIndex const&,QModelIndex const&) {
@@ -431,6 +543,9 @@ int QtContentBrowser::recordCount() const {
     return static_cast<int>(catalog_.entries().size());
 }
 int QtContentBrowser::visibleCount() const {return entries_->rowCount();}
+QImage QtContentBrowser::cachedThumbnail(QString const& path) const {
+    return thumbs_.value(path);
+}
 void QtContentBrowser::setSearchText(QString const& s){search_->setText(s);}
 void QtContentBrowser::setTypeFilter(QString const& kind) {
     int index=types_->findText(kind,Qt::MatchFixedString);
@@ -468,7 +583,9 @@ void QtContentBrowser::populateTree() {
         auto* owner=lookup.value(parent,root);
         auto* item=new QTreeWidgetItem(owner,{path.section('/',-1)});
         item->setData(0,role_path,path);
-        item->setIcon(0,iconFor(AssetKind::folder));
+        auto const* directory=catalog_.find(path.toUtf8().toStdString());
+        item->setIcon(0,directory?iconForDirectory(*directory):
+                                   iconFor(AssetKind::folder));
         lookup.insert(path,item);
     }
     folders_->expandItem(root);
@@ -497,6 +614,18 @@ void QtContentBrowser::openFolder(QString const& folder,bool history) {
 void QtContentBrowser::browseTo(QString const& virtualFolder) {
     openFolder(virtualFolder);
 }
+void QtContentBrowser::openAssetPreview(QString const& virtualPath) {
+    if(root_.isEmpty() || virtualPath.isEmpty())return;
+    auto const* record=catalog_.find(virtualPath.toUtf8().toStdString());
+    if(!record)return;
+    if(record->directory) {
+        openFolder(virtualPath);
+        return;
+    }
+    // Previewing is read-only. Scene insertion is an explicit separate action
+    // in the context menu, avoiding accidental actors on a double-click.
+    openAssetPreviewModal(this,native(root_),record->asset_reference(),record->kind);
+}
 void QtContentBrowser::changeFolder(QString const& folder) {
     folder_=folder;
     back_->setEnabled(!back_history_.isEmpty());
@@ -510,6 +639,13 @@ void QtContentBrowser::updateBreadcrumb() {
     crumb_->setToolTip(root_+"/"+folder_);
 }
 QIcon QtContentBrowser::iconFor(AssetKind k) const {
+    if(k==AssetKind::folder) {
+        // Ordinary directories AND NEF8 virtual ListFile dictionaries
+        // share the exact project artwork, rather than the old DIR tile.
+        static QIcon const folderArt(
+            QStringLiteral(":/northstar/icons/folder.png"));
+        if(!folderArt.isNull())return folderArt;
+    }
     auto data=asset_palette(k);
     QPixmap image(120,120);image.fill(Qt::transparent);
     QPainter painter(&image);
@@ -525,6 +661,59 @@ QIcon QtContentBrowser::iconFor(AssetKind k) const {
     painter.drawText(box,Qt::AlignCenter,data.text);
     painter.end();
     return QIcon(image);
+}
+QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
+    // Only NEF8 ListFile dictionaries use the specialized folder artwork.
+    // Physical directories always use the original folder.png, regardless
+    // of their display names (e.g. a physical folder called "textures").
+    if(record.directory && record.is_list_file()) {
+        auto const extension=fs::path(record.virtual_path).extension().u8string();
+        if(extension==".ytd") {
+            static QIcon const textureFolder(
+                QStringLiteral(":/northstar/icons/texturesFolder.png"));
+            if(!textureFolder.isNull())return textureFolder;
+        } else if(extension==".ydd") {
+            static QIcon const modelFolder(
+                QStringLiteral(":/northstar/icons/modelsFolder.png"));
+            if(!modelFolder.isNull())return modelFolder;
+        } else if(extension==".ymat") {
+            static QIcon const materialFolder(
+                QStringLiteral(":/northstar/icons/materialsFolder.png"));
+            if(!materialFolder.isNull())return materialFolder;
+        }
+    }
+    return iconFor(AssetKind::folder);
+}
+QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
+    QString const type=QString::fromLatin1(kind_name(rec.kind));
+    if(rec.directory) {
+        if(!rec.is_list_file())return "Folder";
+        auto const extension=fs::path(rec.virtual_path).extension().u8string();
+        auto const number=std::count_if(catalog_.entries().begin(),
+            catalog_.entries().end(),[&](AssetRecord const& child) {
+                return child.is_virtual_entry() &&
+                       child.container_path==rec.virtual_path;
+            });
+        auto const singular=extension==".ytd"?"texture":
+                            extension==".ydd"?"model":
+                            extension==".ymat"?"material":"item";
+        return QString::number(number)+" "+singular+
+               (number==1?"":"s");
+    }
+    // The ListFile's compressed file size is NOT the size of each record.
+    // Never show a fabricated 0 B for an unknown embedded mesh/material.
+    if(rec.is_virtual_entry() && rec.size==0)
+        return type+" · embedded";
+    return type+" · "+bytesText(rec.size);
+}
+QColor QtContentBrowser::accentColor(AssetRecord const& rec) const {
+    if(rec.directory && rec.is_list_file()) {
+        auto const ext=fs::path(rec.virtual_path).extension().u8string();
+        if(ext==".ytd")return asset_palette(AssetKind::texture).fill;
+        if(ext==".ydd")return asset_palette(AssetKind::mesh).fill;
+        if(ext==".ymat")return asset_palette(AssetKind::material).fill;
+    }
+    return asset_palette(rec.directory?AssetKind::folder:rec.kind).fill;
 }
 void QtContentBrowser::populateItems() {
     entries_->clear();
@@ -550,14 +739,20 @@ void QtContentBrowser::populateItems() {
             }
             if(rec.kind!=desired)continue;
         }
-        auto* item=new QStandardItem(iconFor(rec.kind),from8(rec.filename));
+        auto const icon=rec.directory?iconForDirectory(rec):iconFor(rec.kind);
+        auto* item=new QStandardItem(icon,from8(rec.filename));
         item->setEditable(false);
         item->setData(path,role_path);
         item->setData(from8(rec.asset_reference()),role_reference);
         item->setData(rec.directory,role_directory);
         item->setData(static_cast<int>(rec.kind),role_kind);
-        item->setToolTip(path+"\n"+QString::fromLatin1(kind_name(rec.kind))+
-                         (rec.directory?"":"\n"+bytesText(rec.size)));
+        item->setData(from8(rec.filename),asset_card_roles::title);
+        item->setData(subtitleText(rec),asset_card_roles::subtitle);
+        item->setData(accentColor(rec),asset_card_roles::accent_color);
+        if(thumbs_.contains(path))
+            item->setData(thumbs_.value(path),asset_card_roles::preview_image);
+        item->setToolTip(path+"\n"+subtitleText(rec)+
+                         "\n"+from8(rec.asset_reference()));
         entries_->appendRow(item);
     }
     QString status=QString::number(entries_->rowCount())+" items  |  "+
@@ -582,7 +777,7 @@ void QtContentBrowser::scheduleThumbnails() {
         if(!item || item->data(role_directory).toBool())continue;
         auto path=item->data(role_path).toString();
         if(thumbs_.contains(path)) {
-            item->setIcon(QIcon(QPixmap::fromImage(thumbs_.value(path))));
+            item->setData(thumbs_.value(path),asset_card_roles::preview_image);
             continue;
         }
         if(!pending_.contains(path))queueThumbnail(path);
@@ -620,7 +815,10 @@ void QtContentBrowser::queueThumbnail(QString const& path) {
                 for(int i=0;i<entries_->rowCount();++i) {
                     auto* item=entries_->item(i);
                     if(item->data(role_path).toString()==path) {
-                        item->setIcon(QIcon(QPixmap::fromImage(result)));
+                        // Do not overwrite the category/folder fallback icon:
+                        // the card delegate reads the real preview via a
+                        // dedicated role and paints it inside the safe-zone.
+                        item->setData(result,asset_card_roles::preview_image);
                         break;
                     }
                 }
@@ -641,7 +839,7 @@ void QtContentBrowser::queueThumbnail(QString const& path) {
                 if(reader.canRead()) {
                     auto size=reader.size();
                     if(size.isValid())reader.setScaledSize(
-                        size.scaled(QSize(160,160),Qt::KeepAspectRatio));
+                        size.scaled(QSize(320,320),Qt::KeepAspectRatio));
                     auto image=reader.read();
                     if(!image.isNull())return image;
                 }
@@ -664,7 +862,12 @@ void QtContentBrowser::updateDetails() {
     if(thumbs_.contains(selected)) {
         preview_icon_->setPixmap(QPixmap::fromImage(thumbs_[selected]).scaled(
             190,190,Qt::KeepAspectRatio,Qt::SmoothTransformation));
-    } else preview_icon_->setPixmap(iconFor(kind).pixmap(130,130));
+    } else {
+        auto const* selectedRecord=catalog_.find(selected.toUtf8().toStdString());
+        auto const icon=selectedRecord && selectedRecord->directory?
+            iconForDirectory(*selectedRecord):iconFor(kind);
+        preview_icon_->setPixmap(icon.pixmap(130,130));
+    }
     QString info=QString::fromLatin1(kind_name(kind))+"\nContent / "+selected;
     auto const* rec=catalog_.find(selected.toUtf8().toStdString());
     if(rec && rec->is_list_file()) {
@@ -818,7 +1021,8 @@ void QtContentBrowser::revealSelected() {
 void QtContentBrowser::showMenu(QPoint point) {
     QMenu menu(this);
     auto selected=selectedPath();
-    auto* open=menu.addAction("Open / Browse");
+    auto* open=menu.addAction("Preview / Browse");
+    auto* insert=menu.addAction("Add Mesh to Scene");
     auto* copy=menu.addAction("Copy Asset Reference");
     menu.addSeparator();
     auto* create=menu.addAction("New Folder...");
@@ -829,6 +1033,9 @@ void QtContentBrowser::showMenu(QPoint point) {
     menu.addSeparator();
     auto* remove=menu.addAction("Delete...");
     open->setEnabled(!selected.isEmpty());
+    auto const* chosen=catalog_.find(selected.toUtf8().toStdString());
+    insert->setEnabled(chosen && !chosen->directory &&
+                       chosen->kind==AssetKind::mesh);
     copy->setEnabled(!selected.isEmpty()&&!selectedIsDirectory());
     rename->setEnabled(!selected.isEmpty());
     duplicate->setEnabled(!selected.isEmpty()&&!selectedIsDirectory());
@@ -838,7 +1045,10 @@ void QtContentBrowser::showMenu(QPoint point) {
                                            grid_->viewport()->mapToGlobal(point));
     if(selectedAction==open) {
         if(selectedIsDirectory())openFolder(selected);
-        else if(!selected.isEmpty())emit assetActivated(selected);
+        else if(!selected.isEmpty())openAssetPreview(selected);
+    } else if(selectedAction==insert) {
+        if(chosen && chosen->kind==AssetKind::mesh)
+            emit assetActivated(QString::fromUtf8(chosen->asset_reference().c_str()));
     } else if(selectedAction==copy)copyReference();
     else if(selectedAction==create)createFolder();
     else if(selectedAction==import)importFiles();

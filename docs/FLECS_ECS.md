@@ -4,8 +4,8 @@
 
 ## Architecture
 
-- `include/northstarcpp/ecs_api.h` — versioned pure-C ABI (`NORTHSTARCPP_ECS_API_VERSION = 2`) using opaque world handles and 64-bit `NsEntity` IDs.
-- `include/northstarcpp/ecs.hpp` — provider-neutral `EcsWorld` interface for editor, game runtime and tools.
+- `sdk/include/northstarcpp/ecs_api.h` — versioned pure-C ABI (`NORTHSTARCPP_ECS_API_VERSION = 2`) using opaque world handles and 64-bit `NsEntity` IDs.
+- `sdk/include/northstarcpp/ecs.hpp` — provider-neutral `EcsWorld` interface for editor, game runtime and tools.
 - `engine/northstarcpp/modules/host/ecs_world.cpp` — ECS world host and runtime-to-API bindings.
 - `engine/northstarcpp/modules/ecs/flecs/flecs.cpp` — default Flecs 4.2.0 implementation, behind `engine.ecs` module capability.
 - `tests/ecs_mock_provider.cpp` — independent, non-Flecs implementation of the same API for compatibility testing.

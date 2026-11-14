@@ -8,8 +8,8 @@
 
 | Component | Path |
 |---|---|
-| C API / ABI | `include/northstarcpp/logger_plugin.h` |
-| C++ SDK wrapper | `include/northstarcpp/logger.hpp` |
+| C API / ABI | `sdk/include/northstarcpp/logger_plugin.h` |
+| C++ SDK wrapper | `sdk/include/northstarcpp/logger.hpp` |
 | Host bridge | `engine/northstarcpp/modules/host/logger.cpp` |
 | DLL provider | `engine/northstarcpp/modules/logger/multisink/multisink.cpp` |
 | SDK unit tests | `tests/logger_smoke.cpp` |

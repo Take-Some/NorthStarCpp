@@ -8,7 +8,7 @@
 #include <northstarcpp/identity.hpp>
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
-#include <northstarcpp/compat/math_randoms_generator.h>
+#include <northstarcpp/math_randoms_generator.h>
 int main() {
     static_assert(northstarcpp::engine_name == "NorthStarCpp");
     northstarcpp::math::random32 random(1337U);

@@ -11,13 +11,21 @@ std::vector<DictionaryEntry> list_dictionary_entries(
     std::vector<std::uint8_t> const& source,std::string const& path) {
     using namespace detail;
     auto const ext=extension(path);
-    require(ext==".ytd" || ext==".ydd",
-            "Only NEF8 YTD/YDD ListFiles are virtual dictionaries");
+    require(ext==".ytd" || ext==".ydd" || ext==".ymat",
+            "Only NEF8 YTD/YDD/YMAT ListFiles are virtual dictionaries");
     auto file=parse_list_file(source); // size, deflate and hash checks
     std::vector<DictionaryEntry> output;
     output.reserve(file.entries);
     std::set<std::string> unique;
-    if(ext==".ydd") {
+    if(ext==".ymat") {
+        auto materials=detail::parse_materials(file,path);
+        require(materials.size()==file.entries,"YMAT ListFile entry count mismatch");
+        for(auto const& material:materials) {
+            validate_name(material.name);
+            require(unique.insert(material.name).second,"Duplicate YMAT material");
+            output.push_back({material.name,0});
+        }
+    } else if(ext==".ydd") {
         require(file.kind==2,"Expected YDD drawable dictionary");
         auto const body=parse_json(std::string(file.body.begin(),file.body.end()));
         require(body.get<std::string>("schema","")==

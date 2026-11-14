@@ -41,6 +41,9 @@ int main(int argc, char** argv)
                 "NEF8 dictionary selection returned the wrong texture");
             require(loaded.data.size()==entry.size,
                 "NEF8 texture entry's byte length does not match its payload");
+            if(entry.name=="moon_new")
+                require(loaded.format_id==103 && loaded.srgb,
+                    "Legacy DXT5 moon must use BC3, not the wrong BC7 tag");
         }
         std::string const sky_ref = "models/skydome.ydd@skydome_high";
         auto first = manager.request_drawable_resources(sky_ref, northstarcpp::AssetPriority::background);
@@ -67,6 +70,26 @@ int main(int argc, char** argv)
         auto const leaf = manager.load_material("materials/fps/game_ready_world.ymat@tree_leaf");
         require(leaf.alpha_cutoff > 0.44f && leaf.alpha_cutoff < 0.46f &&
             !leaf.parameters.empty(), "Incorrect FPS material");
+        // world_surfaces_runtime.ytd is a normalized copy of the supplied
+        // world_surfaces.ytd; the original malformed indexes are untouched.
+        if(std::filesystem::is_regular_file(
+                root/"textures"/"world_surfaces_runtime.ytd")) {
+            auto const entries=northstarcpp::shared_assets::list_dictionary_entries(
+                manager,"textures/world_surfaces_runtime.ytd");
+            require(entries.size()==9,"World surface dictionary lost entries");
+            for(auto const& entry:entries) {
+                auto tex=manager.load_texture(
+                    "textures/world_surfaces_runtime.ytd@"+entry.name);
+                require(tex.data.size()==entry.size && !tex.mips.empty(),
+                    "World surface texture mip bounds invalid");
+                if(entry.name.find("_normal")!=std::string::npos ||
+                   entry.name.find("_roughness")!=std::string::npos)
+                    require(tex.format_id==105 && !tex.srgb,
+                        "World normals/roughness must remain BC5 linear data");
+                else require(tex.format_id==102 && tex.srgb,
+                    "World base color must be BC1 sRGB");
+            }
+        }
         auto const info = northstarcpp::shared_assets::inspect_directory(root);
         require(info.materials >= 7 && info.drawables >= 1 && info.textures >= 5 &&
             info.scripts >= 7 && info.shaders >= 4 &&

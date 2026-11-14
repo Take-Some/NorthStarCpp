@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD = ROOT / "external/northstarcpp/compat"
-NEW = ROOT / "engine/northstarcpp/modules/foundation/northstarcpp/compat"
+NEW = ROOT / "engine/northstarcpp/modules/core/northstarcpp"
 MANIFEST = ROOT / ".northstarcpp/migrations/compat-foundation-v1.json"
 
 def inventory(folder: Path) -> dict[str, dict]:

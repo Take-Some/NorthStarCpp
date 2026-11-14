@@ -85,6 +85,25 @@ bool validate_scene_component_blob(SceneComponentBlob const& component) {
             component.payload.data(),component.payload.size());
     } catch(...) {return false;}
 }
+std::optional<SceneComponentSchemaInfo> scene_component_schema(
+    std::string const& type) {
+    std::lock_guard lock(registry_mutex);
+    auto it=registry.find(type);
+    if(it==registry.end())return std::nullopt;
+    return SceneComponentSchemaInfo{
+        it->second.type,it->second.min_version,it->second.max_version};
+}
+std::vector<SceneComponentSchemaInfo> list_scene_component_schemas() {
+    std::lock_guard lock(registry_mutex);
+    std::vector<SceneComponentSchemaInfo> entries;
+    entries.reserve(registry.size());
+    for(auto const& item:registry)
+        entries.push_back({item.second.type,item.second.min_version,
+                          item.second.max_version});
+    std::sort(entries.begin(),entries.end(),
+              [](auto const& a,auto const& b){return a.type<b.type;});
+    return entries;
+}
 NorthStarSceneComponentHostApi const* scene_component_host_api_v1() noexcept {
     static NorthStarSceneComponentHostApi const table{
         sizeof(NorthStarSceneComponentHostApi),

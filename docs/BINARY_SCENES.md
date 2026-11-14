@@ -158,3 +158,19 @@ Relevant source files:
 - engine/northstarcpp/modules/host/scene_chunk_streaming.cpp
 - include/northstarcpp/scene_chunk_index.hpp
 - engine/northstarcpp/modules/editor/window.cpp
+
+
+## Runtime component residency after NEF8 payload verification
+
+WorldPartition now tracks a verified-cell gate. Static cell objects are
+not logically resident until their asynchronous NEF8 block is decoded and
+verified. The PhysicsScene-owned Flecs runtime destroys/recreates static ECS
+entities, Bullet/Jolt can remove/reinsert static physics bodies, and the
+Viewport prunes unused OBJ CPU mesh entries. Player and dynamic bodies remain
+protected. A coarse per-cell connectivity graph tracks ready sectors, but
+this is not yet a NavMesh provider or a full obstacle-avoidance system.
+
+The startup Scene DTO and some runtime subsystems (including script_ecs) are
+still eager. Native resource ownership for arbitrary plugin components,
+NavMesh tiles and all GPU texture/buffer kinds remains a separate milestone.
+Tests and implementation details: docs/NEF8_WORLDPARTITION_VFS_INTEGRATION_2026-11-14.md.

@@ -4,14 +4,52 @@
 #include "asset_list_file.hpp"
 
 #include <set>
+#include <algorithm>
 
 namespace northstarcpp::shared_assets {
 
-std::vector<Texture> load_textures(AssetStore const& assets, std::string const& path)
+// Earlier NEF8 importers wrote some DXT5/BC3 blocks with a BC7 (104)
+// format tag. BC3 and BC7 are both 16 bytes per 4x4 tile, so structural
+// size validation cannot distinguish them. The wrong BC7 decode produces
+// purple/red block artifacts instead of the original color image.
+//
+// This bounded high-confidence check recognizes the classic BC3 alpha plane
+// (2 endpoints + 48 index bits) when it occupies most blocks, and requires
+// a substantial number of invalid BC7 mode prefixes plus implausibly
+// many mode-0 blocks. Ordinary BC7, including black reserved blocks, is
+// preserved. No filename-based special cases and no mutation of ListFiles.
+static bool legacy_bc3_mislabeled_bc7(Texture const& texture) {
+    if(texture.format_id!=104 || texture.mips.empty())return false;
+    auto const& mip=texture.mips.front();
+    if(mip.offset>texture.data.size() || mip.size>texture.data.size()-mip.offset)
+        return false;
+    auto const blocks=std::min<std::size_t>(mip.size/16,2048);
+    if(blocks<32)return false;
+    std::size_t invalidBC7=0,bc7ModeZero=0,constantBC3Alpha=0;
+    auto const* data=texture.data.data()+mip.offset;
+    for(std::size_t i=0;i<blocks;++i) {
+        auto const* block=data+16*i;
+        if(block[0]==0)++invalidBC7;
+        if(block[0]&1)++bc7ModeZero;
+        // BC3 encoding of uniform alpha: a0 == a1 == 255 or
+        // a0=0,a1=1 with all 3-bit indices zero.
+        bool const alphaHeader=
+            (block[0]==255 && block[1]==255) ||
+            (block[0]==0 && block[1]==1);
+        bool alphaIndicesZero=true;
+        for(int j=2;j<8;++j)alphaIndicesZero &= block[j]==0;
+        if(alphaHeader && alphaIndicesZero)++constantBC3Alpha;
+    }
+    return invalidBC7*8>=blocks &&
+           bc7ModeZero*2>=blocks &&
+           constantBC3Alpha*3>=blocks*2;
+}
+
+static std::vector<Texture> parse_texture_dictionary(
+    detail::ListFile const& file, std::string const& path)
 {
     using namespace detail;
     require(extension(path) == ".ytd", "Expected a .ytd texture dictionary");
-    auto const file = read_list_file(assets, path);
     Bytes const body(file.body);
     require(file.kind == 1 && body.size() >= 64 && body.magic(0, "NETD") &&
         body.integer(4, 4) == 2 && body.integer(8, 4) == 64 &&
@@ -71,7 +109,7 @@ std::vector<Texture> load_textures(AssetStore const& assets, std::string const& 
             auto const row_bytes = format == 1 ? width * 4 :
                 ((width + 3) / 4) * (format == 101 || format == 102 ? 8 : 16);
             auto const rows = format == 1 ? height : (height + 3) / 4;
-            require(format == 1 || (format >= 101 && format <= 104), "Unsupported NETD texture format");
+            require(format == 1 || (format >= 101 && format <= 105), "Unsupported NETD texture format");
             require(offset == next_offset && offset - start <= size &&
                 length_bytes <= size - (offset - start) && length_bytes == row_bytes * rows &&
                 body.integer(mip + 16, 4) == width && body.integer(mip + 20, 4) == height &&
@@ -88,12 +126,23 @@ std::vector<Texture> load_textures(AssetStore const& assets, std::string const& 
         require(next_offset == start + size, "NETD mip bytes differ from entry size");
         auto const* data = body.at(payload + start, size);
         texture.data.assign(data, data + size);
+        if(legacy_bc3_mislabeled_bc7(texture))
+            texture.format_id=103; // Correct effective GPU/software codec.
         expected_mip += count;
         previous_end = start + size;
         result.push_back(std::move(texture));
     }
     require(expected_mip == mip_count, "Unclaimed NETD mip records");
     return result;
+}
+
+std::vector<Texture> load_textures(AssetStore const& assets,
+                                   std::string const& path) {
+    return parse_texture_dictionary(detail::read_list_file(assets,path),path);
+}
+std::vector<Texture> load_textures_from_bytes(std::vector<std::uint8_t> const& bytes,
+                                   std::string const& path) {
+    return parse_texture_dictionary(detail::parse_list_file(bytes),path);
 }
 
 } // namespace northstarcpp::shared_assets

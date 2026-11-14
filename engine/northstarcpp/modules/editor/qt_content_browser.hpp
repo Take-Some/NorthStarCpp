@@ -10,6 +10,7 @@
 #include <QString>
 #include <QHash>
 #include <QIcon>
+#include <QColor>
 #include <QSet>
 #include <memory>
 #include <cstdint>
@@ -38,10 +39,14 @@ public:
     QString selectedAsset() const;
     int recordCount() const;
     int visibleCount() const;
+    // Returns an empty image until asynchronous preview generation completes.
+    QImage cachedThumbnail(QString const& virtualPath) const;
     void setSearchText(QString const& search);
     void setTypeFilter(QString const& kind);
     // Navigate to a physical folder or an NEF8 virtual dictionary.
     void browseTo(QString const& virtualFolder);
+    // Double-click action: show read-only texture/mesh inspection in a modal.
+    void openAssetPreview(QString const& virtualPath);
 signals:
     void assetActivated(QString virtualPath);
     void assetSelected(QString virtualPath);
@@ -90,6 +95,9 @@ private:
     void copyReference();
     void updateBreadcrumb();
     QIcon iconFor(AssetKind kind) const;
+    QIcon iconForDirectory(AssetRecord const& record) const;
+    QString subtitleText(AssetRecord const& record) const;
+    QColor accentColor(AssetRecord const& record) const;
     bool isSafeBasename(QString const& text) const;
     bool selectedIsDirectory() const;
     QString selectedPath() const;

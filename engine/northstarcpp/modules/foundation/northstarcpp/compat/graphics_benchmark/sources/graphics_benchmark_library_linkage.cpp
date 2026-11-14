@@ -1,9 +1,0 @@
-////////////////////////////////////////////////////////////////////////////
-//	Created		: 09.06.2010
-//	Author		: Armen Abroyan
-//	Copyright (C) Kayla's Systems - 2010
-// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
-////////////////////////////////////////////////////////////////////////////
-
-#include "pch.h"
-#include <northstarcpp/compat/core/library_linkage.h>

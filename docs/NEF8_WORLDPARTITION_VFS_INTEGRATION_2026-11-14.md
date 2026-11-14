@@ -70,3 +70,73 @@ isolation. GPU/physics instantiation is not covered by these checks.
 - tests/assets_smoke.cpp
 - tests/scene_async_vfs_smoke.cpp
 - docs/BINARY_SCENES.md
+
+
+## NEF8 payload-driven runtime lifecycle — implementation and verification
+
+The runtime now separates logical WorldPartition cell requests from verified
+NEF8 chunk readiness. SceneWorld::enable_payload_gate() and
+set_cell_payload_ready() control static residency. A cell can be logically
+loaded but cannot activate static entities until its independently compressed
+chunk is present and validated. Persistent world objects, player and dynamic
+traffic remain pinned. Near-player static collision uses the existing safety
+proximity rule and may be retained while data is pending.
+
+PhysicsScene::sync_scene_residency() now reconciles its internal Flecs ECS
+runtime against the gated SceneWorld. Static cell ECS entities are actually
+destroyed on eviction and recreated by stable authored scene ID on return,
+while source-indexed physics poses remain valid. Sparse ECS position syncing
+was added to preserve physics index mapping. Bullet/Jolt static body residency
+is controlled through the existing provider extension; when missing, old
+physics providers retain their conservative eager collision fallback.
+
+SceneViewport drops CPU OBJ mesh-cache entries that are no longer visible in
+the active cell set. The current renderer submits a fresh per-frame geometry
+list; this does not mean that arbitrary GPU resource kinds or textures are
+evicted across all providers.
+
+SceneNavigationCells is a separate, coarse cell-boundary connectivity graph
+that activates/deactivates on payload readiness. It intentionally does not
+implement or claim a polygon NavMesh, terrain walkability, path corridor,
+dynamic collision avoidance or asynchronous NavMesh tile cooking. There is
+currently no engine.navigation/NavMesh runtime provider to integrate.
+
+### Validation
+
+Independent Release/Ninja build:
+out/cell-runtime-validation-20261114
+
+All 10 selected native tests passed: scene/runtime Bullet, runtime Jolt,
+Bullet physics, Bullet provider selection, Jolt provider selection,
+SceneWorld, coarse cell navigation, async VFS, NEF8 binary codec and
+Python/C++ cross-language NEF8 interoperability. The runtime lifecycle
+tests use a real file saved as NEF8 ListFile, async disk reads, payload
+readiness transitions, actual Flecs entity counts, fast travel and
+reloading previously unloaded sectors, as well as a synthetic readiness
+stress loop. Python project/launcher/export regression: 37/37 pass.
+
+Viewport.cpp, Player window.cpp and Editor window.cpp compile with their
+CMake/Ninja Release flags. A missing ListFile dictionary index source in
+the Asset Browser build was registered in the runtime CMake target.
+Full GUI target linking / installed package smoke is still NOT confirmed.
+
+A separate FPS demo generator --verify reports an unrelated missing/stale
+models/skydome.ydd resource. This is not evidence of a lifecycle regression,
+but blocks claiming that the FPS demo artifact is fully verified.
+
+### Outstanding release and lifecycle gates
+
+- Full standalone Editor/Player link, dist package, deployment smoke,
+  clean-system test, atomic replacement and rollback remain unfinished.
+- Initial Scene is still loaded eagerly for editor/physics authoring metadata;
+  full disk-to-runtime sparse scene construction without a whole-file DTO
+  remains unfinished.
+- The script_ecs world, entity script initialization and script resource
+  lifetime remain eager; the source-index-preserving PhysicsScene ECS runtime
+  is the subset with actual create/destroy residency support.
+- Advanced GPU textures/meshes, resource fences, shared residency leases and
+  NavMesh tiles need explicit provider-level lifecycle interfaces and tests.
+- Streaming cancellation is stale-result discard; running decode jobs cannot
+  be forcibly interrupted. Stable IDs are maintained, runtime ECS handles may
+  change after recreation.
+- The production dist/DLLs have not been replaced.

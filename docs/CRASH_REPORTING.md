@@ -8,7 +8,7 @@ Reports are saved under `%LOCALAPPDATA%\KaylasSystems\NorthStarCpp\Crashes` (fal
 
 ## Windows icon and FileInfo
 
-\`bugtrap.exe\` embeds the dedicated \`icons/Bug.ico\` icon. The editor embeds icons/northstar-editor.ico; the player and Project Manager retain the original icons/logoStar.ico brand icon. The file
+\`bugtrap.exe\` embeds the dedicated \`engine/northstarcpp/resources/icons/Bug.ico\` icon. The editor embeds icons/northstar-editor.ico; the player and Project Manager retain the original icons/logoStar.ico brand icon. The file
 also contains Windows \`VERSIONINFO\` resource data from
 \`engine/northstarcpp/resources/bugtrap_version.rc.in\`:
 

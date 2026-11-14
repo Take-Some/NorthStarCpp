@@ -65,6 +65,16 @@ int main(int argc,char** argv) {
               near(step_clip.sample(2.f).translation.x,4.f),
               "Step interpolation");
 
+        auto eased=valid_clip;
+        eased.replace(pos,8,"\"fermi-dirac\"");
+        auto ease_clip=parse_scene_animation_clip(eased);
+        check(ease_clip.interpolation()==SceneAnimationInterpolation::fermi_dirac &&
+              ease_clip.sample(0.5f).translation.x < clip.sample(0.5f).translation.x &&
+              near(ease_clip.sample(1.f).translation.x,2.f) &&
+              ease_clip.sample(1.5f).translation.x > clip.sample(1.5f).translation.x &&
+              near(ease_clip.sample(2.f).translation.x,4.f),
+              "Foundation Fermi-Dirac transition");
+
         auto scene=test_scene();
         SceneAnimationPlayer player;
         player.play(scene,41,clip,false,1.f);

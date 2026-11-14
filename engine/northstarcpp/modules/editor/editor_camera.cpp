@@ -37,6 +37,14 @@ void EditorCamera::move(float sideways,float vertical,float forward_distance) no
     pose.position=plus(pose.position,plus(mul(right(),sideways),
         plus(mul(up(),vertical),mul(forward(),forward_distance))));
 }
+void EditorCamera::fly(float sideways,float world_up,
+                       float forward_distance) noexcept {
+    if(!std::isfinite(sideways)||!std::isfinite(world_up)||
+       !std::isfinite(forward_distance))return;
+    Vector3 const direction=plus(mul(right(),sideways),
+        plus(Vector3{0.f,world_up,0.f},mul(forward(),forward_distance)));
+    pose.position=plus(pose.position,direction);
+}
 void EditorCamera::dolly(float amount) noexcept {
     if(std::isfinite(amount))move(0.f,0.f,std::clamp(amount,-5000.f,5000.f));
 }

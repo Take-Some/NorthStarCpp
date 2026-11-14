@@ -45,7 +45,7 @@ existing migration and editor ledgers, not on relocated legacy source counts.
 | Export | Engine/game packaging scripts, manifest/checksums, V8 deployment checks | Clean end-to-end Release build, actual generated game playthrough, clean machine install, licensing & dependency closure |
 | Profiling/QA | Many CTests, some smoke and memory-provider checks | Cross-subsystem profiling, ≥1000 frames p50/p95/p99, stress scenes, crash tests, asset cold/warm and a real production-game vertical slice |
 
-**Historical source caveat:** `engine/northstarcpp/modules/foundation/northstarcpp/compat`
+**Historical source caveat:** `engine/northstarcpp/modules/core/northstarcpp/foundation`
 contains relocated code that is *not automatically compiled or linked*.
 Port one contract at a time; never claim historical source presence means
 feature completion.
@@ -68,7 +68,7 @@ See docs/STATIC_MESH_OBJ_PIPELINE.md.
 ## Changes delivered in this pass
 
 1. Added a provider-neutral transform animation SDK:
-   `include/northstarcpp/scene_animation.hpp`.
+   `sdk/include/northstarcpp/scene_animation.hpp`.
 2. Implemented bounded keyframe parsing, stepping/linear interpolation,
    clip duration, speed, loop, pause/seek and state in
    `modules/host/scene_animation.cpp`.

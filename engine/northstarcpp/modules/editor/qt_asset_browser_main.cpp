@@ -1,6 +1,7 @@
 // NorthStar native Qt 6 Content Browser host.
 // Reusable QtContentBrowser can be docked in a future Qt editor QMainWindow.
 #include "qt_content_browser.hpp"
+#include "qt_asset_card_delegate.hpp"
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -11,7 +12,11 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QListView>
+#include <QTreeWidget>
+#include <QAbstractItemModel>
 #include <QMainWindow>
+#include <QDialog>
+#include <QMetaObject>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
@@ -20,6 +25,11 @@
 #include <QVBoxLayout>
 #include <QWindow>
 #include <QIcon>
+#include <QPainter>
+#include <QStyleOptionViewItem>
+#include <QToolButton>
+#include <QStandardItemModel>
+#include <array>
 #include <iostream>
 #include <memory>
 
@@ -35,11 +45,20 @@ int main(int argc,char** argv) {
     QCommandLineOption content({"c","content"},
         "Explicit Content directory to browse.","directory");
     QCommandLineOption smoke("smoke","Run Qt asset-browser integration smoke and exit.");
+    QCommandLineOption assetCardsSmoke("asset-cards-smoke",
+        "Check complete UE-style asset cards, color bands, metadata and previews.");
+    QCommandLineOption folderIconsSmoke("folder-icons-smoke",
+        "Verify physical and virtual NEF8 folder artwork in grid, tree and details.");
+    QCommandLineOption previewModalSmoke("preview-modal-smoke",
+        "Also exercise real double-click modal preview of NEF8 texture/model.");
     QCommandLineOption screenshot("screenshot",
         "Save a screenshot after the asset catalog finishes indexing.","filename");
     parser.addOption(scene);
     parser.addOption(content);
     parser.addOption(smoke);
+    parser.addOption(assetCardsSmoke);
+    parser.addOption(folderIconsSmoke);
+    parser.addOption(previewModalSmoke);
     parser.addOption(screenshot);
     parser.process(app);
     auto browser=std::make_unique<northstarcpp::editor::QtContentBrowser>();
@@ -94,16 +113,205 @@ int main(int argc,char** argv) {
             "Kayla's Systems — 2026");
     });
     window.statusBar()->showMessage("Native Content Browser  |  F5 Refresh  |  "
-        "Double-click to open folders  |  Right-click for asset operations");
+        "Double-click to preview assets  |  Right-click to insert meshes");
     window.show();
 
-    if(parser.isSet(smoke) || parser.isSet(screenshot)) {
+    if(parser.isSet(smoke) || parser.isSet(folderIconsSmoke) ||
+       parser.isSet(assetCardsSmoke) || parser.isSet(screenshot)) {
         QElapsedTimer elapsed;
         elapsed.start();
         while(elapsed.elapsed()<10000 &&
               view->recordCount()==0) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,50);
             QThread::msleep(10);
+        }
+        if(parser.isSet(assetCardsSmoke)) {
+            namespace role=northstarcpp::editor::asset_card_roles;
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            bool okay=grid && grid->model();
+            auto* cards=okay?dynamic_cast<
+                northstarcpp::editor::AssetCardDelegate*>(grid->itemDelegate()):nullptr;
+            okay=okay && cards && cards->cellSize()==QSize(200,226);
+            struct FolderCase {
+                QString parent,category,meta,color;
+                int count;
+            };
+            std::array<FolderCase,4> const tests{{
+                {"textures/skydome.ytd","Texture","Texture · ", "#4DBA87",5},
+                {"models/skydome.ydd","Mesh","Mesh · embedded","#58A7DB",1},
+                {"materials/skydome.ymat","Material","Material · embedded","#A66AD6",3},
+                {"","Folder","Folder","#C99A52",3}
+            }};
+            int checked=0;
+            for(auto const& tc:tests) {
+                if(!okay)break;
+                view->browseTo(tc.parent);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                if(tc.parent.isEmpty())
+                    okay=view->visibleCount()>=tc.count;
+                else okay=view->visibleCount()==tc.count;
+                if(!okay)break;
+                int const target=tc.parent.isEmpty()?0:grid->model()->rowCount();
+                int const checkCount=tc.parent.isEmpty()?1:target;
+                for(int row=0;row<checkCount && okay;++row) {
+                    auto ix=grid->model()->index(row,0);
+                    auto label=ix.data(role::title).toString();
+                    auto meta=ix.data(role::subtitle).toString();
+                    auto accent=ix.data(role::accent_color).value<QColor>();
+                    okay=!label.isEmpty() && meta.startsWith(tc.meta) &&
+                         accent==QColor(tc.color);
+                    if(!okay)break;
+                    // Paint into an isolated cell to verify the colored band,
+                    // card boundaries and isolated footer; this catches
+                    // regression to QListView's clipped decoration renderer.
+                    auto size=cards->cellSize();
+                    QImage painted(size,QImage::Format_ARGB32);
+                    painted.fill(QColor("#050b12"));
+                    QStyleOptionViewItem option;
+                    option.rect=QRect(QPoint(0,0),size);
+                    option.state=QStyle::State_Enabled|QStyle::State_Selected;
+                    QPainter painter(&painted);
+                    cards->paint(&painter,option,ix);
+                    painter.end();
+                    int const stripeY=6+8+132-1+7+2;
+                    okay=painted.pixelColor(size.width()/2,stripeY)==accent &&
+                         painted.pixelColor(1,1)==QColor("#050b12") &&
+                         painted.pixelColor(size.width()-2,size.height()-2)==
+                             QColor("#050b12");
+                    if(okay)++checked;
+                }
+            }
+            // Asynchronous previews must populate the dedicated QImage role
+            // without replacing the fallback QIcon and preserving category.
+            if(okay) {
+                view->browseTo("textures/skydome.ytd");
+                QElapsedTimer elapsed;elapsed.start();
+                while(elapsed.elapsed()<12000) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                    bool all=true;
+                    for(int i=0;i<grid->model()->rowCount();++i) {
+                        auto ix=grid->model()->index(i,0);
+                        all=all && !ix.data(role::preview_image).value<QImage>().isNull();
+                    }
+                    if(all)break;
+                    QThread::msleep(10);
+                }
+                for(int i=0;i<grid->model()->rowCount();++i) {
+                    auto ix=grid->model()->index(i,0);
+                    okay=okay && !ix.data(role::preview_image).value<QImage>().isNull()
+                         && ix.data(Qt::DecorationRole).canConvert<QIcon>();
+                }
+            }
+            // Slider updates the full item height, avoiding the old clipped
+            // "larger icon in a smaller cell" condition.
+            if(okay) {
+                auto* slider=view->findChild<QSlider*>();
+                if(slider) {
+                    slider->setValue(208);
+                    QCoreApplication::processEvents();
+                    okay=cards->cellSize().height()>226 &&
+                         grid->gridSize()==cards->cellSize();
+                    slider->setValue(144);
+                } else okay=false;
+            }
+            if(okay) {
+                for(auto* button:view->findChildren<QToolButton*>()) {
+                    if(button->toolTip()=="Toggle grid/list view") {
+                        button->click();
+                        okay=grid->viewMode()==QListView::ListMode &&
+                             grid->itemDelegate()!=cards;
+                        button->click();
+                        okay=okay && grid->viewMode()==QListView::IconMode &&
+                             grid->itemDelegate()==cards;
+                        break;
+                    }
+                }
+            }
+            std::cout<<"Qt asset card delegate: "<<(okay?"PASS":"FAIL")
+                     <<" ("<<checked<<" painted category cards)\n";
+            return okay?0:9;
+        }
+        if(parser.isSet(folderIconsSmoke)) {
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            auto* tree=view->findChild<QTreeWidget*>("folderTree");
+            auto* details=view->findChild<QLabel*>("assetPreviewIcon");
+            bool okay=grid && grid->model() && tree && details;
+            auto sameIcon=[](QIcon const& actual,QString const& art) {
+                QIcon original(art);
+                return !actual.isNull() && !original.isNull() &&
+                    actual.pixmap(128,128).toImage()==
+                    original.pixmap(128,128).toImage();
+            };
+            struct FolderCase {
+                QString folder;
+                QString parent;
+                QString display;
+                QString image;
+            };
+            auto const cases=std::array<FolderCase,6>{{
+                {"textures","","textures",":/northstar/icons/folder.png"},
+                {"models","","models",":/northstar/icons/folder.png"},
+                {"materials","","materials",":/northstar/icons/folder.png"},
+                {"textures/skydome.ytd","textures","skydome.ytd",
+                    ":/northstar/icons/texturesFolder.png"},
+                {"models/skydome.ydd","models","skydome.ydd",
+                    ":/northstar/icons/modelsFolder.png"},
+                {"materials/skydome.ymat","materials","skydome.ymat",
+                    ":/northstar/icons/materialsFolder.png"}
+            }};
+            int checked=0;
+            for(auto const& test:cases) {
+                if(!okay)break;
+                view->browseTo(test.parent);
+                auto const* model=grid->model();
+                QModelIndex selected;
+                for(int row=0;row<model->rowCount();++row) {
+                    auto index=model->index(row,0);
+                    if(index.data(Qt::DisplayRole).toString()==test.display) {
+                        selected=index;break;
+                    }
+                }
+                okay=selected.isValid() &&
+                    sameIcon(qvariant_cast<QIcon>(selected.data(Qt::DecorationRole)),
+                             test.image);
+                if(!okay)break;
+                grid->setCurrentIndex(selected);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                auto pixmap=details->pixmap(Qt::ReturnByValue);
+                QIcon expected(test.image);
+                okay=!pixmap.isNull() &&
+                    pixmap.toImage()==expected.pixmap(130,130).toImage();
+                if(!okay)break;
+                auto treeItems=tree->findItems(test.display,
+                    Qt::MatchExactly|Qt::MatchRecursive);
+                bool matched=false;
+                for(auto* item:treeItems) {
+                    if(item->data(0,Qt::UserRole+1).toString()==test.folder) {
+                        matched=sameIcon(item->icon(0),test.image);
+                        break;
+                    }
+                }
+                okay=matched;
+                if(okay)++checked;
+            }
+            if(okay) {
+                QIcon normal(":/northstar/icons/folder.png");
+                QIcon textures(":/northstar/icons/texturesFolder.png");
+                QIcon models(":/northstar/icons/modelsFolder.png");
+                QIcon materials(":/northstar/icons/materialsFolder.png");
+                auto different=[](QIcon const& a,QIcon const& b) {
+                    return a.pixmap(128,128).toImage()!=b.pixmap(128,128).toImage();
+                };
+                okay=different(normal,textures) &&
+                     different(normal,models) &&
+                     different(normal,materials) &&
+                     different(textures,models) &&
+                     different(textures,materials) &&
+                     different(models,materials);
+            }
+            std::cout<<"Qt NEF8 folder artwork grid/tree/details: "
+                     <<(okay?"PASS":"FAIL")<<" ("<<checked<<"/6 folders)\n";
+            return okay?0:8;
         }
         if(parser.isSet(smoke)) {
             bool okay=true;
@@ -112,19 +320,121 @@ int main(int argc,char** argv) {
                 okay=grid && grid->model();
                 view->browseTo("textures/skydome.ytd");
                 okay=okay && view->visibleCount()==5;
+                QStringList texturePaths;
                 if(okay) {
                     for(int i=0;i<grid->model()->rowCount();++i) {
                         auto index=grid->model()->index(i,0);
                         grid->setCurrentIndex(index);
                         auto reference=view->selectedAsset();
                         okay=okay && reference.startsWith("textures/skydome.ytd@");
+                        texturePaths.push_back("textures/skydome.ytd/"+
+                                               reference.section('@',-1));
                     }
+                    // Must prove all five decoded thumbnail images arrived,
+                    // not merely that every list entry has a category icon.
+                    QElapsedTimer images;
+                    images.start();
+                    while(images.elapsed()<12000) {
+                        QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                        bool ready=true;
+                        for(auto const& path:texturePaths)
+                            ready=ready && !view->cachedThumbnail(path).isNull();
+                        if(ready)break;
+                        QThread::msleep(10);
+                    }
+                    for(auto const& path:texturePaths)
+                        okay=okay && !view->cachedThumbnail(path).isNull();
                 }
                 view->browseTo("models/skydome.ydd");
                 okay=okay && view->visibleCount()==1;
                 if(okay) {
                     grid->setCurrentIndex(grid->model()->index(0,0));
-                    okay=view->selectedAsset().startsWith("models/skydome.ydd@");
+                    auto reference=view->selectedAsset();
+                    okay=reference.startsWith("models/skydome.ydd@");
+                    QElapsedTimer images;
+                    images.start();
+                    while(images.elapsed()<12000 &&
+                          view->cachedThumbnail("models/skydome.ydd/skydome_high").isNull()) {
+                        QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                        QThread::msleep(10);
+                    }
+                    okay=okay && !view->cachedThumbnail(
+                        "models/skydome.ydd/skydome_high").isNull();
+                }
+                // YMAT is also an NEF8 ListFile: each of the three materials
+                // must have its own loaded sphere, not a fallback icon.
+                view->browseTo("materials/skydome.ymat");
+                okay=okay && view->visibleCount()==3;
+                QStringList materialPaths;
+                for(int j=0;okay && j<grid->model()->rowCount();++j) {
+                    auto ix=grid->model()->index(j,0);
+                    grid->setCurrentIndex(ix);
+                    auto ref=view->selectedAsset();
+                    okay=ref.startsWith("materials/skydome.ymat@");
+                    materialPaths.push_back("materials/skydome.ymat/"+
+                                             ref.section('@',-1));
+                }
+                if(okay) {
+                    QElapsedTimer sphereWait;sphereWait.start();
+                    while(sphereWait.elapsed()<20000) {
+                        QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                        bool loaded=true;
+                        for(auto const& entry:materialPaths)
+                            loaded=loaded && !view->cachedThumbnail(entry).isNull();
+                        if(loaded)break;
+                        QThread::msleep(10);
+                    }
+                    for(auto const& entry:materialPaths)
+                        okay=okay && !view->cachedThumbnail(entry).isNull();
+                }
+                if(okay && parser.isSet(previewModalSmoke)) {
+                    int activations=0;
+                    QObject::connect(view,
+                        &northstarcpp::editor::QtContentBrowser::assetActivated,
+                        &window,[&activations](QString const&){++activations;});
+                    auto inspectDoubleClick=[&](QString const& folder,
+                                                QString const& entry) {
+                        view->browseTo(folder);
+                        auto* model=grid->model();
+                        QModelIndex index;
+                        for(int j=0;j<model->rowCount();++j) {
+                            auto test=model->index(j,0);
+                            if(test.data(Qt::DisplayRole).toString()==entry) {
+                                index=test;break;
+                            }
+                        }
+                        if(!index.isValid())return false;
+                        grid->setCurrentIndex(index);
+                        bool seen=false,rendered=false;
+                        QElapsedTimer timeout;timeout.start();
+                        QTimer check;
+                        check.setInterval(25);
+                        QObject::connect(&check,&QTimer::timeout,&window,[&] {
+                            auto* modal=qobject_cast<QDialog*>(
+                                QApplication::activeModalWidget());
+                            if(modal && modal->objectName()=="assetPreviewDialog") {
+                                seen=true;
+                                auto* viewport=modal->findChild<QWidget*>("assetPreviewCanvas");
+                                if(viewport && viewport->property("previewRendered").toBool()) {
+                                    rendered=true;
+                                    modal->accept();
+                                }
+                            }
+                            if(timeout.elapsed()>15000) {
+                                if(modal)modal->reject();
+                            }
+                        });
+                        check.start();
+                        bool invoked=QMetaObject::invokeMethod(
+                            grid,"doubleClicked",Qt::DirectConnection,
+                            Q_ARG(QModelIndex,index));
+                        check.stop();
+                        return invoked && seen && rendered;
+                    };
+                    okay=inspectDoubleClick("textures/skydome.ytd","moon_new") &&
+                         inspectDoubleClick("models/skydome.ydd","skydome_high") &&
+                         inspectDoubleClick("materials/skydome.ymat","sky_cloud_clear") &&
+                         activations==0;
                 }
             } else {
                 okay=view->recordCount()==5 && view->visibleCount()==3;

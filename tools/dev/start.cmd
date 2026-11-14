@@ -11,13 +11,21 @@ set "APP="
 for /f "delims=" %%P in ('dir /b /ad /o-n "dist\NorthStarCpp-*-windows-x64-Release" 2^>nul') do (
     if not defined APP if exist "dist\%%P\qt.runtime.json" if exist "dist\%%P\bin\platforms\qwindows.dll" if exist "dist\%%P\bin\northstarcpp_project_manager.exe" set "APP=%CD%\dist\%%P\bin\northstarcpp_project_manager.exe"
 )
-if not defined APP if exist "out\project-manager-qt\Qt6Widgets.dll" if exist "out\project-manager-qt\northstarcpp_project_manager.exe" set "APP=%CD%\out\project-manager-qt\northstarcpp_project_manager.exe"
+if defined APP goto ready
+set "BUILD_DIR=%CD%\out\project-manager-qt"
+if exist "%BUILD_DIR%\Qt6Widgets.dll" if exist "%BUILD_DIR%\northstarcpp_project_manager.exe" set "APP=%BUILD_DIR%\northstarcpp_project_manager.exe"
+if /I "%~1"=="--check" goto skip_build
+if /I "%~1"=="--no-build" goto skip_build
+goto build
+
+:skip_build
 if not defined APP if exist "out\qt-browser-debug\Qt6Widgets.dll" if exist "out\qt-browser-debug\northstarcpp_project_manager.exe" set "APP=%CD%\out\qt-browser-debug\northstarcpp_project_manager.exe"
 
+:ready
 if /I "%~1"=="--check" goto check
-if /I "%~1"=="--no-build" goto launch
-if defined APP goto launch
+goto launch
 
+:build
 rem A dedicated CMake build tree avoids touching a running game build.
 set "CMAKE=cmake"
 where cmake >nul 2>nul
@@ -40,16 +48,24 @@ if not exist "C:\msys64\mingw64\bin\ninja.exe" (
     echo [NorthStarCpp] Ninja is required.
     goto fail
 )
-echo [NorthStarCpp] Building Qt 6 Project Browser ...
-"%CMAKE%" -S "%CD%" -B "%CD%\out\project-manager-qt" -G Ninja ^
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_SUPPRESS_REGENERATION=ON ^
+if not exist "%BUILD_DIR%\CMakeCache.txt" goto configure
+if not exist "%BUILD_DIR%\build.ninja" goto configure
+findstr /I /R /C:"^CMAKE_SUPPRESS_REGENERATION:.*=ON$" "%BUILD_DIR%\CMakeCache.txt" >nul
+if not errorlevel 1 goto configure
+goto compile
+
+:configure
+"%CMAKE%" -S "%CD%" -B "%BUILD_DIR%" -G Ninja ^
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_SUPPRESS_REGENERATION=OFF ^
   "-DCMAKE_C_COMPILER=C:\msys64\mingw64\bin\gcc.exe" ^
   "-DCMAKE_CXX_COMPILER=C:\msys64\mingw64\bin\g++.exe" ^
   "-DCMAKE_MAKE_PROGRAM=C:\msys64\mingw64\bin\ninja.exe"
 if errorlevel 1 goto fail
-"%CMAKE%" --build "%CD%\out\project-manager-qt" --target northstarcpp_project_manager --parallel 6
+:compile
+echo [NorthStarCpp] Checking the Qt Editor, Player and game runtime ...
+"%CMAKE%" --build "%BUILD_DIR%" --target northstarcpp_project_manager --parallel 4
 if errorlevel 1 goto fail
-if exist "out\project-manager-qt\Qt6Widgets.dll" if exist "out\project-manager-qt\northstarcpp_project_manager.exe" set "APP=%CD%\out\project-manager-qt\northstarcpp_project_manager.exe"
+if exist "%BUILD_DIR%\Qt6Widgets.dll" if exist "%BUILD_DIR%\northstarcpp_project_manager.exe" set "APP=%BUILD_DIR%\northstarcpp_project_manager.exe"
 
 :launch
 if not defined APP (

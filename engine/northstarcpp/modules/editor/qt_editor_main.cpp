@@ -17,12 +17,44 @@ int main(int argc,char** argv) {
     parser.addHelpOption();
     QCommandLineOption scene({"s","scene"},"Scene file to open (.nscn/.nscene).","file");
     QCommandLineOption smoke("smoke","Run dock/scene/binary/asset-drop smoke.");
-    parser.addOption(scene);parser.addOption(smoke);
+    QCommandLineOption gpuSmoke("gpu-smoke",
+        "Render one real engine.render GPU frame inside Qt native viewport.");
+    QCommandLineOption smokeOutput("smoke-output",
+        "Save a valid binary scene at FILE for packaged-editor smoke.", "file");
+    QCommandLineOption playerCheck("player-check",
+        "Verify installed Player can load a scene authored by this editor.");
+    parser.addOption(scene);
+    parser.addOption(smoke);
+    parser.addOption(gpuSmoke);
+    parser.addOption(smokeOutput);
+    parser.addOption(playerCheck);
     parser.process(app);
     northstarcpp::editor::QtEditorWindow window;
     if(parser.isSet(scene) && !window.openScene(parser.value(scene)))
         return 2;
     window.show();
+    if(parser.isSet(smokeOutput)) {
+        if(!parser.isSet(smoke)) {
+            std::cerr<<"--smoke-output requires --smoke"<<std::endl;return 5;
+        }
+        bool ok=window.saveScene(parser.value(smokeOutput));
+        QCoreApplication::processEvents();
+        std::cout<<"Qt editor binary scene smoke: "<<(ok?"PASS":"FAIL")
+                 <<std::endl;
+        return ok?0:6;
+    }
+    if(parser.isSet(gpuSmoke)) {
+        QTemporaryDir temp;
+        bool ok=temp.isValid() && window.runGpuSmoke(temp.path());
+        QCoreApplication::processEvents();
+        std::cout<<"Qt engine.render native GPU viewport: "
+                 <<(ok?"PASS":"FAIL")<<std::endl;
+        return ok?0:8;
+    }
+    if(parser.isSet(playerCheck)) {
+        QTemporaryDir temp;
+        return temp.isValid() && window.runPlayerCheckSmoke(temp.path())?0:7;
+    }
     if(parser.isSet(smoke)) {
         QTemporaryDir temporary;
         if(!temporary.isValid())return 3;

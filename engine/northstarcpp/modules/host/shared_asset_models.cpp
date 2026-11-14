@@ -140,10 +140,16 @@ std::vector<Material> load_materials(AssetStore const& assets, std::string const
     return detail::parse_materials(detail::read_list_file(assets, path), path);
 }
 
-std::vector<Drawable> load_drawables(AssetStore const& assets, std::string const& path)
+std::vector<Material> load_materials_from_bytes(
+    std::vector<std::uint8_t> const& bytes, std::string const& path)
+{
+    return detail::parse_materials(detail::parse_list_file(bytes),path);
+}
+
+static std::vector<Drawable> parse_drawable_dictionary(
+    detail::ListFile const& file, std::string const& path)
 {
     require(extension(path) == ".ydd", "Expected a .ydd drawable dictionary");
-    auto const file = read_list_file(assets, path);
     require(file.kind == 2, "Expected a drawable dictionary in YDD");
     auto const body = parse_json(std::string(file.body.begin(), file.body.end()));
     require(body.get<std::string>("schema") == "newengine.ydd.drawable_dictionary.v1" &&
@@ -235,6 +241,15 @@ std::vector<Drawable> load_drawables(AssetStore const& assets, std::string const
     for (std::size_t i = 0; i < result.size(); ++i)
         require(result[i].meshes.size() == mesh_counts[i], "YDD drawable mesh count mismatch");
     return result;
+}
+
+std::vector<Drawable> load_drawables(AssetStore const& assets,
+                                     std::string const& path) {
+    return parse_drawable_dictionary(detail::read_list_file(assets,path),path);
+}
+std::vector<Drawable> load_drawables_from_bytes(std::vector<std::uint8_t> const& bytes,
+                                     std::string const& path) {
+    return parse_drawable_dictionary(detail::parse_list_file(bytes),path);
 }
 
 } // namespace northstarcpp::shared_assets

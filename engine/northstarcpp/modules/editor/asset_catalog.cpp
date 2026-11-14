@@ -103,7 +103,7 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
             rec.size=it->file_size(entry_error);
             if(entry_error)rec.size=0;
             auto ext=lowercase(it->path().extension().u8string());
-            if((ext==".ytd" || ext==".ydd") && rec.size>=128) {
+            if((ext==".ytd" || ext==".ydd" || ext==".ymat") && rec.size>=128) {
                 // Only valid NEF8 ListFiles are virtual directories.
                 // Invalid/legacy files stay visible as ordinary assets.
                 try {
@@ -130,7 +130,8 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
                         child.virtual_path=relative+"/"+item.name;
                         child.filename=item.name;
                         child.directory=false;
-                        child.kind=ext==".ydd"?AssetKind::mesh:AssetKind::texture;
+                        child.kind=ext==".ydd"?AssetKind::mesh:
+                                   ext==".ymat"?AssetKind::material:AssetKind::texture;
                         child.container_path=relative;
                         child.entry_name=item.name;
                         child.size=item.size;

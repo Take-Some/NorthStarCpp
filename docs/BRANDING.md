@@ -2,24 +2,24 @@
 
 ## Centralized icon directory
 
-All first-party application and compatibility icons are stored in the top-level `icons/` directory. Icon files are tracked as build inputs; released Windows executables embed the relevant resources and do not need adjacent loose ICO files.
+All first-party application and compatibility icons are stored in the top-level `engine/northstarcpp/resources/icons/` directory. Icon files are tracked as build inputs; released Windows executables embed the relevant resources and do not need adjacent loose ICO files.
 
-The canonical NorthStar Engine brand icon is `icons/logoStar.ico` (64, 128, 256 pixel frames). Preserve the original brand asset without modification.
+The canonical NorthStar Engine brand icon is `engine/northstarcpp/resources/icons/logoStar.ico` (64, 128, 256 pixel frames). Preserve the original brand asset without modification.
 
 ## Windows application icon mapping
 
 | Application | Source icon |
 | --- | --- |
-| `northstarcpp_editor.exe` | `icons/northstar-editor.ico` |
-| `northstarcpp_project_manager.exe` | `icons/logoStar.ico` |
-| `northstarcpp_player.exe` | `icons/logoStar.ico` |
-| `northstarcpp_camera_timeline_editor.exe` | `icons/logoStar.ico` |
-| `bugtrap.exe` | `icons/Bug.ico` |
-| `shader_generator.exe` | `icons/shader_generator.ico` |
+| `northstarcpp_editor.exe` | `engine/northstarcpp/resources/icons/northstar-editor.ico` |
+| `northstarcpp_project_manager.exe` | `engine/northstarcpp/resources/icons/logoStar.ico` |
+| `northstarcpp_player.exe` | `engine/northstarcpp/resources/icons/logoStar.ico` |
+| `northstarcpp_camera_timeline_editor.exe` | `engine/northstarcpp/resources/icons/logoStar.ico` |
+| `bugtrap.exe` | `engine/northstarcpp/resources/icons/Bug.ico` |
+| `shader_generator.exe` | `engine/northstarcpp/resources/icons/shader_generator.ico` |
 
 CMake configures each icon from `engine/northstarcpp/resources/*.rc.in`. The editor icon uses its own resource template but retains `IDI_NORTHSTARCPP_APP=101` for existing window icon loading. BugTrap has its separate `IDI_BUGTRAP_APP=102` resource, and Shader Generator has `IDI_SHADER_GENERATOR=103`.
 
-The Project Browser continues to bundle the logo through Qt resources at `:/logoStar.ico`; its source is now `icons/logoStar.ico`. Compatibility module resources use source-relative paths to the same centralized directory.
+The Project Browser continues to bundle the logo through Qt resources at `:/logoStar.ico`; its source is now `engine/northstarcpp/resources/icons/logoStar.ico`. Compatibility module resources use source-relative paths to the same centralized directory.
 
 ## Separate UI icon vocabulary
 

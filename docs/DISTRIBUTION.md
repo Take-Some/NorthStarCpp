@@ -22,9 +22,9 @@ engine/northstarcpp/
     render/d3d11/            D3D11 provider
     audio/winmm/             WinMM provider
     input/win32/             Win32/XInput provider
-    foundation/northstarcpp/compat/ Ported implementation and math
-external/sdk/sources/        Vendored physics dependencies
-external/flecs/              Flecs source dependency
+    core/northstarcpp/ Ported implementation and math
+sdk/vendor/sources/        Vendored physics dependencies
+sdk/vendor/flecs/              Flecs source dependency
 tools/build_release.cmd      Clean Release build from current sources
 tools/build_dist.py          Release builder + content validator
 out/                         Intermediate objects and build outputs

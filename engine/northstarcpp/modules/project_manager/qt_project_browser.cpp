@@ -286,6 +286,16 @@ public:
                     return item.directory == stale.directory;
                 }))
                 return 12;
+
+            // A successful Editor handoff must close the Project Browser.
+            // Launch a short-lived copy of this executable instead of a real
+            // GUI Editor so that the smoke test is deterministic and headless.
+            // The child exits immediately with --smoke-editor-child.
+            selectProject(p.directory);
+            smokeEditorHandoff_ = true;
+            openProject();
+            if (!editorLaunched_ || isVisible())
+                return 13;
             return 0;
         } catch (std::exception const& e) {
             qWarning("Qt Project Browser smoke failure: %s",e.what());
@@ -556,6 +566,9 @@ private:
     }
     void openProject()
     {
+        // A double click and the Open Project action can both queue a launch.
+        // Do not create a second Editor while this window is closing.
+        if (editorLaunched_) return;
         auto const path = selectedPath_;
         if (path.empty()) return;
         try {
@@ -570,18 +583,28 @@ private:
                 return;
             }
             fs::path executable=ns::executable_directory()/L"northstarcpp_editor_qt.exe";
-            if(!fs::exists(executable))
-                executable=ns::executable_directory()/L"northstarcpp_editor.exe";
-            if (!fs::is_regular_file(executable))
+            if(!fs::is_regular_file(executable))
                 executable=ns::executable_directory().parent_path()/
-                    L"northstarcpp_editor.exe";
+                    L"northstarcpp_editor_qt.exe";
             if (!fs::is_regular_file(executable))
                 throw std::runtime_error("NorthStarCpp editor is missing");
             QStringList args{"--scene",qpath(current.startup_scene)};
+            if (smoke_ && smokeEditorHandoff_) {
+                executable=fs::path(QApplication::applicationFilePath().toStdWString());
+                args={"--smoke-editor-child"};
+            }
             if (!QProcess::startDetached(qpath(executable),args,qpath(executable.parent_path())))
                 throw std::runtime_error("Failed to launch NorthStarCpp editor");
-            catalog_.opened(path);
-            refresh(path);
+
+            editorLaunched_=true;
+            // Recent-project bookkeeping must not keep the manager open after
+            // a successful detached launch (the Editor owns its own process).
+            try {
+                catalog_.opened(path);
+            } catch (std::exception const& error) {
+                qWarning("Could not update recently opened project: %s",error.what());
+            }
+            close();  // Last top-level window: QApplication exits normally.
         } catch (std::exception const& e) {
             messageError(this,"Cannot open project",e);
             refresh(path);
@@ -719,6 +742,8 @@ private:
         if (scroll_) QTimer::singleShot(0,this,[this]{rebuildCards();});
     }
     bool smoke_;
+    bool smokeEditorHandoff_=false;
+    bool editorLaunched_=false;
     QTemporaryDir temp_;
     ns::Catalog catalog_;
     std::vector<ns::Project> projects_;
@@ -740,6 +765,8 @@ private:
 int main(int argc,char** argv)
 {
     QApplication app(argc,argv);
+    if (app.arguments().contains("--smoke-editor-child"))
+        return 0;  // Detached child used solely by the handoff regression.
     bool const smoke=app.arguments().contains("--smoke");
     std::unique_ptr<northstarcpp::Logger> logger;
     if (!smoke || northstarcpp::application_log_directory_overridden()) {

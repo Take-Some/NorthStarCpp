@@ -1,0 +1,9 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created 	: 06.10.2008
+//	Author		: Kayla Verner
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#include "pch.h"
+#include <northstarcpp/engine/pc/library_linkage.h>
+#include <northstarcpp/editor/dialog/library_linkage.h>

@@ -29,6 +29,12 @@ from tools.v8_provider.runtime_audit import audit_runtime
 from tools.release_readiness_gate import (
     parse_v8_version, verified_v8_attestation, verified_clean_machine_report)
 
+V8_SIDECAR_FILES = (
+    "bin/scripting/v8/d8.exe", "bin/scripting/v8/icudtl.dat",
+    "bin/scripting/v8/snapshot_blob.bin", "bin/scripting/v8/v8_worker.js",
+    "licenses/v8-sidecar/V8-LICENSE", "licenses/v8-sidecar/ICU-LICENSE",
+)
+
 SYSTEM_DLLS = {
     "advapi32.dll", "bcrypt.dll", "comdlg32.dll", "comctl32.dll",
     "d3d11.dll", "d3d12.dll", "d3dcompiler_47.dll", "dbghelp.dll",
@@ -44,10 +50,9 @@ EXTERNAL_PREREQUISITES = {
     # Microsoft DirectX SDK utility runtime; not redistributable by this builder.
     "d3dx9_43.dll": "Microsoft DirectX End-User Runtimes (June 2010), for shader_generator.exe"
 }
-REQUIRED_BINARIES = ("northstarcpp_editor.exe", "northstarcpp_player.exe",
-                     "northstarcpp_project_manager.exe",
-                     "northstarcpp_camera_timeline_editor.exe",
-                     "northstarcpp_asset_browser.exe", "bugtrap.exe")
+# Non-Qt game/runtime processes. Qt tools belong exclusively to
+# QT_APPLICATIONS and may be relocated under bin/qt_tools for V8 isolation.
+REQUIRED_BINARIES = ("northstarcpp_player.exe", "bugtrap.exe")
 COMPONENTS = ("Runtime", "SDK", "Tools", "Documentation", "Licenses")
 
 
@@ -58,8 +63,9 @@ QT_APPLICATIONS = (
     "northstarcpp_project_manager.exe",
     "northstarcpp_camera_timeline_editor.exe",
     "northstarcpp_asset_browser.exe",
+    "northstarcpp_editor_qt.exe",
 )
-QT_OPTIONAL_APPLICATIONS = ("northstarcpp_editor_qt.exe",)
+QT_OPTIONAL_APPLICATIONS = ()
 
 
 def qt_tool_path(package: Path, name: str) -> Path:
@@ -172,6 +178,10 @@ def parse_registry(package: Path) -> tuple[dict, dict[str, str]]:
             defaults[capability] = provider
     if not info["plugins"]:
         raise DistError("No modules registered")
+    if "bin/scripting_v8_sidecar.dll" in seen_paths:
+        for name in V8_SIDECAR_FILES:
+            if not (package / name).is_file():
+                raise DistError("Missing bundled V8 sidecar file: " + name)
     v8_libs = registered_v8_runtime(package)
     qt_libs = verified_extras(package, v8_libs)
     nonplugins = qt_libs | {Path(x).name.casefold() for x in v8_libs}
@@ -191,11 +201,12 @@ def parse_registry(package: Path) -> tuple[dict, dict[str, str]]:
 
 
 def check_binary_imports(package: Path, objdump: str) -> dict[str, list[dict]]:
-    binaries = [
-        qt_tool_path(package, name) if name in QT_APPLICATIONS
-        else package / "bin" / name
-        for name in REQUIRED_BINARIES
-    ]
+    binaries = [package / "bin" / name for name in REQUIRED_BINARIES]
+    # Every Qt process is mandatory, especially the single supported Editor.
+    binaries.extend(qt_tool_path(package, name) for name in QT_APPLICATIONS)
+    legacy = package / "bin" / "northstarcpp_editor.exe"
+    if legacy.exists() or (package / "bin/qt_tools/northstarcpp_editor.exe").exists():
+        raise DistError("Deprecated Win32 Editor must not ship in dist")
     for name in QT_OPTIONAL_APPLICATIONS:
         optional = qt_tool_path(package, name)
         if optional.is_file():
@@ -208,6 +219,9 @@ def check_binary_imports(package: Path, objdump: str) -> dict[str, list[dict]]:
         raise DistError("Native Perlin world generator is missing")
     binaries.append(world_generator)
     binaries.extend(sorted((package / "bin").rglob("*.dll")))
+    worker = package / "bin/scripting/v8/d8.exe"
+    if worker.is_file():
+        binaries.append(worker)
     report: dict[str, list[dict]] = {}
     for executable in binaries:
         if not executable.is_file():
@@ -253,6 +267,9 @@ def package_smoke(package: Path) -> None:
     # Exercise the installed app + runtime module paths, not build directory DLLs.
     bin_dir = package / "bin"
     run([str(bin_dir / "bugtrap.exe"), "--self-test"], cwd=bin_dir, timeout=15, silent=True)
+    if (bin_dir / "scripting_v8_sidecar.dll").is_file():
+        run([sys.executable, "-B", str(ROOT / "tests/player_bundled_scripting_smoke.py"),
+             str(bin_dir / "northstarcpp_player.exe")], timeout=100)
     with tempfile.TemporaryDirectory(prefix="northstarcpp-scene-") as temporary:
         scene = Path(temporary) / "dist_smoke.nscn"
         environment = os.environ.copy()
@@ -261,20 +278,13 @@ def package_smoke(package: Path) -> None:
                     "NORTHSTARCPP_AUDIO_PLUGIN", "NORTHSTARCPP_INPUT_PLUGIN", "NORTHSTARCPP_ASSETS_PLUGIN",
                     "NORTHSTARCPP_PERLIN_PLUGIN"):
             environment.pop(key, None)
-        run([str(bin_dir / "northstarcpp_editor.exe"), "--warp", "--smoke",
-             "--smoke-output", str(scene)], cwd=bin_dir, timeout=45, silent=True, env=environment)
-        if not scene.is_file():
-            raise DistError("Packaged editor did not write a test scene")
-        run([str(bin_dir / "northstarcpp_player.exe"), "--warp", "--smoke",
-             "--scene", str(scene)], cwd=bin_dir, timeout=45, silent=True, env=environment)
-        shared_assets = package / "sharedAssets"
-        if (shared_assets / "models" / "skydome.ydd").is_file():
-            run([str(bin_dir / "northstarcpp_player.exe"), "--check-shared-assets", str(shared_assets)],
-                cwd=bin_dir, timeout=30, silent=True, env=environment)
-            run([str(bin_dir / "northstarcpp_player.exe"), "--warp", "--check-scene",
-                 "--scene", str(scene), "--shared-assets", str(shared_assets),
-                 "--asset-zones", str(ROOT / "tests" / "fixtures" / "asset_zones.json")],
-                cwd=bin_dir, timeout=45, silent=True, env=environment)
+        # A Qt Editor process needs its isolated Qt DLL/platform runtime,
+        # unlike the standalone game Player. Run scene authoring later using
+        # qt_tool_path() with that exact process environment.
+        run([str(bin_dir / "northstarcpp_player.exe"), "--warp",
+             "--check-scene",
+             "--scene", str(ROOT / "tests" / "fixtures" / "static_scene.nscene")],
+            cwd=bin_dir, timeout=45, silent=True, env=environment)
         environment["LOCALAPPDATA"] = temporary
         isolated_qt = environment.copy()
         qt_dir = qt_tool_path(package, QT_APPLICATIONS[0]).parent
@@ -283,6 +293,23 @@ def package_smoke(package: Path) -> None:
             os.environ.get("SystemRoot","C:/Windows")])
         isolated_qt.pop("QT_PLUGIN_PATH", None)
         isolated_qt.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+        qt_editor = qt_tool_path(package, "northstarcpp_editor_qt.exe")
+        run([str(qt_editor), "--smoke", "--smoke-output", str(scene)],
+            cwd=qt_dir, timeout=45, silent=True, env=isolated_qt)
+        if not scene.is_file():
+            raise DistError("Qt Editor did not serialize a test scene")
+        run([str(bin_dir / "northstarcpp_player.exe"), "--warp",
+             "--check-scene",
+             "--scene", str(scene)], cwd=bin_dir, timeout=45,
+            silent=True, env=environment)
+        shared_assets = package / "sharedAssets"
+        if (shared_assets / "models" / "skydome.ydd").is_file():
+            run([str(bin_dir / "northstarcpp_player.exe"), "--check-shared-assets", str(shared_assets)],
+                cwd=bin_dir, timeout=30, silent=True, env=environment)
+            run([str(bin_dir / "northstarcpp_player.exe"), "--warp", "--check-scene",
+                 "--scene", str(scene), "--shared-assets", str(shared_assets),
+                 "--asset-zones", str(ROOT / "tests" / "fixtures" / "asset_zones.json")],
+                cwd=bin_dir, timeout=45, silent=True, env=environment)
         run([str(qt_tool_path(package, "northstarcpp_project_manager.exe")), "--smoke"],
             cwd=qt_dir, timeout=30, silent=True, env=isolated_qt)
         run([str(qt_tool_path(package, "northstarcpp_camera_timeline_editor.exe")), "--self-test"],
@@ -436,8 +463,14 @@ def release(args: argparse.Namespace) -> dict:
             raise DistError("--from-build configuration type does not match " + args.build_type)
         if "BUILD_TESTING:BOOL=ON" not in cache:
             raise DistError("--from-build must have BUILD_TESTING=ON; test-free builds are not releasable")
-        if not (build / "northstarcpp.plugins.json").is_file():
+        registry_path = build / "northstarcpp.plugins.json"
+        if not registry_path.is_file():
             raise DistError("--from-build is missing the generated CMake registry")
+        if args.v8_provider_dir:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            if any(item.get("id") == "scripting.v8_sidecar" for item in registry["plugins"]):
+                raise DistError("For an external native V8 package, configure the build with "
+                                "-DNORTHSTARCPP_V8_SIDECAR=OFF and rebuild before packaging")
         # A stale --from-build can run old codecs against newly serialized
         # scenes and report misleading CTest failures or false positives.
         # Dry-run the ENTIRE Ninja graph before accepting reused binaries.
@@ -457,10 +490,13 @@ def release(args: argparse.Namespace) -> dict:
         build = Path(tempfile.mkdtemp(prefix="gcc-{}-".format(args.build_type.lower()),
                                       dir=builds))
         print("NorthStarCpp distribution build:", args.build_type, flush=True)
-        run([cmake, "-S", str(ROOT), "-B", str(build), "-G", "Ninja",
-             "-DCMAKE_BUILD_TYPE=" + args.build_type,
-             "-DCMAKE_C_COMPILER=" + gcc, "-DCMAKE_CXX_COMPILER=" + gpp,
-             "-DCMAKE_MAKE_PROGRAM=" + ninja, "-DBUILD_TESTING=ON"], timeout=100)
+        configure = [cmake, "-S", str(ROOT), "-B", str(build), "-G", "Ninja",
+                     "-DCMAKE_BUILD_TYPE=" + args.build_type,
+                     "-DCMAKE_C_COMPILER=" + gcc, "-DCMAKE_CXX_COMPILER=" + gpp,
+                     "-DCMAKE_MAKE_PROGRAM=" + ninja, "-DBUILD_TESTING=ON"]
+        if args.v8_provider_dir:
+            configure.append("-DNORTHSTARCPP_V8_SIDECAR=OFF")
+        run(configure, timeout=100)
         run([cmake, "--build", str(build), "--target", "all", "--parallel", str(args.jobs)],
             timeout=None)
     ctest = str(Path(cmake).with_name("ctest.exe"))
@@ -544,7 +580,7 @@ def release(args: argparse.Namespace) -> dict:
             "The GNU/Windows package contains code adapted from earlier engine sources.\n"
             "Bundling a binary does not establish permission for its public distribution.\n"
             "Review original code provenance, rights and all transitive dependencies before release.\n"
-            "Third-party notices: flecs.txt (MIT), bullet.txt (zlib), jolt.txt (MIT).\n"
+             "Third-party notices include bcdec.txt (MIT), flecs.txt (MIT), bullet.txt (zlib), jolt.txt (MIT).\n"
             "The shader generator additionally requires Microsoft's D3DX9_43 DLL, typically\n"
             "installed using Microsoft's DirectX End-User Runtimes (June 2010).\n"
             "The Microsoft runtime is not included in this archive.\n"

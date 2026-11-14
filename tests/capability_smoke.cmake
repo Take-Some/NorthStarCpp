@@ -22,12 +22,13 @@ run("${CMAKE_COMMAND}" "-DEDITOR=${EDITOR}" "-DPLAYER=${PLAYER}"
 set(host "${TEST_ROOT}/discovery")
 file(REMOVE_RECURSE "${host}")
 file(MAKE_DIRECTORY "${host}/providers")
-foreach(app IN ITEMS EDITOR PLAYER PROBE)
+# Qt Editor requires its Qt platform bundle; do not stage it as a bare EXE.
+foreach(app IN ITEMS PLAYER PROBE)
     get_filename_component(name "${${app}}" NAME)
     configure_file("${${app}}" "${host}/${name}" COPYONLY)
     set(staged_${app} "${host}/${name}")
 endforeach()
-file(SHA256 "${staged_EDITOR}" editor_before)
+file(SHA256 "${EDITOR}" editor_before)
 file(SHA256 "${staged_PLAYER}" player_before)
 file(WRITE "${host}/bootstrap.json" "{\"plugins\":{\"path\":\"./providers\"}}\n")
 
@@ -46,22 +47,22 @@ run("${staged_PROBE}" fixture)
 set(ENV{NORTHSTARCPP_ECS_PLUGIN} "${host}/providers/ecs.dll")
 run("${ECS_SMOKE}")
 unset(ENV{NORTHSTARCPP_ECS_PLUGIN})
-run("${CMAKE_COMMAND}" "-DEDITOR=${staged_EDITOR}" "-DPLAYER=${staged_PLAYER}"
-    "-DTEST_ROOT=${TEST_ROOT}/alternatives" -P "${APP_SMOKE}")
+run("${staged_PLAYER}" --warp --check-scene --scene
+    "${TEST_ROOT}/defaults/editor created.nscn")
 
 file(RENAME "${alternative}" "${host}/inactive.disabled")
 run("${staged_PROBE}" bullet)
-run("${CMAKE_COMMAND}" "-DEDITOR=${staged_EDITOR}" "-DPLAYER=${staged_PLAYER}"
-    "-DTEST_ROOT=${TEST_ROOT}/bullet" -P "${APP_SMOKE}")
+run("${staged_PLAYER}" --warp --check-scene --scene
+    "${TEST_ROOT}/defaults/editor created.nscn")
 
 file(REMOVE "${bullet}")
 set(jolt "${host}/providers/jolt.dll")
 configure_file("${JOLT}" "${jolt}" COPYONLY)
 run("${staged_PROBE}" jolt)
-run("${CMAKE_COMMAND}" "-DEDITOR=${staged_EDITOR}" "-DPLAYER=${staged_PLAYER}"
-    "-DTEST_ROOT=${TEST_ROOT}/jolt" -P "${APP_SMOKE}")
+run("${staged_PLAYER}" --warp --check-scene --scene
+    "${TEST_ROOT}/defaults/editor created.nscn")
 
-file(SHA256 "${staged_EDITOR}" editor_after)
+file(SHA256 "${EDITOR}" editor_after)
 file(SHA256 "${staged_PLAYER}" player_after)
 if(NOT editor_before STREQUAL editor_after OR NOT player_before STREQUAL player_after)
     message(FATAL_ERROR "Editor or player changed between provider configurations")

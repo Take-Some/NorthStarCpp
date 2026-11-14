@@ -266,10 +266,10 @@ void start_project(ns::Project const& p, bool editor, std::wstring const& physic
     if (p.status != ns::Project::Status::ready)
         throw std::runtime_error("Selected project is not ready");
     auto exe = ns::executable_directory() /
-        (editor ? L"northstarcpp_editor.exe" : L"northstarcpp_player.exe");
+        (editor ? L"northstarcpp_editor_qt.exe" : L"northstarcpp_player.exe");
     if (!fs::is_regular_file(exe))
         exe=ns::executable_directory().parent_path()/
-            (editor ? L"northstarcpp_editor.exe" : L"northstarcpp_player.exe");
+            (editor ? L"northstarcpp_editor_qt.exe" : L"northstarcpp_player.exe");
     if (!fs::is_regular_file(exe))
         throw std::runtime_error("Build the NorthStarCpp editor/player first");
     auto command = quoted(exe) + L" --scene " + quoted(p.startup_scene);

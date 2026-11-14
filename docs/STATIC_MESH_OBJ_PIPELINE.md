@@ -11,10 +11,10 @@ be depicted as a procedural cube.
 
 | Layer | Implementation |
 | --- | --- |
-| Public geometry SDK | `include/northstarcpp/mesh_asset.hpp` |
+| Public geometry SDK | `sdk/include/northstarcpp/mesh_asset.hpp` |
 | Source OBJ parser | `modules/host/mesh_asset.cpp` |
 | AssetManager / virtual-file adapter | `modules/host/mesh_asset_assets.cpp` |
-| Optional render API | `include/northstarcpp/render_triangles_api.h`, ABI 1 |
+| Optional render API | `sdk/include/northstarcpp/render_triangles_api.h`, ABI 1 |
 | D3D11 GPU implementation | `modules/render/d3d11/d3d11.cpp` |
 | Scene object integration | `modules/viewport/viewport.cpp` |
 | Project source/archive mounting | `modules/editor/window.cpp` |

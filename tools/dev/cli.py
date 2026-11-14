@@ -18,7 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "northstarcpp.json"
 LOGS = ROOT / ".northstarcpp" / "logs"
-WINDOWS_APP_TARGETS = {"editor": "northstarcpp_editor", "player": "northstarcpp_player"}
+WINDOWS_APP_TARGETS = {"editor": "northstarcpp_editor_qt", "player": "northstarcpp_player"}
 PORTED_TARGETS = ("northstarcpp_portability_smoke",)
 if os.name == "nt":
     PORTED_TARGETS += ("shader_generator", "northstarcpp_math", "northstarcpp_runtime", *WINDOWS_APP_TARGETS.values())

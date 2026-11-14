@@ -7,11 +7,19 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+include(tools/cmake/NorthStarPaths.cmake)
 include(CTest)
 include(tools/cmake/NorthStarModules.cmake)
+# Owned public ABI headers are a first-class engine module.
+# The sdk/include directory is created only when installing a package.
+add_library(northstarcpp_api INTERFACE)
+target_include_directories(northstarcpp_api INTERFACE
+    "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
+    "$<INSTALL_INTERFACE:sdk/include>")
+install(TARGETS northstarcpp_api EXPORT NorthStarCppTargets COMPONENT SDK)
 # Compiles an unmodified original engine header; not the entire engine.
 add_executable(northstarcpp_portability_smoke tests/northstarcpp_portability_smoke.cpp)
-target_include_directories(northstarcpp_portability_smoke PRIVATE engine/northstarcpp/modules/foundation include)
+target_include_directories(northstarcpp_portability_smoke PRIVATE engine/northstarcpp/modules/core "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
 if(BUILD_TESTING)
     add_test(NAME northstarcpp_legacy_random32 COMMAND northstarcpp_portability_smoke)
     add_test(NAME northstarcpp_engine_layout
@@ -19,6 +27,16 @@ if(BUILD_TESTING)
         -P "${PROJECT_SOURCE_DIR}/tests/engine_layout_smoke.cmake")
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME northstarcpp_architecture_layout
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/verify_architecture.py" --json)
+        set_tests_properties(northstarcpp_architecture_layout PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 30)
+        add_test(NAME northstarcpp_foundation_inventory
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/verify_foundation_runtime.py" --json)
+        set_tests_properties(northstarcpp_foundation_inventory PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 30)
         add_test(NAME northstarcpp_game_distribution
             COMMAND "${Python3_EXECUTABLE}" -m unittest tests.test_game_dist -v)
         set_tests_properties(northstarcpp_game_distribution PROPERTIES
@@ -59,7 +77,7 @@ if(WIN32)
     if(NOT ZLIB_LIBRARY_RELEASE OR ZLIB_LIBRARY_RELEASE MATCHES "[.]dll[.]a$")
         message(FATAL_ERROR "Install the static MinGW-w64 zlib library")
     endif()
-    set(blake3_dir "${PROJECT_SOURCE_DIR}/external/sdk/sources/blake3-1.8.7")
+    set(blake3_dir "${NORTHSTARCPP_VENDOR_SOURCE_DIR}/blake3-1.8.7")
     add_library(northstarcpp_blake3 STATIC
         "${blake3_dir}/blake3.c" "${blake3_dir}/blake3_dispatch.c" "${blake3_dir}/blake3_portable.c")
     target_include_directories(northstarcpp_blake3 PUBLIC "$<BUILD_INTERFACE:${blake3_dir}>")
@@ -68,12 +86,12 @@ if(WIN32)
     northstarcpp_unprefix_module_output(northstarcpp_blake3)
     # Build Windows icon resources into native applications.
     enable_language(RC)
-    set(northstarcpp_math_dir engine/northstarcpp/modules/foundation/northstarcpp/compat/core/sources)
+    set(northstarcpp_math_dir engine/northstarcpp/modules/core)
     add_library(northstarcpp_math STATIC
-        "${northstarcpp_math_dir}/geometry_primitives.cpp"
-        "engine/northstarcpp/modules/foundation/math_types.cpp"
-        "engine/northstarcpp/modules/foundation/geometry.cpp"
-        "engine/northstarcpp/modules/foundation/collision_queries.cpp"
+        "engine/northstarcpp/modules/geometry/geometry_primitives.cpp"
+        "engine/northstarcpp/modules/core/math_types.cpp"
+        "engine/northstarcpp/modules/core/geometry.cpp"
+        "engine/northstarcpp/modules/core/collision_queries.cpp"
         "${northstarcpp_math_dir}/math_aabb.cpp"
         "${northstarcpp_math_dir}/math_aabb_plane.cpp"
         "${northstarcpp_math_dir}/math_constants.cpp"
@@ -87,18 +105,47 @@ if(WIN32)
         "${northstarcpp_math_dir}/math_sphere.cpp"
     )
     northstarcpp_unprefix_module_output(northstarcpp_math)
-    set(northstarcpp_foundation "${PROJECT_SOURCE_DIR}/engine/northstarcpp/modules/foundation")
+    target_link_libraries(northstarcpp_math PUBLIC northstarcpp_api)
+    set(northstarcpp_engine_sources "${PROJECT_SOURCE_DIR}/engine/northstarcpp/modules/core")
     target_include_directories(northstarcpp_math
-        PRIVATE "${northstarcpp_foundation}"
-        PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        PRIVATE "${northstarcpp_engine_sources}" "${NORTHSTARCPP_ENGINE_MODULES_DIR}/core"
+        PUBLIC "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
                "$<INSTALL_INTERFACE:sdk/include>")
     target_compile_features(northstarcpp_math PUBLIC cxx_std_17)
     target_compile_definitions(northstarcpp_math PRIVATE NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
+
+    # Native original foundation sources, compiled in-tree with GCC.
+    # This is not a wrapper/bridge: the actual 2008-2010 implementations
+    # provide their existing northstarcpp:: functions and classes.
+    add_library(northstarcpp_core STATIC
+        "engine/northstarcpp/modules/geometry/geometry_utils.cpp"
+        "${northstarcpp_math_dir}/strings_functions.cpp"
+        "${northstarcpp_math_dir}/buffer_string.cpp"
+        "${northstarcpp_math_dir}/fs_path.cpp"
+        "${northstarcpp_math_dir}/fs_path_win.cpp"
+        "engine/northstarcpp/modules/time/timing_functions_win.cpp")
+    northstarcpp_unprefix_module_output(northstarcpp_core)
+    target_include_directories(northstarcpp_core
+        PRIVATE "${northstarcpp_engine_sources}" "${NORTHSTARCPP_ENGINE_MODULES_DIR}/core"
+        PUBLIC "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
+               "$<INSTALL_INTERFACE:sdk/include>")
+    target_compile_features(northstarcpp_core PUBLIC cxx_std_17)
+    target_compile_definitions(northstarcpp_core PRIVATE
+        NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
+    # Keep the native foundation string API warning-free on GCC.
+    # Prefer correcting character terminators over suppressing diagnostics.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(northstarcpp_core PRIVATE
+            -Werror=conversion-null)
+    endif()
+    target_link_libraries(northstarcpp_core PUBLIC northstarcpp_math)
     if(BUILD_TESTING)
         add_executable(northstarcpp_math_smoke tests/math_smoke.cpp)
-        target_link_libraries(northstarcpp_math_smoke PRIVATE northstarcpp_math)
-        target_include_directories(northstarcpp_math_smoke PRIVATE "${northstarcpp_foundation}")
-        target_compile_definitions(northstarcpp_math_smoke PRIVATE NORTHSTARCPP_STATIC_LIBRARIES)
+        target_link_libraries(northstarcpp_math_smoke PRIVATE
+            northstarcpp_math northstarcpp_core)
+        target_include_directories(northstarcpp_math_smoke PRIVATE "${northstarcpp_engine_sources}")
+        target_compile_definitions(northstarcpp_math_smoke PRIVATE
+            NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
         add_test(NAME northstarcpp_math COMMAND northstarcpp_math_smoke)
     endif()
 
@@ -106,29 +153,29 @@ if(WIN32)
     set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
     set(FLECS_TESTS OFF CACHE BOOL "" FORCE)
     set(FLECS_PIC OFF CACHE BOOL "" FORCE)
-    add_subdirectory(external/flecs EXCLUDE_FROM_ALL)
+    add_subdirectory(sdk/vendor/flecs EXCLUDE_FROM_ALL)
     add_subdirectory(engine/northstarcpp)
     northstarcpp_finalize_modules()
 
-    set(shader_generator_dir engine/northstarcpp/modules/foundation/northstarcpp/compat/shader_generator/sources)
+    set(shader_generator_dir engine/northstarcpp/modules/core/northstarcpp/shader_generator/sources)
     add_executable(shader_generator
         "${shader_generator_dir}/shader_generator_entry_point.cpp"
         "${shader_generator_dir}/shader_compiler.cpp"
     )
 
     # Embed the dedicated Shader Generator icon and Windows VERSIONINFO in the EXE.
-    set(NORTHSTARCPP_SHADER_ICON_FILE "${PROJECT_SOURCE_DIR}/icons/shader_generator.ico")
+    set(NORTHSTARCPP_SHADER_ICON_FILE "${NORTHSTARCPP_ENGINE_ICONS_DIR}/shader_generator.ico")
     if(NOT EXISTS "${NORTHSTARCPP_SHADER_ICON_FILE}")
         message(FATAL_ERROR "Required Shader Generator icon missing: ${NORTHSTARCPP_SHADER_ICON_FILE}")
     endif()
     file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/generated")
     configure_file(
-        "${PROJECT_SOURCE_DIR}/engine/northstarcpp/resources/shader_generator.rc.in"
+        "${NORTHSTARCPP_ENGINE_RESOURCES_DIR}/shader_generator.rc.in"
         "${PROJECT_BINARY_DIR}/generated/shader_generator.rc" @ONLY)
     target_sources(shader_generator PRIVATE "${PROJECT_BINARY_DIR}/generated/shader_generator.rc")
     target_include_directories(shader_generator PRIVATE
-        "${PROJECT_SOURCE_DIR}/engine/northstarcpp/resources")
-    target_include_directories(shader_generator SYSTEM PRIVATE external/sdk/include)
+        "${NORTHSTARCPP_ENGINE_RESOURCES_DIR}")
+    target_include_directories(shader_generator SYSTEM PRIVATE ${NORTHSTARCPP_VENDOR_INCLUDE_DIR})
     target_link_libraries(shader_generator PRIVATE d3dcompiler_47 d3dx9_43 dxguid winmm)
     target_link_options(shader_generator PRIVATE -static)
 
@@ -147,7 +194,7 @@ if(WIN32)
         add_executable(northstarcpp_shader_generator_resources_smoke
             tests/shader_generator_resources_smoke.cpp)
         target_include_directories(northstarcpp_shader_generator_resources_smoke PRIVATE
-            "${PROJECT_SOURCE_DIR}/engine/northstarcpp/resources")
+            "${NORTHSTARCPP_ENGINE_RESOURCES_DIR}")
         target_link_libraries(northstarcpp_shader_generator_resources_smoke PRIVATE version)
         target_link_options(northstarcpp_shader_generator_resources_smoke PRIVATE -static)
         add_test(NAME northstarcpp_shader_generator_resources
@@ -171,20 +218,36 @@ if(WIN32)
         DESTINATION sdk/lib/cmake/NorthStarCpp COMPONENT SDK)
 
     # Installable build artifacts have explicit roles; packaging never searches for random DLLs.
-    install(TARGETS northstarcpp_math northstarcpp_blake3 EXPORT NorthStarCppTargets
+    install(TARGETS northstarcpp_math northstarcpp_core
+            northstarcpp_models northstarcpp_animation
+            northstarcpp_blake3 EXPORT NorthStarCppTargets
         ARCHIVE DESTINATION sdk/lib COMPONENT SDK)
     install(FILES "${ZLIB_LIBRARY_RELEASE}" DESTINATION sdk/lib RENAME libz.a COMPONENT SDK)
     install(FILES "${blake3_dir}/LICENSE_CC0" DESTINATION licenses RENAME blake3.txt COMPONENT Licenses)
-    install(FILES "${PROJECT_SOURCE_DIR}/external/sdk/sources/zlib-license.txt"
+    install(FILES "${NORTHSTARCPP_VENDOR_SOURCE_DIR}/zlib-license.txt"
         DESTINATION licenses RENAME zlib.txt COMPONENT Licenses)
+    install(FILES "${NORTHSTARCPP_VENDOR_ROOT}/bcdec/LICENSE"
+        DESTINATION licenses RENAME bcdec.txt COMPONENT Licenses)
     install(TARGETS shader_generator RUNTIME DESTINATION tools COMPONENT Tools)
-    install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/northstarcpp"
+    install(DIRECTORY "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}/northstarcpp"
         DESTINATION sdk/include COMPONENT SDK
         FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
-    # Remove the obsolete private header tree when upgrading an existing SDK.
-    install(CODE [[
-        file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/sdk/include/northstarcpp/compat")
-    ]] COMPONENT SDK)
+    # Foundation code is first-party engine source and has a stable SDK location.
+    # Install original headers for existing NorthStarCpp modules.
+    install(DIRECTORY
+        "${NORTHSTARCPP_ENGINE_MODULES_DIR}/core/northstarcpp/"
+        DESTINATION sdk/include/northstarcpp COMPONENT SDK
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+                       PATTERN "*.inl" PATTERN "*.inc")
+    # Preserve implementation sources for SDK consumers and in-tree builds.
+    # Compiled runtime objects are linked directly from the originals.
+    install(DIRECTORY
+        "${NORTHSTARCPP_ENGINE_MODULES_DIR}/core/northstarcpp/"
+        DESTINATION sdk/src/northstarcpp COMPONENT SDK
+        FILES_MATCHING PATTERN "*.cpp" PATTERN "*.c"
+                       PATTERN "*.cc" PATTERN "*.cxx"
+                       PATTERN "*.h" PATTERN "*.hpp"
+                       PATTERN "*.inl" PATTERN "*.inc")
 
     # Runtime defaults: editable bootstrap.json beside all installed EXEs.
     # The config is optional at runtime; if deleted the native safe defaults
@@ -210,6 +273,7 @@ if(WIN32)
                   "${PROJECT_SOURCE_DIR}/docs/BRANDING.md"
                   "${PROJECT_SOURCE_DIR}/docs/SCENE_V3_STREAMING.md"
                   "${PROJECT_SOURCE_DIR}/docs/ENGINE_LAYOUT.md"
+                  "${PROJECT_SOURCE_DIR}/docs/ARCHITECTURE.md"
                   "${PROJECT_SOURCE_DIR}/docs/GAME_DISTRIBUTION.md"
                   "${PROJECT_SOURCE_DIR}/docs/CRASH_REPORTING.md"
                   "${PROJECT_SOURCE_DIR}/docs/CAMERA_SYSTEM.md"
@@ -233,11 +297,11 @@ if(WIN32)
                   "${PROJECT_SOURCE_DIR}/docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md"
                   "${PROJECT_SOURCE_DIR}/config/bootstrap.example.json"
         DESTINATION documentation COMPONENT Documentation)
-    install(FILES "${PROJECT_SOURCE_DIR}/external/flecs/LICENSE"
+    install(FILES "${NORTHSTARCPP_VENDOR_ROOT}/flecs/LICENSE"
         DESTINATION licenses RENAME flecs.txt COMPONENT Licenses)
-    install(FILES "${PROJECT_SOURCE_DIR}/external/sdk/sources/bullet-3.25/LICENSE.txt"
+    install(FILES "${NORTHSTARCPP_VENDOR_SOURCE_DIR}/bullet-3.25/LICENSE.txt"
         DESTINATION licenses RENAME bullet.txt COMPONENT Licenses)
-    install(FILES "${PROJECT_SOURCE_DIR}/external/sdk/sources/JoltPhysics/LICENSE"
+    install(FILES "${NORTHSTARCPP_VENDOR_SOURCE_DIR}/JoltPhysics/LICENSE"
         DESTINATION licenses RENAME jolt.txt COMPONENT Licenses)
 endif()
 
@@ -246,10 +310,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(northstarcpp_perlin_runtime STATIC
         "${_engine}/host/module_loader.cpp" "${_engine}/host/perlin.cpp")
     target_include_directories(northstarcpp_perlin_runtime
-        PUBLIC "${PROJECT_SOURCE_DIR}/include"
+        PUBLIC "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}"
         PRIVATE "${_engine}/host" "${_engine}/shared")
     target_include_directories(northstarcpp_perlin_runtime SYSTEM PRIVATE
-        "${PROJECT_SOURCE_DIR}/external/sdk/include")
+        "${NORTHSTARCPP_VENDOR_INCLUDE_DIR}")
     target_link_libraries(northstarcpp_perlin_runtime PRIVATE ${CMAKE_DL_LIBS})
     northstarcpp_builtin_module(northstarcpp_perlin_runtime perlin improved
         "${_engine}/perlin/improved/improved.cpp")

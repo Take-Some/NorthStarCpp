@@ -1,6 +1,9 @@
-[submodule "external/flecs"]
-	path = external/flecs
+[submodule "sdk/vendor/flecs"]
+	path = sdk/vendor/flecs
 	url = https://github.com/SanderMertens/flecs.git
-[submodule "external/sdk/sources/JoltPhysics"]
-	path = external/sdk/sources/JoltPhysics
+[submodule "sdk/vendor/sources/JoltPhysics"]
+	path = sdk/vendor/sources/JoltPhysics
 	url = https://github.com/jrouwe/JoltPhysics.git
+[submodule "sdk/vendor/sources/libvorbis"]
+	path = sdk/vendor/sources/libvorbis
+	url = https://github.com/xiph/vorbis.git

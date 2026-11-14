@@ -9,7 +9,7 @@ NorthStarCpp supports **Bullet Physics 3.25** and **Jolt Physics 5.6.0**. Both i
 | Bullet | `physics_bullet.dll` | Default provider during automatic discovery |
 | Jolt | `physics_jolt.dll` | Alternative provider |
 
-Both modules are installed as separate DLLs. The Jolt 5.6.0 sources are pinned to tag `v5.6.0` under `external/sdk/sources/JoltPhysics/`. Its MIT license is preserved in the SDK.
+Both modules are installed as separate DLLs. The Jolt 5.6.0 sources are pinned to tag `v5.6.0` under `sdk/vendor/sources/JoltPhysics/`. Its MIT license is preserved in the SDK.
 
 ## Selecting a provider in the native Project Manager
 

@@ -17,7 +17,7 @@ This is an initial Unreal-style editor asset workspace, **not feature parity wit
 
 ## Asset backend
 
-`include/northstarcpp/editor_asset_catalog.hpp` and `engine/northstarcpp/modules/editor/asset_catalog.cpp` provide an independent C++17 asset index. Folder symlinks are never traversed, project-relative path traversal is rejected, and scan count is bounded to 100,000 records. The widget explicitly reports truncated indexes.
+`sdk/include/northstarcpp/editor_asset_catalog.hpp` and `engine/northstarcpp/modules/editor/asset_catalog.cpp` provide an independent C++17 asset index. Folder symlinks are never traversed, project-relative path traversal is rejected, and scan count is bounded to 100,000 records. The widget explicitly reports truncated indexes.
 
 Thumbnails are generated off the GUI thread through QtConcurrent with a bounded pool. The widget limits source preview files to 128 MiB and caches no more than approximately 480 previews in memory. The existing `editor_tools` YTD/YDD/YMAT decoders are retained; Windows system icons are not used.
 

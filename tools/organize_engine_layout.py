@@ -82,7 +82,7 @@ def verify() -> int:
         # Compatibility sources were migrated a second time to the engine foundation.
         # Keep the original checksum and validate them at their final location.
         if move["to"] == "external/northstarcpp/compat":
-            target = ROOT / "engine/northstarcpp/modules/foundation/northstarcpp/compat"
+            target = ROOT / "engine/northstarcpp/modules/core/northstarcpp"
         if source.exists() or not target.exists():
             failed.append(move["to"])
             continue

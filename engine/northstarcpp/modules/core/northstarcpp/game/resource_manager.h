@@ -1,0 +1,32 @@
+////////////////////////////////////////////////////////////////////////////
+//	Created		: 11.03.2009
+//	Author		: Armen Abroyan
+// NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
+////////////////////////////////////////////////////////////////////////////
+
+#ifndef NORTHSTARCPP_GAME_RESOURCE_MANAGER_H_INCLUDED
+#define NORTHSTARCPP_GAME_RESOURCE_MANAGER_H_INCLUDED
+
+//#include <northstarcpp/game/resources.h>
+//#include <northstarcpp/resources.h>
+//
+//namespace northstarcpp {
+//namespace game {
+//
+//typedef fastdelegate::FastDelegate< void ( resources::unmanaged_resource_ptr data ) >	query_resource_callback;
+//
+//class resource_manager {
+//public:
+//
+//	virtual void		tick					() = 0;
+//	virtual void		query					(pcstr id, resource_id type, query_resource_callback callback) = 0;
+//
+//private:	
+//	virtual void		on_resource_loaded		(resources::queries_result& data) = 0;
+//
+//}; // class resource_manager
+//
+//} // namespace game
+//} // namespace northstarcpp
+
+#endif // #ifndef NORTHSTARCPP_GAME_RESOURCE_MANAGER_H_INCLUDED

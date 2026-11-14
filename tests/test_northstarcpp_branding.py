@@ -18,9 +18,9 @@ PUBLIC = (
     "tools/dev/launcher.py",
     "config/northstarcpp.json",
     "tests/northstarcpp_portability_smoke.cpp",
-    "engine/northstarcpp/modules/foundation/northstarcpp/compat/macro_extensions.h",
-    "engine/northstarcpp/modules/foundation/northstarcpp/compat/editor/world/sources/about_dialog.cpp",
-    "engine/northstarcpp/modules/foundation/northstarcpp/compat/editor/world/sources/about_dialog.h",
+    "engine/northstarcpp/modules/core/northstarcpp/macro_extensions.h",
+    "engine/northstarcpp/modules/core/northstarcpp/editor/world/sources/about_dialog.cpp",
+    "engine/northstarcpp/modules/core/northstarcpp/editor/world/sources/about_dialog.h",
 )
 FORBIDDEN = re.compile(r"x[-_]?ray(?:[\\s_-]?2)?", re.IGNORECASE)
 
@@ -50,7 +50,7 @@ class BrandingTests(unittest.TestCase):
             "engine/northstarcpp/modules/host/audio.cpp",
             "engine/northstarcpp/modules/host/ecs_world.cpp",
             "engine/northstarcpp/modules/physics/bullet/bullet.cpp",
-            "include/northstarcpp/ecs_api.h",
+            "engine/northstarcpp/modules/api/include/northstarcpp/ecs_api.h",
             "tools/dev/launcher.py",
         ):
             with self.subTest(file=name):
@@ -61,9 +61,9 @@ class BrandingTests(unittest.TestCase):
     def test_current_company_metadata(self):
         expected = r"2026 Kayla's Systems \u2014 Kayla Verner"
         sources = (
-            "engine/northstarcpp/modules/foundation/northstarcpp/compat/macro_extensions.h",
-            "engine/northstarcpp/modules/foundation/northstarcpp/compat/editor/controls/sources/AssemblyInfo.cpp",
-            "engine/northstarcpp/modules/foundation/northstarcpp/compat/maya/sources/maya_entry_point.cpp",
+            "engine/northstarcpp/modules/core/northstarcpp/macro_extensions.h",
+            "engine/northstarcpp/modules/core/northstarcpp/editor/controls/sources/AssemblyInfo.cpp",
+            "engine/northstarcpp/modules/core/northstarcpp/maya/sources/maya_entry_point.cpp",
         )
         for name in sources:
             with self.subTest(file=name):
@@ -71,7 +71,7 @@ class BrandingTests(unittest.TestCase):
                 self.assertIn(expected, source)
 
     def test_original_copyright_is_preserved(self):
-        about = (ROOT / "engine/northstarcpp/modules/foundation/northstarcpp/compat/editor/world/sources/about_dialog.cpp").read_text(
+        about = (ROOT / "engine/northstarcpp/modules/core/northstarcpp/editor/world/sources/about_dialog.cpp").read_text(
             encoding="utf-8", errors="replace")
         self.assertIn("Kayla's Systems", about)
         self.assertIn("NorthStarCpp Editor", about)

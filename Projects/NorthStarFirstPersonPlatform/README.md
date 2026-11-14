@@ -29,7 +29,7 @@ Physics interactions use the versioned provider-neutral PhysicsScene API (Bullet
 Build the current NorthStarCpp player and its plugins, then from the repository root:
 
 ~~~powershell
-.\out\gcc-shared-assets-release\northstarcpp_player.exe --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
+.\out\qa-fps-dist-20261114\NorthStarCpp-0.4.0-windows-x64-Release-QA\bin\northstarcpp_player.exe --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
 ~~~
 
 Or run Projects\NorthStarFirstPersonPlatform\run.cmd.
@@ -37,8 +37,8 @@ Or run Projects\NorthStarFirstPersonPlatform\run.cmd.
 ## Test
 
 ~~~powershell
-.\out\gcc-shared-assets-release\northstarcpp_player.exe --warp --check-scene --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
-ctest --test-dir out\gcc-shared-assets-release -R "northstarcpp_exploration|northstarcpp_.*physics" --output-on-failure
+.\out\qa-fps-dist-20261114\NorthStarCpp-0.4.0-windows-x64-Release-QA\bin\northstarcpp_player.exe --warp --check-scene --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
+ctest --test-dir out\fps-release-qa-20261114 -R "northstarcpp_exploration|northstarcpp_.*physics" --output-on-failure
 ~~~
 
 ## Packaging
@@ -57,5 +57,19 @@ pause and exit are authored in `scripts/main.js`, not in the NorthStarCpp
 FPS arena implementation. The engine only exposes input, camera, physics,
 ECS and asset APIs. Gameplay changes do not require a C++ rebuild.
 
-A compatible native V8 provider is required; the current source tree's
-V8 SDK configuration must be completed before full standalone verification.
+The verified QA package includes the tested V8 sidecar development provider.
+A public release requires the independently approved native V8 build and
+clean Windows machine validation.
+
+
+## Verified QA launcher (2026-11-14)
+
+Run run.cmd for the playable first-person example and verify.cmd
+for a headless scene-check plus real runtime initialization. Both scripts
+select the verified QA Player in
+out/qa-fps-dist-20261114/NorthStarCpp-0.4.0-windows-x64-Release-QA/bin.
+They fail explicitly rather than silently using an unverified build.
+
+The QA package includes a tested V8 sidecar development provider; public
+release still requires signed V8 security approval, independent clean Windows
+acceptance and intellectual-property/licensing review.
