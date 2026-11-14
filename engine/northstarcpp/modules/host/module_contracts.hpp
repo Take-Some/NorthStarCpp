@@ -12,6 +12,7 @@
 #include <northstarcpp/physics_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_surfaces_api.h>
+#include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
 
@@ -47,6 +48,11 @@ inline bool valid_api(NorthStarRenderApi const& api)
 inline bool valid_api(NorthStarRenderTrianglesApi const& api)
 {
     return api.abi_version == NORTHSTARCPP_RENDER_TRIANGLES_ABI && api.set_triangles;
+}
+
+inline bool valid_api(NorthStarRenderCharacterApi const& api)
+{
+    return api.abi_version == NORTHSTARCPP_RENDER_CHARACTER_ABI && api.set_model && api.set_pose;
 }
 
 inline bool valid_api(NorthStarRenderSurfacesApi const& api)

@@ -20,6 +20,7 @@ class SceneWorld;
 class FpsArena;
 struct CameraPose;
 namespace shared_assets { struct DrawableResources; }
+class AssetStore;
 
 // Authoring-only overlay; not part of the engine renderer ABI.
 struct ViewportGizmo {
@@ -35,6 +36,9 @@ public:
     ~Viewport();
 
     // Resolves authored YDD/ymat/YTD data through AssetManager on the host side.
+    void load_character(AssetStore const& assets, std::string const& root_prefix);
+    void pose_character(Vector3 foot, float heading, float dt, bool moving, bool airborne);
+    void hide_character();
     void set_sky(shared_assets::DrawableResources const& resources);
     // Mount source or archived project assets for authored OBJ scene meshes.
     // Geometry is loaded through AssetStore, never by render-provider filesystem I/O.

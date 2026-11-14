@@ -196,7 +196,8 @@ target_compile_features(northstarcpp_models PUBLIC cxx_std_17)
 
 add_library(northstarcpp_animation STATIC
     modules/animation/animation.cpp
-    modules/animation/camera_track.cpp)
+    modules/animation/camera_track.cpp
+    modules/animation/skeletal_animation.cpp)
 northstarcpp_unprefix_module_output(northstarcpp_animation)
 target_include_directories(northstarcpp_animation PUBLIC
     "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
@@ -205,6 +206,31 @@ target_include_directories(northstarcpp_animation PRIVATE "${northstarcpp_engine
 target_include_directories(northstarcpp_animation SYSTEM PRIVATE
     "${NORTHSTARCPP_VENDOR_INCLUDE_DIR}")
 target_compile_features(northstarcpp_animation PUBLIC cxx_std_17)
+if(BUILD_TESTING)
+    add_executable(northstarcpp_skeletal_animation_smoke
+        "${PROJECT_SOURCE_DIR}/tests/skeletal_animation_smoke.cpp")
+    target_link_libraries(northstarcpp_skeletal_animation_smoke PRIVATE
+        northstarcpp_animation northstarcpp_math)
+    target_link_options(northstarcpp_skeletal_animation_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_skeletal_animation
+        COMMAND "$<TARGET_FILE:northstarcpp_skeletal_animation_smoke>")
+    set_tests_properties(northstarcpp_skeletal_animation PROPERTIES TIMEOUT 20)
+    add_executable(northstarcpp_skeletal_asset_interop_smoke
+        "${PROJECT_SOURCE_DIR}/tests/skeletal_asset_interop_smoke.cpp")
+    target_link_libraries(northstarcpp_skeletal_asset_interop_smoke PRIVATE
+        northstarcpp_runtime)
+    target_link_options(northstarcpp_skeletal_asset_interop_smoke PRIVATE -static)
+    add_dependencies(northstarcpp_skeletal_asset_interop_smoke
+        northstarcpp_assets_directory)
+    add_test(NAME northstarcpp_skeletal_asset_interop
+        COMMAND "${CMAKE_COMMAND}" -E env
+        "NORTHSTARCPP_ASSETS_PLUGIN=$<TARGET_FILE:northstarcpp_assets_directory>"
+        "$<TARGET_FILE:northstarcpp_skeletal_asset_interop_smoke>"
+        "${PROJECT_SOURCE_DIR}/sharedAssets")
+    set_tests_properties(northstarcpp_skeletal_asset_interop PROPERTIES TIMEOUT 45)
+
+endif()
+
 if(BUILD_TESTING)
     add_executable(northstarcpp_foundation_services_smoke
         "${PROJECT_SOURCE_DIR}/tests/foundation_engine_services_smoke.cpp")
@@ -219,6 +245,8 @@ endif()
 add_library(northstarcpp_runtime STATIC modules/host/scene.cpp modules/host/scene_v3.cpp modules/host/scene_binary.cpp modules/host/scene_nef8.cpp modules/host/scene_nef8_chunked.cpp modules/host/scene_component_registry.cpp modules/host/scene_world.cpp modules/host/physics.cpp modules/host/ecs_world.cpp modules/host/audio.cpp modules/host/logger.cpp modules/host/perlin.cpp modules/host/scripting.cpp modules/host/input.cpp modules/host/assets.cpp modules/host/fps_assets.cpp modules/host/fps_game.cpp modules/host/camera.cpp modules/host/camera_track_assets.cpp modules/host/scene_animation_assets.cpp modules/host/mesh_asset_assets.cpp modules/host/module_loader.cpp)
 target_sources(northstarcpp_runtime PRIVATE
     modules/host/asset_list_file.cpp
+    modules/models/character.cpp
+    modules/animation/skeleton.cpp
     modules/host/save_game.cpp
     modules/host/asset_streaming.cpp
     modules/host/scene_chunk_streaming.cpp

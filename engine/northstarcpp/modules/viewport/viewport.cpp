@@ -13,6 +13,8 @@
 #include <northstarcpp/render_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_surfaces_api.h>
+#include <northstarcpp/render_character_api.h>
+#include <northstarcpp/character.hpp>
 #include <northstarcpp/mesh_asset.hpp>
 #include <northstarcpp/geometry_scene.hpp>
 #include <northstarcpp/geometry_service.hpp>
@@ -29,6 +31,38 @@
 #include <filesystem>
 
 namespace northstarcpp {
+
+namespace {
+struct Character {
+    Character(AssetStore const& assets, std::string const& prefix)
+        : skeleton(load_skeleton(assets,prefix+"models/abby/abby.ymt")),
+          model(load_character_model(assets,prefix+"models/abby/abby.ydd",skeleton)),
+          pose(skeleton)
+    {
+        constexpr char idle[] = "abby-mm-explore-idle";
+        constexpr char walk[] = "abby-mm-explore-walk-loop-fw";
+        auto locomotion = load_skeletal_clips(assets,prefix+"animations/abby/mm-explore.ycd",
+            {idle,walk},skeleton);
+        for (auto& clip : locomotion) clips[clip.name == idle ? 0 : 1] = std::move(clip);
+        clips[2] = std::move(load_skeletal_clips(assets,prefix+"animations/abby/traversal.ycd",
+            {"abby-ground-jump-run"},skeleton).front());
+        clips[3] = std::move(load_skeletal_clips(assets,prefix+"animations/abby/fall-medium.ycd",
+            {"abby-fall-medium"},skeleton).front());
+        for (auto const& part : model.parts)
+            vertex_count += part.mesh.vertices.size();
+        vertices.resize(vertex_count);
+    }
+
+    Skeleton skeleton;
+    CharacterModel model;
+    SkeletonPose pose;
+    std::array<SkeletalClip,4> clips;
+    std::size_t vertex_count = 0;
+    std::vector<NorthStarCharacterVertex> vertices;
+    unsigned state = 0;
+    float seconds = 0;
+};
+}
 
 struct Viewport::State {
     State(HWND window, bool software)
@@ -104,6 +138,8 @@ struct Viewport::State {
     std::vector<std::uint32_t> surface_ids;
     NorthStarRenderSurfacesApi const* surface_api = nullptr;
     bool world_surfaces_ready = false;
+    NorthStarRenderCharacterApi const* character_api = nullptr;
+    std::unique_ptr<Character> character;
     std::unique_ptr<AssetStore> project_assets;
     std::filesystem::path source_project_root;
     std::unordered_map<std::string,MeshAsset> cached_meshes;
@@ -116,6 +152,96 @@ struct Viewport::State {
 
 Viewport::Viewport(HWND window, bool software) : state(std::make_unique<State>(window, software)) {}
 Viewport::~Viewport() = default;
+
+void Viewport::load_character(AssetStore const& assets, std::string const& prefix)
+{
+    auto& s = *state;
+    s.character_api = s.module->query_extension<NorthStarRenderCharacterApi>(
+        NORTHSTARCPP_RENDER_CHARACTER_MODULE_ABI);
+    if (!s.character_api && s.module->provider() == "d3d12") {
+        s.fallback_to_d3d11();
+        s.character_api = s.module->query_extension<NorthStarRenderCharacterApi>(
+            NORTHSTARCPP_RENDER_CHARACTER_MODULE_ABI);
+    }
+    if (!s.character_api)
+        throw std::runtime_error("Selected engine.render provider lacks the character ABI");
+    auto actor = std::make_unique<Character>(assets, prefix);
+    auto appearance = load_character_appearance(assets,actor->model,
+        prefix+"materials/character_abby.ymat",prefix+"textures/abby.ytd");
+    std::vector<std::vector<NorthStarSurfaceMip>> mips(appearance.size());
+    std::vector<std::vector<NorthStarCharacterVertex>> initial(appearance.size());
+    std::vector<NorthStarCharacterPart> parts;
+    for (std::size_t i = 0; i < appearance.size(); ++i) {
+        auto const& mesh = actor->model.parts[i].mesh;
+        auto const& image = appearance[i].texture;
+        for (auto const& mip : image.mips)
+            mips[i].push_back({mip.width,mip.height,static_cast<std::uint32_t>(mip.offset),
+                static_cast<std::uint32_t>(mip.size)});
+        for (auto const& v : mesh.vertices)
+            initial[i].push_back({{v.position[0],v.position[1],v.position[2]},
+                {v.normal[0],v.normal[1],v.normal[2]},{v.uv[0],v.uv[1]}});
+        parts.push_back({initial[i].data(),static_cast<std::uint32_t>(mesh.vertices.size()),
+            mesh.indices.data(),static_cast<std::uint32_t>(mesh.indices.size()),
+            {0,image.format_id,image.srgb ? 1u : 0u,static_cast<std::uint32_t>(mips[i].size()),
+            mips[i].data(),image.data.data(),static_cast<std::uint32_t>(image.data.size())},
+            appearance[i].cutoff});
+    }
+    if (!s.character_api->set_model(s.renderer,parts.data(),static_cast<std::uint32_t>(parts.size())))
+        throw s.module->error("Cannot upload textured character");
+    s.character = std::move(actor);
+}
+
+void Viewport::pose_character(Vector3 foot, float heading, float dt, bool moving, bool airborne)
+{
+    auto& s = *state;
+    if (!s.character) return;
+    auto& actor = *s.character;
+    auto next = airborne ? (actor.state == 3 ? 3u : 2u) : moving ? 1u : 0u;
+    if (next == 2 && actor.state == 2 &&
+        actor.seconds >= (actor.clips[2].frames - 1) / actor.clips[2].sample_rate)
+        next = 3;
+    if (next != actor.state) {
+        actor.state = next;
+        actor.seconds = 0.f;
+    }
+    actor.seconds += std::clamp(dt,0.f,0.1f);
+    actor.pose.sample(actor.skeleton, actor.clips[next], actor.seconds, true);
+    using namespace math;
+    auto const to_skeleton = actor.model.mesh_to_skeleton;
+    auto const to_world = invert4x3(to_skeleton) * create_rotation_y(heading + 3.14159265359f) *
+        create_translation({foot.x,foot.y,foot.z});
+    std::vector<float4x4> matrices;
+    matrices.reserve(actor.pose.palette().size());
+    for (auto const& joint : actor.pose.palette())
+        matrices.push_back(to_skeleton * joint * to_world);
+    std::size_t dest = 0;
+    for (auto const& part : actor.model.parts) {
+        for (std::size_t i = 0; i < part.skin.size(); ++i) {
+            auto const& v = part.mesh.vertices[i];
+            auto const& skin = part.skin[i];
+            float3 position{0,0,0}, normal{0,0,0};
+            for (unsigned j = 0; j < 8; ++j) {
+                auto const weight = skin.weights[j];
+                if (weight == 0.f) continue;
+                auto const& matrix = matrices[skin.joints[j]];
+                position += matrix.transform_position({v.position[0],v.position[1],v.position[2]}) * weight;
+                normal += matrix.transform_direction({v.normal[0],v.normal[1],v.normal[2]}) * weight;
+            }
+            actor.vertices[dest++] = {{position.x,position.y,position.z},
+                {normal.x,normal.y,normal.z},{v.uv[0],v.uv[1]}};
+        }
+    }
+    if (!s.character_api->set_pose(s.renderer,actor.vertices.data(),
+            static_cast<std::uint32_t>(actor.vertices.size())))
+        throw s.module->error("Cannot upload character pose");
+}
+
+void Viewport::hide_character()
+{
+    auto& s = *state;
+    if (s.character && !s.character_api->set_pose(s.renderer,nullptr,0))
+        throw s.module->error("Cannot hide character mesh");
+}
 
 void Viewport::set_asset_sources(std::filesystem::path const& root,
                                  std::filesystem::path const& archive,

@@ -5,6 +5,7 @@
 #include <northstarcpp/scene_component_registry.hpp>
 #include <northstarcpp/geometry_scene.hpp>
 #include <northstarcpp/provider_inspector.hpp>
+#include <northstarcpp/skeletal_animation.hpp>
 #include <QClipboard>
 #include <QAction>
 #include <QApplication>
@@ -274,6 +275,69 @@ QCheckBox {color:#dce7f5;}
     editMenu->addAction("Delete Object",QKeySequence::Delete,
                         this,&QtEditorWindow::deleteSelected);
     assetMenu->addAction("&New Material Descriptor...",[this]{createMaterial();});
+    auto* inspectSkeleton=assetMenu->addAction("Inspect Skeleton Rig...",[this] {
+        const auto file=QFileDialog::getOpenFileName(this,
+            "Open NorthStar Skeleton",{},"Skeleton Rig (*.skeleton.json *.json);;All Files (*)");
+        if(file.isEmpty())return;
+        try {
+            QFile input(file);
+            if(!input.open(QIODevice::ReadOnly))
+                throw std::runtime_error("Cannot read selected skeleton resource");
+            if(input.size()>1024*1024)
+                throw std::invalid_argument("Skeleton exceeds 1 MiB safety limit");
+            auto rig=northstarcpp::parse_skeleton_rig(
+                input.readAll().toStdString());
+            auto pose=rig.skinning_palette({},0.f);
+            auto packed=northstarcpp::pack_skinning_palette(pose);
+            QDialog dialog(this);
+            dialog.setWindowTitle("NorthStar Skeleton Inspector");
+            dialog.resize(640,480);
+            auto* layout=new QVBoxLayout(&dialog);
+            layout->addWidget(new QLabel(QString("%1 bones | %2 GPU palette floats | "
+                "CPU hierarchy and bind pose validated").arg(rig.bone_count())
+                .arg(packed.size()),&dialog));
+            auto* tree=new QTreeWidget(&dialog);
+            tree->setObjectName("skeletonBoneTree");
+            tree->setHeaderLabels({"Bone","Index","Parent","Bind Translation","Bind Scale"});
+            tree->setAlternatingRowColors(true);
+            tree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+            std::vector<QTreeWidgetItem*> items;
+            items.reserve(rig.bone_count());
+            for(std::size_t i=0;i<rig.bone_count();++i) {
+                const auto& bone=rig.bones()[i];
+                auto format=[](northstarcpp::Vector3 v) {
+                    return QString("(%1, %2, %3)")
+                        .arg(v.x,0,'f',3).arg(v.y,0,'f',3).arg(v.z,0,'f',3);
+                };
+                auto* parent=bone.parent>=0?items[std::size_t(bone.parent)]:nullptr;
+                auto* entry=parent?
+                    new QTreeWidgetItem(parent):
+                    new QTreeWidgetItem(tree);
+                entry->setText(0,QString::fromStdString(bone.name));
+                entry->setText(1,QString::number(i));
+                entry->setText(2,bone.parent<0?"root":QString::number(bone.parent));
+                entry->setText(3,format(bone.bind.translation));
+                entry->setText(4,format(bone.bind.scale));
+                items.push_back(entry);
+            }
+            tree->expandAll();
+            layout->addWidget(tree);
+            auto* buttons=new QDialogButtonBox(QDialogButtonBox::Close,&dialog);
+            QObject::connect(buttons,&QDialogButtonBox::rejected,
+                             &dialog,&QDialog::reject);
+            layout->addWidget(buttons);
+            dialog.exec();
+            log(QString("Skeleton rig validated: %1 bones, %2 palette floats: %3")
+                .arg(rig.bone_count()).arg(packed.size()).arg(file));
+        } catch(std::exception const& error) {
+            QMessageBox::warning(this,"Skeleton validation failed",
+                QString::fromUtf8(error.what()));
+            log(QString("Skeleton validation failed: %1: %2")
+                .arg(file,QString::fromUtf8(error.what())));
+        }
+    });
+    inspectSkeleton->setObjectName("inspectSkeletonRigAction");
+
     assetMenu->addAction("&Refresh Content",QKeySequence(Qt::Key_F5),[this]{
         browser_->refresh();
         updateDependencies();
@@ -1729,6 +1793,20 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         refreshProviderInspector();
         if(!providerDock_ || !providers_ || providers_->topLevelItemCount()<11) {
             log("smoke: Engine Providers panel failed to enumerate ABI services");
+            return false;
+        }
+        // Skeleton authoring must remain exposed in the real Qt editor,
+        // not only in the standalone animation library.
+        auto* skeletonAction=findChild<QAction*>("inspectSkeletonRigAction");
+        if(!skeletonAction || !skeletonAction->isEnabled()) {
+            log("smoke: skeleton asset inspector action is missing");
+            return false;
+        }
+        auto sampleRig=parse_skeleton_rig(
+            R"({"schema":1,"type":"skeleton","bones":[{"name":"root","parent":-1}]})");
+        if(sampleRig.bone_count()!=1 ||
+           pack_skinning_palette(sampleRig.skinning_palette({},0.f)).size()!=16) {
+            log("smoke: Editor skeleton bind palette validation failed");
             return false;
         }
         QDir dir(base);

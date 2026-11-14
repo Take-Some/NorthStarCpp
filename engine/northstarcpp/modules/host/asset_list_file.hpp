@@ -25,6 +25,7 @@ public:
     std::uint64_t integer(std::uint64_t offset, unsigned width) const;
     std::string string(std::uint64_t offset, std::uint64_t length) const;
     bool magic(std::uint64_t offset, std::string_view value) const;
+    float real(std::uint64_t offset) const;
     std::size_t size() const { return size_; }
 private:
     std::uint8_t const* data_;

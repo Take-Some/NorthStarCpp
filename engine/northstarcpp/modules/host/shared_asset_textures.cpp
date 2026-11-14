@@ -106,10 +106,10 @@ static std::vector<Texture> parse_texture_dictionary(
             auto const mip = table + mips + (mip_start + j) * 32;
             auto const offset = body.integer(mip, 8);
             auto const length_bytes = body.integer(mip + 8, 8);
-            auto const row_bytes = format == 1 ? width * 4 :
+            auto const row_bytes = (format == 1 || format == 2) ? width * 4 :
                 ((width + 3) / 4) * (format == 101 || format == 102 ? 8 : 16);
-            auto const rows = format == 1 ? height : (height + 3) / 4;
-            require(format == 1 || (format >= 101 && format <= 105), "Unsupported NETD texture format");
+            auto const rows = (format == 1 || format == 2) ? height : (height + 3) / 4;
+            require(format == 1 || format == 2 || (format >= 101 && format <= 105), "Unsupported NETD texture format");
             require(offset == next_offset && offset - start <= size &&
                 length_bytes <= size - (offset - start) && length_bytes == row_bytes * rows &&
                 body.integer(mip + 16, 4) == width && body.integer(mip + 20, 4) == height &&

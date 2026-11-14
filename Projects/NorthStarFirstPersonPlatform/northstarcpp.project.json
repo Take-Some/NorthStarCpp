@@ -3,6 +3,7 @@
   "engine": "NorthStarCpp",
   "name": "NorthStar First Person Platform",
   "game_mode": "explore",
+  "player_character": "abby",
   "category": "Games",
   "template": "sandbox",
   "description": "Minimal first-person physics sandbox with walkable platform, jumping, movable rigid bodies and textured skydome",

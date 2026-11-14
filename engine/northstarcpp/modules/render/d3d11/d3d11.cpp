@@ -8,6 +8,7 @@
 #include <ui_quad.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_surfaces_api.h>
+#include <northstarcpp/render_character_api.h>
 #include <northstarcpp/scene.hpp>
 #include "module_provider.hpp"
 
@@ -199,6 +200,40 @@ float4 sky_pixel_main(SkyPixel p) : SV_Target {
 }
 )";
 
+constexpr char character_shader_code[] = R"(
+cbuffer Camera : register(b0) { row_major float4x4 view_projection; }
+cbuffer Material : register(b1) { float alpha_cutoff; }
+Texture2D albedo : register(t0);
+SamplerState material_sampler : register(s0);
+struct Vertex {float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0;};
+struct Pixel {float4 position : SV_Position; float3 normal : NORMAL; float2 uv : TEXCOORD0;};
+Pixel character_vs(Vertex v) {
+    Pixel p;
+    p.position = mul(float4(v.position, 1), view_projection);
+    p.normal = v.normal;
+    p.uv = v.uv;
+    return p;
+}
+float4 character_ps(Pixel p) : SV_Target {
+    float4 color = albedo.Sample(material_sampler,p.uv);
+    clip(color.a - alpha_cutoff);
+    float lighting = 0.44 + 0.56 * saturate(dot(normalize(p.normal),
+        normalize(float3(-0.45,0.8,-0.3))));
+    float3 lit = saturate(color.rgb * lighting);
+    return float4(lerp(lit*12.92, 1.055*pow(lit,1.0/2.4)-0.055,step(0.0031308,lit)),1);
+}
+)";
+void compile_character(char const* entry,char const* profile,Com<ID3DBlob>& output)
+{
+    Com<ID3DBlob> errors;
+    auto const status = D3DCompile(character_shader_code,sizeof(character_shader_code)-1,
+        "character",nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS,0,
+        output.put(),errors.put());
+    if (FAILED(status) && errors.get())
+        throw std::runtime_error(static_cast<char const*>(errors->GetBufferPointer()));
+    check(status,"Compile character shader");
+}
+
 void compile_sky(char const* entry, char const* profile, Com<ID3DBlob>& output)
 {
     Com<ID3DBlob> errors;
@@ -254,6 +289,12 @@ constexpr unsigned max_vertex_capacity =
     grid_vertices + 36 * northstarcpp::max_scene_objects;
 constexpr unsigned min_vertex_capacity = 4096;
 
+struct CharacterBatch {
+    UINT start = 0, count = 0;
+    float cutoff[4]{};
+    Com<ID3D11ShaderResourceView> texture;
+};
+
 struct Renderer {
     explicit Renderer(HWND target, bool software) : window(target)
     {
@@ -298,6 +339,26 @@ struct Renderer {
         compile("pixel_main", "ps_4_0", code);
         check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
             nullptr, pixel_shader.put()), "Create pixel shader");
+
+        compile_character("character_vs","vs_4_0",code);
+        check(device->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),
+            nullptr,character_vs.put()),"Create character vertex shader");
+        D3D11_INPUT_ELEMENT_DESC const character_elements[]{
+            {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,offsetof(NorthStarCharacterVertex,position),D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,offsetof(NorthStarCharacterVertex,normal),D3D11_INPUT_PER_VERTEX_DATA,0},
+            {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,offsetof(NorthStarCharacterVertex,uv),D3D11_INPUT_PER_VERTEX_DATA,0}
+        };
+        check(device->CreateInputLayout(character_elements,3,code->GetBufferPointer(),
+            code->GetBufferSize(),character_layout.put()),"Create character input layout");
+        compile_character("character_ps","ps_4_0",code);
+        check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),
+            nullptr,character_ps.put()),"Create character pixel shader");
+        D3D11_BUFFER_DESC material_buffer{};
+        material_buffer.ByteWidth = 16;
+        material_buffer.Usage = D3D11_USAGE_DEFAULT;
+        material_buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&material_buffer,nullptr,character_material.put()),
+            "Create character material buffer");
 
         // Independent unlit sky program: UVs are authored in the YDD asset.
         compile_sky("sky_vertex_main", "vs_4_0", code);
@@ -697,6 +758,147 @@ struct Renderer {
         ++vertex_buffer_reallocations;
     }
 
+    void set_character(NorthStarCharacterPart const* parts, std::uint32_t count)
+    {
+        if (!count) {
+            character_parts.clear();
+            character_indices.reset();
+            character_vertices.reset();
+            character_vertex_count = 0;
+            return;
+        }
+        if (!parts || count > 128)
+            throw std::invalid_argument("Invalid character mesh parts");
+
+        std::vector<CharacterBatch> batches(count);
+        std::vector<std::uint32_t> indices;
+        std::vector<NorthStarCharacterVertex> model;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            auto const& part = parts[i];
+            if (!part.vertices || !part.indices || !part.vertex_count || !part.index_count ||
+                part.index_count % 3 || part.vertex_count > 200000 - model.size() ||
+                part.index_count > 1000000 - indices.size() ||
+                !(part.alpha_cutoff >= 0.f && part.alpha_cutoff <= 1.f))
+                throw std::invalid_argument("Invalid character mesh part");
+            auto& batch = batches[i];
+            batch.start = static_cast<UINT>(indices.size());
+            batch.count = part.index_count;
+            batch.cutoff[0] = part.alpha_cutoff;
+            for (std::uint32_t j = 0; j < part.index_count; ++j) {
+                if (part.indices[j] >= part.vertex_count)
+                    throw std::invalid_argument("Character index out of range");
+                indices.push_back(static_cast<std::uint32_t>(model.size()) + part.indices[j]);
+            }
+            model.insert(model.end(), part.vertices, part.vertices + part.vertex_count);
+            auto const& image = part.texture;
+            DXGI_FORMAT format;
+            unsigned block = 4;
+            switch (image.format_id) {
+            case 1: case 2:
+                format = image.srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+                break;
+            case 103:
+                format = image.srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM;
+                block = 16;
+                break;
+            case 104:
+                format = image.srgb ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+                block = 16;
+                break;
+            default:
+                throw std::invalid_argument("Unsupported character texture format");
+            }
+            if (!image.data || !image.mips || !image.mip_count || image.mip_count > 15)
+                throw std::invalid_argument("Invalid character texture");
+            auto w = image.mips[0].width;
+            auto h = image.mips[0].height;
+            if (!w || !h || w > 16384 || h > 16384)
+                throw std::invalid_argument("Invalid character texture dimensions");
+            std::vector<D3D11_SUBRESOURCE_DATA> data;
+            for (unsigned j = 0; j < image.mip_count; ++j) {
+                auto const& mip = image.mips[j];
+                auto const pitch = (block == 4 ? w : (w + 3) / 4) * block;
+                auto const rows = block == 4 ? h : (h + 3) / 4;
+                if (mip.width != w || mip.height != h || mip.offset > image.data_bytes ||
+                    mip.bytes > image.data_bytes - mip.offset ||
+                    std::uint64_t(pitch) * rows != mip.bytes)
+                    throw std::invalid_argument("Invalid character texture mip");
+                data.push_back({image.data + mip.offset, pitch, mip.bytes});
+                w = std::max(1u, w / 2);
+                h = std::max(1u, h / 2);
+            }
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = image.mips[0].width;
+            desc.Height = image.mips[0].height;
+            desc.MipLevels = image.mip_count;
+            desc.ArraySize = 1;
+            desc.Format = format;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_IMMUTABLE;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            Com<ID3D11Texture2D> texture;
+            check(device->CreateTexture2D(&desc, data.data(), texture.put()),
+                  "Create character albedo texture");
+            check(device->CreateShaderResourceView(texture.get(), nullptr, batch.texture.put()),
+                  "Create character albedo view");
+        }
+
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = static_cast<UINT>(indices.size() * sizeof(indices[0]));
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial{indices.data(),0,0};
+        Com<ID3D11Buffer> new_indices, new_vertices;
+        check(device->CreateBuffer(&desc, &initial, new_indices.put()), "Create character index buffer");
+        desc.ByteWidth = static_cast<UINT>(model.size() * sizeof(model[0]));
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        initial.pSysMem = model.data();
+        check(device->CreateBuffer(&desc, &initial, new_vertices.put()), "Create character vertex buffer");
+        character_indices.swap(new_indices);
+        character_vertices.swap(new_vertices);
+        character_parts.swap(batches);
+        character_vertex_count = static_cast<std::uint32_t>(model.size());
+        character_visible = false;
+    }
+
+    void set_character_pose(NorthStarCharacterVertex const* data, std::uint32_t count)
+    {
+        if (!count) {
+            character_visible = false;
+            return;
+        }
+        if (!data || count != character_vertex_count)
+            throw std::invalid_argument("Character pose vertex count mismatch");
+        D3D11_MAPPED_SUBRESOURCE output{};
+        check(context->Map(character_vertices.get(),0,D3D11_MAP_WRITE_DISCARD,0,&output),
+              "Upload character pose");
+        std::memcpy(output.pData,data,std::size_t(count)*sizeof(*data));
+        context->Unmap(character_vertices.get(),0);
+        character_visible = true;
+    }
+
+    void draw_character()
+    {
+        if (!character_visible || character_parts.empty()) return;
+        UINT const stride = sizeof(NorthStarCharacterVertex), offset = 0;
+        auto* vertices = character_vertices.get();
+        auto* material = character_material.get();
+        context->IASetInputLayout(character_layout.get());
+        context->IASetVertexBuffers(0,1,&vertices,&stride,&offset);
+        context->IASetIndexBuffer(character_indices.get(),DXGI_FORMAT_R32_UINT,0);
+        context->VSSetShader(character_vs.get(),nullptr,0);
+        context->PSSetShader(character_ps.get(),nullptr,0);
+        context->PSSetConstantBuffers(1,1,&material);
+        for (auto const& part : character_parts) {
+            auto* albedo = part.texture.get();
+            context->PSSetShaderResources(0,1,&albedo);
+            context->UpdateSubresource(material,0,nullptr,part.cutoff,0,0);
+            context->DrawIndexed(part.count,part.start,0);
+        }
+    }
+
     void set_triangles(NorthStarRenderTriangleVertex const* src,std::uint32_t count)
     {
         constexpr std::size_t limit=300000;
@@ -903,8 +1105,14 @@ struct Renderer {
         } else {
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context->Draw(static_cast<UINT>(vertices.size()), 0);
-            if (frame.player_max_health != 0u)
-                draw_fps_overlay(frame);
+        }
+        draw_character();
+        if (frame.first_person && frame.player_max_health != 0u) {
+            context->IASetInputLayout(layout.get());
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(vertex_shader.get(),nullptr,0);
+            context->PSSetShader(pixel_shader.get(),nullptr,0);
+            draw_fps_overlay(frame);
         }
 
         if (frame.verify_pixels)
@@ -922,6 +1130,13 @@ struct Renderer {
     Com<ID3D11VertexShader> vertex_shader;
     Com<ID3D11PixelShader> pixel_shader;
     Com<ID3D11InputLayout> layout;
+    Com<ID3D11VertexShader> character_vs;
+    Com<ID3D11PixelShader> character_ps;
+    Com<ID3D11InputLayout> character_layout;
+    Com<ID3D11Buffer> character_material, character_vertices, character_indices;
+    std::vector<CharacterBatch> character_parts;
+    std::uint32_t character_vertex_count = 0;
+    bool character_visible = false;
     Com<ID3D11Buffer> vertex_buffer;
     unsigned vertex_buffer_capacity=0;
     unsigned underutilized_frames=0;
@@ -1009,6 +1224,22 @@ const NorthStarRenderTrianglesApi triangles_api{
     NORTHSTARCPP_RENDER_TRIANGLES_ABI,set_render_triangles};
 const NorthStarRenderMemoryApi memory_api{
     NORTHSTARCPP_RENDER_MEMORY_ABI,read_memory_stats};
+int set_character_model(void* renderer, NorthStarCharacterPart const* parts, std::uint32_t count)
+{
+    return guarded([&] {
+        if (!renderer) throw std::invalid_argument("Missing character renderer");
+        static_cast<Renderer*>(renderer)->set_character(parts,count);
+    });
+}
+int set_character_pose(void* renderer, NorthStarCharacterVertex const* data, std::uint32_t count)
+{
+    return guarded([&] {
+        if (!renderer) throw std::invalid_argument("Missing character renderer");
+        static_cast<Renderer*>(renderer)->set_character_pose(data,count);
+    });
+}
+const NorthStarRenderCharacterApi character_api{
+    NORTHSTARCPP_RENDER_CHARACTER_ABI, set_character_model, set_character_pose};
 const NorthStarRenderApi api{create, destroy, draw, set_sky};
 const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
     NORTHSTARCPP_CAPABILITY_RENDER, "Direct3D 11", "5.0.0", NORTHSTARCPP_RENDER_ABI,
@@ -1019,6 +1250,13 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if (version == NORTHSTARCPP_RENDER_CHARACTER_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "Direct3D 11","5.2.0",NORTHSTARCPP_RENDER_CHARACTER_MODULE_ABI,
+            sizeof(character_api),&character_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if (version == NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,

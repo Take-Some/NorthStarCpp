@@ -37,7 +37,7 @@ public:
         x=std::clamp(x,0,int(mip_.width)-1);
         y=std::clamp(y,0,int(mip_.height)-1);
         auto const* src=texture_.data.data()+mip_.offset;
-        if(texture_.format_id==1) {
+        if((texture_.format_id==1 || texture_.format_id==2)) {
             auto const index=(std::size_t(y)*mip_.width+std::size_t(x))*4u;
             return pack(src+index);
         }
@@ -115,7 +115,7 @@ Thumbnail thumbnail_texture(shared_assets::Texture const& t) {
         return {};
     std::size_t block_size=0;
     switch(t.format_id) {
-    case 1: block_size=0;break;
+    case 1: case 2: block_size=0;break;
     case 101: case 102:block_size=8;break;
     case 103: case 104:block_size=16;break;
     default:return {};
@@ -157,7 +157,7 @@ AssetPreviewImage preview_texture(shared_assets::Texture const& texture,
        mip.size>texture.data.size()-mip.offset)return output;
     std::size_t stride=0;
     switch(texture.format_id) {
-    case 1: break;
+    case 1: case 2: break;
     case 101: case 102:stride=8;break;
     case 103: case 104:stride=16;break;
     default:return output;

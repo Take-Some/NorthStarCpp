@@ -257,7 +257,7 @@ if(WIN32)
 
     if(IS_DIRECTORY "${PROJECT_SOURCE_DIR}/sharedAssets")
         install(DIRECTORY "${PROJECT_SOURCE_DIR}/sharedAssets" DESTINATION . COMPONENT Runtime
-            FILES_MATCHING PATTERN "*.ydd" PATTERN "*.ytd" PATTERN "*.ymat"
+            FILES_MATCHING PATTERN "*.ydd" PATTERN "*.ytd" PATTERN "*.ymat" PATTERN "*.ymt" PATTERN "*.ycd"
                            PATTERN "*.ysc" PATTERN "*.js" PATTERN "*.mjs" PATTERN "*.vert" PATTERN "*.frag")
     endif()
 

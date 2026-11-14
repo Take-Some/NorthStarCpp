@@ -152,6 +152,8 @@ struct Options {
     bool smoke = false;
     bool check_scene = false;
     bool runtime_init_smoke = false;
+    bool abby = false;
+    bool abby_smoke = false;
     bool fps = false;
     bool explore = false;
     bool fps_ui_smoke = false;
@@ -177,6 +179,12 @@ Options options()
             result.inspect_providers = true;
         else if (arg == L"--check-scene")
             result.check_scene = true;
+        else if (arg == L"--abby")
+            result.abby = true;
+        else if (arg == L"--abby-smoke") {
+            result.abby = true;
+            result.abby_smoke = true;
+        }
         else if (arg == L"--runtime-init-smoke")
             result.runtime_init_smoke = true;
         else if (arg == L"--shared-assets" && i + 1 < count)
@@ -209,7 +217,7 @@ Options options()
             result.smoke_output = args[++i];
         else
             throw std::runtime_error("Usage: --scene FILE, or --archive FILE [--archive-data FILE] --scene VIRTUAL_PATH. "
-                "Options: --inspect-providers, --warp, --smoke, --check-scene, --fps, --explore, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
+                "Options: --inspect-providers, --warp, --smoke, --check-scene, --fps, --explore, --abby, --abby-smoke, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
     }
     if ((!result.archive_path.empty() && result.scene_path.empty()) ||
         (!result.archive_data.empty() && result.archive_path.empty()))
@@ -446,6 +454,21 @@ public:
             }
         }
         if (!editor) {
+            if (!config.abby && !config.smoke && !config.check_scene && !config.fps_ui_smoke &&
+                config.archive_path.empty() && !file_path.empty()) {
+                auto const root = script_project_root(file_path);
+                auto const manifest = root / "northstarcpp.project.json";
+                if (fs::is_regular_file(manifest)) {
+                    boost::property_tree::ptree metadata;
+                    boost::property_tree::read_json(manifest.u8string(), metadata);
+                    config.abby = metadata.get<std::string>("player_character","") == "abby";
+                }
+            }
+            if (config.abby && !config.fps && !scripted_first_person) {
+                config.fps = true;
+                config.explore = true;
+            }
+            if (config.abby && scripted_game) scripted_first_person = true;
             auto initial_scene = document.snapshot();
             if (config.fps) {
                 // A FPS project can supply its data through engine.assets.
@@ -481,6 +504,8 @@ public:
             initialize_asset_zones();
             if (fps || scripted_first_person) {
                 fps_camera = std::make_unique<CameraDirector>(fps_camera_settings);
+                if (config.abby)
+                    fps_camera->set_mode(CameraMode::third_person,0.f);
                 if (fps) update_fps_camera(0.f, false);
                 else update_script_camera(0.f);
             }
@@ -560,6 +585,7 @@ public:
                     config.archive_path.empty()?script_project_root(file_path):fs::path{},
                     config.archive_path,config.archive_data);
             }
+            if (config.abby) load_abby();
             if (fps_assets) {
                 bool skydome_available = false;
                 try {
@@ -589,7 +615,7 @@ public:
             if (!editor && !scripted_game && !config.smoke &&
                 !config.check_scene && !config.fps_ui_smoke)
                 play_start_sound();
-            if ((config.smoke || config.check_scene || config.fps_ui_smoke) &&
+            if ((config.smoke || config.check_scene || config.fps_ui_smoke || config.abby_smoke) &&
                 !PostMessageW(window, smoke_message, 0, 0))
                 throw std::runtime_error("Cannot start application smoke test");
         } catch (...) {
@@ -1273,6 +1299,60 @@ private:
         update_fps_title();
     }
 
+    void load_abby()
+    {
+        AssetStore assets;
+        auto const project = file_path.empty() ? fs::path{} : script_project_root(file_path);
+        if (!project.empty() && fs::is_directory(project/"assets"/"models"/"abby")) {
+            assets.mount_directory("",project/"assets");
+            graphics->load_character(assets,"");
+            return;
+        }
+        auto common = config.shared_asset_root;
+        if (common.empty()) {
+            for (auto parent = project; !parent.empty(); parent = parent.parent_path()) {
+                if (fs::is_regular_file(parent/"sharedAssets/models/abby/abby.ydd")) {
+                    common = parent/"sharedAssets";
+                    break;
+                }
+                if (parent == parent.parent_path()) break;
+            }
+        }
+        if (common.empty()) {
+            std::array<wchar_t,32768> executable{};
+            auto const length = GetModuleFileNameW(nullptr,executable.data(),
+                static_cast<DWORD>(executable.size()));
+            if (length && length < executable.size())
+                common = fs::path(executable.data()).parent_path().parent_path()/"sharedAssets";
+        }
+        if (!fs::is_directory(common))
+            throw std::runtime_error("Cannot locate Abby shared assets");
+        assets.mount_directory("",common);
+        graphics->load_character(assets,"");
+    }
+
+    void update_abby(Scene const& scene, float yaw, float dt)
+    {
+        if (!config.abby) return;
+        if (fps_camera && fps_camera->mode() == CameraMode::first_person) {
+            graphics->hide_character();
+            return;
+        }
+        auto const player = std::find_if(scene.objects.begin(),scene.objects.end(),
+            [](auto const& object) { return object.player; });
+        if (player == scene.objects.end())
+            throw std::runtime_error("An Abby scene must have a player spawn");
+        auto const foot = player->position;
+        bool moving = false, airborne = false;
+        if (abby_previous && dt > 0.f) {
+            auto const dx = foot.x - abby_previous->x, dz = foot.z - abby_previous->z;
+            moving = std::hypot(dx,dz) > dt * .15f;
+            airborne = std::abs(foot.y - abby_previous->y) > dt * .35f;
+        }
+        abby_previous = foot;
+        graphics->pose_character(foot,yaw,dt,moving,airborne);
+    }
+
     void update_fps_camera(float dt, bool aiming)
     {
         if (!fps_camera || !fps || !preview) return;
@@ -1440,11 +1520,23 @@ private:
         case WM_TIMER:
             if (editor && content_browser)
                 content_browser->poll_thumbnails();
-            if (wparam == frame_timer && !config.smoke && !config.check_scene && graphics && !IsIconic(window))
+            if (wparam == frame_timer && !config.smoke && !config.check_scene && !config.abby_smoke && graphics && !IsIconic(window))
                 frame();
             return 0;
         case smoke_message:
-            if (config.fps_ui_smoke) {
+            if (config.abby_smoke) {
+                auto const& scene = preview->scene();
+                auto const player = std::find_if(scene.objects.begin(),scene.objects.end(),
+                    [](auto const& object) { return object.player; });
+                if (player == scene.objects.end()) throw std::runtime_error("Missing Abby spawn");
+                auto const* camera = fps_camera ? &fps_pose : nullptr;
+                for (unsigned i = 0; i < 8; ++i) {
+                    graphics->pose_character(player->position,0.f,0.05f,i < 4,i >= 4);
+                    graphics->draw(scene,-2,false,preview.get(),nullptr,false,camera,
+                        scene_world.get(),false);
+                }
+                std::puts("Abby textured skeletal draw: PASS");
+            } else if (config.fps_ui_smoke) {
                 if (!fps || !graphics || !fps_caption || !fps_buttons[0])
                     throw std::runtime_error("FPS menu was not initialized");
                 show_fps_menu(true);
@@ -3647,6 +3739,15 @@ private:
             return code < NORTHSTARCPP_INPUT_MAX_KEYS && state.keys[code] != 0;
         };
         bool const foreground = GetForegroundWindow() == window && state.focused;
+        if (config.abby && fps_camera) {
+            bool const toggle = foreground && down(VK_F5);
+            if (toggle && !abby_camera_key) {
+                auto const mode = fps_camera->mode() == CameraMode::first_person
+                    ? CameraMode::third_person : CameraMode::first_person;
+                fps_camera->set_mode(mode,0.f);
+            }
+            abby_camera_key = toggle;
+        }
         float x = 0.f, z = 0.f;
         if (fps) {
             bool const pause_key = down(NORTHSTAR_INPUT_KEY_ESCAPE) ||
@@ -3751,6 +3852,7 @@ private:
                 if (index<visual.objects.size()) visual.objects[index].color=color;
             apply_scene_animation_visuals(visual);
             update_scene_world(seconds);
+            update_abby(visual,script_yaw,script_paused ? 0.f : seconds);
             graphics->draw(visual,-2,false,preview.get(),nullptr,script_paused,
                            fps_camera ? &fps_pose : nullptr,scene_world.get(),false);
         } else if (fps) {
@@ -3778,6 +3880,7 @@ private:
             Scene visual = preview->scene();
             fps->tint(visual);
             update_scene_world(seconds);
+            update_abby(visual,fps->yaw(),fps_menu_visible ? 0.f : seconds);
             graphics->draw(visual,-2,false,preview.get(),fps.get(),fps_menu_visible,
                            fps_camera ? &fps_pose : nullptr,scene_world.get(),
                            !config.explore);
@@ -3942,6 +4045,8 @@ private:
     FpsTuning fps_tuning;
     AssetRequest<FpsAudioClip> fps_shot, fps_reload;
     CameraSettings fps_camera_settings{};
+    std::optional<Vector3> abby_previous;
+    bool abby_camera_key = false;
     std::unique_ptr<CameraDirector> fps_camera;
     CameraPose fps_pose{};
     HWND fps_caption = nullptr;
@@ -3974,7 +4079,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
         auto settings = northstarcpp::options();
         arguments_parsed = true;
         smoke = settings.smoke || settings.check_scene || settings.runtime_init_smoke ||
-                settings.fps_ui_smoke || settings.check_shared_assets ||
+                settings.fps_ui_smoke || settings.abby_smoke || settings.check_shared_assets ||
                 settings.inspect_providers;
         // Test/validation runs should not create logs in the user's profile.
         if (!smoke || northstarcpp::application_log_directory_overridden()) {
