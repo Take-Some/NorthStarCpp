@@ -146,6 +146,14 @@ if(BUILD_TESTING)
         SKIP_RETURN_CODE 77 TIMEOUT 55)
 
 
+    add_executable(northstarcpp_d3d12_enhanced_barriers_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_d3d12_enhanced_barriers_smoke.cpp")
+    target_compile_features(northstarcpp_d3d12_enhanced_barriers_smoke PRIVATE cxx_std_17)
+    target_link_libraries(northstarcpp_d3d12_enhanced_barriers_smoke PRIVATE d3d12 dxgi)
+    add_test(NAME northstarcpp_d3d12_enhanced_barriers_warp
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d12_enhanced_barriers_smoke>")
+    set_tests_properties(northstarcpp_d3d12_enhanced_barriers_warp
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     add_executable(northstarcpp_d3d12_transient_alias_smoke
         "${PROJECT_SOURCE_DIR}/tests/render_d3d12_transient_alias_smoke.cpp"
         modules/render/d3d12/renderer_transient_alias.cpp
