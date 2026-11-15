@@ -2028,6 +2028,20 @@ if(BUILD_TESTING)
         add_dependencies(northstarcpp_shared_assets_smoke northstarcpp_assets_directory)
         add_test(NAME northstarcpp_shared_assets COMMAND northstarcpp_shared_assets_smoke
             "${PROJECT_SOURCE_DIR}/sharedAssets")
+        add_executable(northstarcpp_drawable_resources_move_smoke
+            "${PROJECT_SOURCE_DIR}/tests/drawable_resources_move_smoke.cpp")
+        target_link_libraries(northstarcpp_drawable_resources_move_smoke PRIVATE
+            northstarcpp_runtime)
+        target_link_options(northstarcpp_drawable_resources_move_smoke PRIVATE -static)
+        set_target_properties(northstarcpp_drawable_resources_move_smoke PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
+        add_dependencies(northstarcpp_drawable_resources_move_smoke
+            northstarcpp_assets_directory)
+        add_test(NAME northstarcpp_drawable_resources_move
+            COMMAND "$<TARGET_FILE:northstarcpp_drawable_resources_move_smoke>"
+                "${PROJECT_SOURCE_DIR}/sharedAssets")
+        set_tests_properties(northstarcpp_drawable_resources_move
+            PROPERTIES TIMEOUT 45)
         add_test(NAME northstarcpp_player_asset_zones
             COMMAND northstarcpp_player --warp --check-scene
                 --scene "${PROJECT_SOURCE_DIR}/tests/fixtures/static_scene.nscene"
