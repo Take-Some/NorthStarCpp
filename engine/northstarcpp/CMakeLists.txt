@@ -270,6 +270,19 @@ if(BUILD_TESTING)
             "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware --stress)
     set_tests_properties(northstarcpp_d3d12_transient_alias_stress_hardware
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME northstarcpp_d3d12_gpu_timestamp_profile_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>"
+            --hardware --stress --gpu-profile)
+    set_tests_properties(northstarcpp_d3d12_gpu_timestamp_profile_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+
     add_test(NAME northstarcpp_d3d12_transient_alias_ldr_warp
         COMMAND "${CMAKE_COMMAND}" -E env
             NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
