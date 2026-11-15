@@ -334,6 +334,14 @@ if(BUILD_TESTING)
         target_compile_features(northstarcpp_render_graph_vulkan_sync_smoke PRIVATE cxx_std_17)
         add_test(NAME northstarcpp_render_graph_vulkan_sync
             COMMAND "$<TARGET_FILE:northstarcpp_render_graph_vulkan_sync_smoke>")
+        add_executable(northstarcpp_render_graph_vulkan_executor_smoke
+            "${PROJECT_SOURCE_DIR}/tests/render_graph_vulkan_executor_smoke.cpp")
+        target_include_directories(northstarcpp_render_graph_vulkan_executor_smoke PRIVATE
+            "${NORTHSTARCPP_VULKAN_INCLUDE_DIR}")
+        target_compile_features(northstarcpp_render_graph_vulkan_executor_smoke PRIVATE cxx_std_17)
+        add_test(NAME northstarcpp_render_graph_vulkan_executor
+            COMMAND "$<TARGET_FILE:northstarcpp_render_graph_vulkan_executor_smoke>")
+
     endif()
     add_executable(northstarcpp_render_transient_resource_planner_smoke
         "${PROJECT_SOURCE_DIR}/tests/render_transient_resource_planner_smoke.cpp")
