@@ -22,13 +22,15 @@ void require(bool value,const char* message) {
     if(!value)throw std::runtime_error(message);
 }
 int main(int argc,char** argv) {
-    if(argc<2||argc>4)return 2;
-    bool hardware=false,stress=false;
+    if(argc<2||argc>5)return 2;
+    bool hardware=false,stress=false,gpu_profile=false;
     for(int i=2;i<argc;++i) {
         if(!std::strcmp(argv[i],"--hardware"))hardware=true;
         else if(!std::strcmp(argv[i],"--stress"))stress=true;
+        else if(!std::strcmp(argv[i],"--gpu-profile"))gpu_profile=true;
         else return 2;
     }
+    if(gpu_profile&&!stress)return 2;
     HMODULE dll=nullptr;
     HWND window=nullptr;
     void* renderer=nullptr;
@@ -157,6 +159,12 @@ int main(int argc,char** argv) {
         if(stress) {
             SetWindowPos(window,nullptr,100,100,176,160,SWP_NOZORDER|SWP_NOACTIVATE);
             std::vector<double> samples;samples.reserve(1000);
+            std::vector<double> gpu_total,gpu_opaque,gpu_deferred,gpu_postfx,gpu_hud;
+            if(gpu_profile) {
+                gpu_total.reserve(1000);gpu_opaque.reserve(1000);
+                gpu_deferred.reserve(1000);gpu_postfx.reserve(1000);
+                gpu_hud.reserve(1000);
+            }
             for(unsigned n=0;n<1000;++n) {
                 frame.camera_yaw=.025f*std::sin(float(n)*.03f);
                 frame.weapon_recoil=float(n%25)/25.f;
@@ -165,10 +173,39 @@ int main(int argc,char** argv) {
                 draw_checked("D3D12 stress");
                 samples.push_back(std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now()-start).count());
+                if(gpu_profile) {
+                    NorthStarRenderTimingStats gpu{};
+                    require(timing_api->read(renderer,&gpu) && gpu.valid &&
+                        gpu.gpu_timestamp_frequency_hz && std::isfinite(gpu.total_gpu_ms) &&
+                        gpu.total_gpu_ms>=0.0,
+                        "1000-frame GPU profiling returned an invalid timestamp");
+                    double total_parts=gpu.opaque_gpu_ms+gpu.deferred_gpu_ms+
+                        gpu.postfx_gpu_ms+gpu.hud_gpu_ms;
+                    require(std::abs(gpu.total_gpu_ms-total_parts)<0.001,
+                        "GPU timestamp frame subpasses do not sum to total");
+                    gpu_total.push_back(gpu.total_gpu_ms);
+                    gpu_opaque.push_back(gpu.opaque_gpu_ms);
+                    gpu_deferred.push_back(gpu.deferred_gpu_ms);
+                    gpu_postfx.push_back(gpu.postfx_gpu_ms);
+                    gpu_hud.push_back(gpu.hud_gpu_ms);
+                }
             }
             std::sort(samples.begin(),samples.end());
             std::printf("D3D12 %s 1000 frames CPU+Present ms p50 %.3f p95 %.3f p99 %.3f\n",
                 hardware?"hardware":"WARP",samples[499],samples[949],samples[989]);
+            if(gpu_profile) {
+                auto report=[&](const char* name,std::vector<double>& values) {
+                    require(values.size()==1000,"GPU frame profile has missing samples");
+                    std::sort(values.begin(),values.end());
+                    std::printf("D3D12 GPU profile %s: p50 %.4f p95 %.4f p99 %.4f ms\n",
+                        name,values[499],values[949],values[989]);
+                };
+                report("total",gpu_total);
+                report("opaque",gpu_opaque);
+                report("deferred",gpu_deferred);
+                report("postfx",gpu_postfx);
+                report("hud",gpu_hud);
+            }
         }
         require(api->set_sky(renderer,nullptr)!=0,"Cannot clear skydome");
         require(memory_api->read(renderer,&stats)&&

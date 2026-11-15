@@ -15,6 +15,7 @@
 #include <QJsonDocument>
 #include <QGraphicsView>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QTemporaryDir>
 #include <QThread>
 #include <filesystem>
@@ -108,7 +109,40 @@ int run_material_function_smoke() {
             "materialGpuPreviewViewport");
         if(!gpu||!gpu->renderGpuNow())
             throw std::runtime_error("Native GPU draw of function material failed");
-        std::cout<<"Material Function Qt/VFS/GPU staging: PASS\n";
+        auto persist=[&](QByteArray const& content) {
+            QSaveFile output(dir.path()+"/MaterialFunctions/Multiply.material-function.json");
+            if(!output.open(QIODevice::WriteOnly) ||
+               output.write(content)!=content.size() || !output.commit())
+                throw std::runtime_error("Cannot atomically edit Material Function QA fixture");
+        };
+        QByteArray invalid=bytes;
+        invalid.replace("\"type\":\"vector4\"","\"type\":\"scalar\"");
+        if(invalid==bytes)
+            throw std::runtime_error("Failed to generate invalid Material Function");
+        persist(invalid);
+        QElapsedTimer timer;
+        timer.start();
+        while(!preview.diagnostic().contains("Graph compiler rejected") &&
+              timer.elapsed()<8000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(12);
+        }
+        if(!preview.diagnostic().contains("Graph compiler rejected") ||
+           !preview.gpuActive())
+            throw std::runtime_error("Function edit did not report an error "
+                                     "while preserving the active GPU preview");
+        persist(bytes);
+        timer.restart();
+        while(!preview.diagnostic().contains("Live GPU PBR preview") &&
+              timer.elapsed()<8000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(12);
+        }
+        if(!preview.diagnostic().contains("Live GPU PBR preview") ||
+           !gpu->renderGpuNow())
+            throw std::runtime_error("Material Function preview did not recover "
+                                     "after correcting a shader error");
+        std::cout<<"Material Function Qt/VFS/GPU hot-reload and recovery: PASS\n";
         return 0;
     }catch(std::exception const& e) {
         std::cerr<<"Material Function Qt/VFS/GPU staging: FAIL: "
