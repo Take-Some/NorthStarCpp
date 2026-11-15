@@ -15,6 +15,7 @@
 #include <northstarcpp/render_materials_api.h>
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_lights_api.h>
+#include <northstarcpp/render_timing_api.h>
 #include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
@@ -81,6 +82,12 @@ inline bool valid_api(NorthStarRenderSkinnedMaterialsApi const& api)
            api.set_batches;
 }
 
+
+// Optional GPU timestamp contract: reject incomplete function tables.
+inline bool valid_api(NorthStarRenderTimingApi const& api)
+{
+    return api.abi_version == NORTHSTARCPP_RENDER_TIMING_ABI && api.read;
+}
 
 // Optional dynamic lighting provider introduced by Render Graph integration.
 inline bool valid_api(NorthStarRenderLightsApi const& api)

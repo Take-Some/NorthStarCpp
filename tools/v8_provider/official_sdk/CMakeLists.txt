@@ -14,7 +14,7 @@ set(NORTHSTARCPP_V8_SDK_ROOT "" CACHE PATH "Official-source compiled V8 SDK")
 set(NORTHSTARCPP_HOST_SMOKE_EXE "" CACHE FILEPATH
     "MinGW northstarcpp_scripting_smoke for ABI 2 validation")
 set(NORTHSTARCPP_HOST_ASSETS_DLL "" CACHE FILEPATH
-    "MinGW assets_directory provider DLL")
+    "MinGW AssetManager provider DLL")
 
 foreach(required IN ITEMS
     "${NORTHSTARCPP_ENGINE_ROOT}/engine/northstarcpp/modules/api/include/northstarcpp/scripting_plugin.h"

@@ -4,6 +4,7 @@
 #include "qt_asset_warnings.hpp"
 #include "qt_prefab_preview.hpp"
 #include "qt_material_function_editor.hpp"
+#include "qt_material_asset_dialog.hpp"
 #include "editor_prefab_composition.hpp"
 #include "editor_asset_thumbnails.hpp"
 #include "editor_asset_material_source.hpp"
@@ -473,6 +474,16 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                           std::string const& asset_reference,AssetKind kind) {
     if(kind==AssetKind::material_function)
         return openMaterialFunctionEditor(parent,content_root,asset_reference);
+    if(kind==AssetKind::material) {
+        // Keep the existing categorized missing-resource warning panel for
+        // broken references; real material assets open the tabbed editor.
+        auto const at=asset_reference.find('@');
+        auto const file=asset_reference.substr(0,at);
+        auto const physical=content_root/fs::u8path(file);
+        std::error_code error;
+        if(fs::is_regular_file(physical,error) && !error)
+            return openMaterialAssetDialog(parent,content_root,asset_reference);
+    }
     // Prefab is a scene graph template, not a drawable or a plain scene.
     // Show an isolated composition preview and its hierarchy summary.
     if(kind==AssetKind::prefab) {

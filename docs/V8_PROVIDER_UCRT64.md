@@ -50,7 +50,7 @@ cmake -S tools/v8_provider -B $build -G Ninja `
   -DNORTHSTARCPP_ENGINE_ROOT="$root" `
   -DNORTHSTARCPP_V8_ROOT="$v8" `
   -DNORTHSTARCPP_HOST_SMOKE_EXE="$root/out/scripting-api-20261114/northstarcpp_scripting_smoke.exe" `
-  -DNORTHSTARCPP_HOST_ASSETS_DLL="$root/out/scripting-api-20261114/assets_directory.dll"
+  -DNORTHSTARCPP_HOST_ASSETS_DLL="$root/out/scripting-api-20261114/AssetManager.dll"
 
 cmake --build $build --parallel 4
 ctest --test-dir $build -R northstarcpp_scripting_real_v8 --output-on-failure

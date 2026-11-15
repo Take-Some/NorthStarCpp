@@ -46,6 +46,21 @@ declare module "@northstar/engine" {
         static followDistance(): number;
         static setFollowDistance(distance: number): void;
         static setZoom(amount: number): void;
+        /** One-shot post-effect offset, metres and seconds. */
+        static shake(amplitudeMetres: number, seconds: number): void;
+        /** Teleport/shot cut: clear follow interpolation but preserve active track time. */
+        static cut(): void;
+        /** World-space pose uses radians for yaw, pitch and roll. */
+        static pushShot(
+            source: string,
+            pose: {position: Vector3; yaw: number; pitch: number;
+                   roll?: number; fovY?: number},
+            priority?: number, blendSeconds?: number): void;
+        static clearShot(source: string): void;
+        static clearShots(): void;
+        static activeShot(): string;
+        /** VFS gameplay/camera_presets.json. */
+        static applyPreset(id: string): void;
         static createViewController(options?: CameraOptions): CameraViewController;
     }
 

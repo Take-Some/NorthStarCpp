@@ -80,7 +80,7 @@ Then compile the isolated V8 C ABI 2 provider:
       -DNORTHSTARCPP_V8_SDK_ROOT=D:/NorthStarV8/sdk-15.8 ^
       -DNORTHSTARCPP_ENGINE_ROOT=%CD% ^
       -DNORTHSTARCPP_HOST_SMOKE_EXE=%CD%/out/qt-editor-clean-verify-20261114/northstarcpp_scripting_smoke.exe ^
-      -DNORTHSTARCPP_HOST_ASSETS_DLL=%CD%/out/qt-editor-clean-verify-20261114/assets_directory.dll
+      -DNORTHSTARCPP_HOST_ASSETS_DLL=%CD%/out/qt-editor-clean-verify-20261114/AssetManager.dll
 
     cmake --build D:/NorthStarV8/native-v8-provider --parallel 4
     ctest --test-dir D:/NorthStarV8/native-v8-provider --output-on-failure

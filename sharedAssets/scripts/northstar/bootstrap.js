@@ -234,6 +234,45 @@
             return engine.camera.setFollowDistance(distance);
         }
         static setZoom(amount) { return engine.camera.setZoom(amount); }
+        static shake(amplitudeMetres, seconds) {
+            return engine.camera.shake(amplitudeMetres, seconds);
+        }
+        static cut() { return engine.camera.cut(); }
+        /** Highest priority request wins; ties go to the latest source. */
+        static pushShot(source, pose, priority = 0, blendSeconds = 0.35) {
+            if (typeof source !== "string" ||
+                !/^[a-zA-Z0-9_.:-]{1,80}$/.test(source))
+                throw new TypeError("Camera shot source must be a valid identifier");
+            if (!pose || typeof pose !== "object" || !pose.position)
+                throw new TypeError("Camera shot requires a world-space pose");
+            const p = pose.position;
+            const values = [
+                p.x, p.y, p.z, pose.yaw, pose.pitch,
+                pose.roll === undefined ? 0 : pose.roll,
+                pose.fovY === undefined ? 75 : pose.fovY,
+                priority, blendSeconds
+            ];
+            if (!values.every(Number.isFinite) ||
+                !Number.isInteger(priority) || priority < -100 ||
+                priority > 100 || blendSeconds < 0 || blendSeconds > 10)
+                throw new RangeError("Invalid camera shot transform, priority or blend");
+            return engine.camera.pushShot(source, ...values);
+        }
+        static clearShot(source) {
+            if (typeof source !== "string" ||
+                !/^[a-zA-Z0-9_.:-]{1,80}$/.test(source))
+                throw new TypeError("Invalid camera shot source");
+            return engine.camera.clearShot(source);
+        }
+        static clearShots() { return engine.camera.clearShots(); }
+        static activeShot() { return engine.camera.activeShot(); }
+        /** Read a named preset from project VFS gameplay/camera_presets.json. */
+        static applyPreset(id) {
+            if (typeof id !== "string" ||
+                !/^[a-zA-Z0-9_.:-]{1,80}$/.test(id))
+                throw new TypeError("Invalid camera preset identifier");
+            return engine.camera.applyPreset(id);
+        }
         static createViewController(options = {}) {
             return new CameraViewController(options);
         }

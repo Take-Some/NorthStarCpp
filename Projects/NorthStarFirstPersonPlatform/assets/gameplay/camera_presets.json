@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "presets": [
+    {
+      "source": "cinematic.intro_wide",
+      "priority": 40,
+      "blend_seconds": 0.7,
+      "position": {
+        "x": 8.0,
+        "y": 5.0,
+        "z": -12.0
+      },
+      "rotation": {
+        "yaw_degrees": -18.0,
+        "pitch_degrees": -9.0,
+        "roll_degrees": 0.0
+      },
+      "projection": {
+        "fov_y_degrees": 65.0,
+        "near": 0.08,
+        "far": 500.0
+      }
+    },
+    {
+      "source": "cinematic.inspect",
+      "priority": 60,
+      "blend_seconds": 0.3,
+      "position": {
+        "x": 3.0,
+        "y": 2.0,
+        "z": -5.0
+      },
+      "rotation": {
+        "yaw_degrees": -25.0,
+        "pitch_degrees": -5.0,
+        "roll_degrees": 0.0
+      },
+      "projection": {
+        "fov_y_degrees": 48.0,
+        "near": 0.08,
+        "far": 500.0
+      }
+    }
+  ]
+}

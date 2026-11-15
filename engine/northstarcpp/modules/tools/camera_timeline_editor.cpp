@@ -5,6 +5,7 @@
 #include <northstarcpp/logger.hpp>
 #include <QAction>
 #include <QApplication>
+#include "../editor/qt_menu_theme.hpp"
 #include <QDockWidget>
 #include <northstarcpp/frame_clock.hpp>
 #include <QFile>
@@ -391,6 +392,8 @@ int main(int argc,char** argv) {
         } catch(...) {return 5;}
     }
     QApplication app(argc,argv);
+    northstarcpp::editor::installMenuTheme(
+        app,northstarcpp::editor::MenuTheme::Light);
     bool const smoke=app.arguments().contains("--smoke");
     std::unique_ptr<northstarcpp::Logger> process_logger;
     if(!smoke || northstarcpp::application_log_directory_overridden()) {

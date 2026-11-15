@@ -39,6 +39,8 @@
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+#include <future>
+#include <chrono>
 #include <cstdint>
 
 
@@ -106,6 +108,7 @@ struct MaterialPixelVariant {
 };
 struct MaterialDraw {
     std::shared_ptr<MaterialPixelVariant> shader_variant;
+    std::string variant_key;
     unsigned blend_mode=0;
     std::uint32_t first=0,count=0;
     MaterialParams params{};
@@ -164,6 +167,10 @@ struct RendererState {
     Com<ID3D11Buffer> authored_material,authored_camera,material_gpu_vertices;
     std::unordered_map<std::string,std::shared_ptr<MaterialPixelVariant>>
         material_shader_cache;
+    std::unordered_map<std::string,std::future<std::vector<std::uint8_t>>>
+        material_shader_pending;
+    std::unordered_set<std::string> material_shader_failed;
+    std::unordered_set<std::string> material_shader_retry;
     std::size_t material_gpu_capacity=0;
     std::vector<NorthStarMaterialVertex> material_cpu_vertices;
     std::vector<MaterialDraw> material_draws;
@@ -209,6 +216,9 @@ struct RendererState {
     void set_material_batches(NorthStarMaterialBatch const* batches,std::uint32_t count);
     void set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,
                                  std::uint32_t count);
+    std::shared_ptr<MaterialPixelVariant> material_shader_variant(
+        std::string const& prefix);
+    void resolve_material_shader_variants();
     void set_skinned_material_batches(
         NorthStarSkinnedMaterialBatch const* batches,std::uint32_t count);
     void draw_skinned_materials();

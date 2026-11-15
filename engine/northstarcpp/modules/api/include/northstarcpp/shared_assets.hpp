@@ -33,6 +33,9 @@ struct Material {
     float alpha_cutoff = 0.f;
     std::vector<MaterialParameter> parameters;
     std::vector<TextureBinding> textures;
+    // Authoring graph is an optional native YMAT kind-30 payload field.
+    // This is a C++ DTO member, not a change to the engine plugin C ABI.
+    std::string graph_source;
 };
 
 struct Vertex {

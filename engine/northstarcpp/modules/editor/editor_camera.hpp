@@ -16,14 +16,29 @@ struct EditorCamera {
     Vector3 right() const noexcept;
     Vector3 up() const noexcept;
     void look(float delta_x,float delta_y,float sensitivity=0.004f) noexcept;
+    // Editor pointer drag: cursor right turns the camera right;
+    // cursor up raises camera pitch. Separate from the game look() API.
+    void drag_look(float pointer_dx,float pointer_dy,
+                   float sensitivity=0.004f) noexcept;
     void move(float sideways,float vertical,float forward_distance) noexcept;
     // Editor fly navigation uses world-up for Q/E while forward follows
     // camera pitch. Keeps world vertical independent of the view roll.
     void fly(float sideways,float world_up,float forward_distance) noexcept;
+    // Editor-only inertial fly controls. Input is dimensionless WASD/QE;
+    // velocity is world-space, normalized diagonally, and integrated
+    // analytically across varying render frame rates.
+    bool fly_damped(float sideways,float world_up,float forward_axis,
+                    float meters_per_second,float dt,
+                    float acceleration_seconds=.085f,
+                    float deceleration_seconds=.14f) noexcept;
+    void reset_flight() noexcept { flight_velocity_={}; }
+    Vector3 flight_velocity() const noexcept {return flight_velocity_;}
     void dolly(float amount) noexcept;
     void frame(Vector3 center,float distance=14.f) noexcept;
     std::optional<ScreenPoint> project(Vector3 world,float width,float height) const noexcept;
     Ray screen_ray(float x,float y,float width,float height) const noexcept;
+private:
+    Vector3 flight_velocity_{0.f,0.f,0.f};
 };
 // Ray hit is in metres along a unit-length ray. Uses oriented, scaled boxes
 // matching the authored cube proxy; depth order resolves occlusion.

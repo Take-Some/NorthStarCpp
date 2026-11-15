@@ -7,22 +7,43 @@
 using namespace northstarcpp;
 static bool approx(float a,float b,float eps=0.002f){return std::abs(a-b)<eps;}
 int main() {
+    char const* stage="initial";
     try {
         CameraTarget t;
         t.eye={0,1.6f,0};t.yaw=0.f;t.pitch=0.f;t.ignore_object=0;
         Scene scene;
         scene.objects.push_back({"Player",{0,0,0},1.5f,0xffffff,true,2.f});
         CameraDirector camera;
+        auto check_defaults=[&](char const* step) {
+            auto const& settings=camera.settings();
+            if(std::abs(settings.third_person_height-.7f)>.0001f ||
+               std::abs(settings.third_person_distance-4.f)>.0001f) {
+                std::cerr<<"Camera settings corrupt at "<<step
+                         <<" height="<<settings.third_person_height
+                         <<" distance="<<settings.third_person_distance<<"\n";
+                return false;
+            }
+            return true;
+        };
+        if(!check_defaults("constructor"))return 96;
         auto p=camera.update(0.016f,t,&scene);
+        if(!check_defaults("first person"))return 96;
         if (!approx(p.position.y,1.6f) || !approx(p.yaw,0.f) ||
             !approx(p.fov_y_degrees,75.f))return 1;
+        stage="zoom-in";
         camera.set_zoom(1.f);
         p=camera.update(.016f,t,&scene);
         if (!(p.fov_y_degrees>55.f && p.fov_y_degrees<75.f))return 2;
-        for(int i=0;i<120;++i)p=camera.update(.016f,t,&scene);
+        for(int i=0;i<120;++i) {
+            p=camera.update(.016f,t,&scene);
+            if(!check_defaults("zoom loop"))return 96;
+        }
         if (!approx(p.fov_y_degrees,55.f))return 2;
         camera.set_zoom(0.f);
+        stage="third-person-collision";
+        if(!check_defaults("before third person"))return 96;
         camera.set_mode(CameraMode::third_person,0.f);
+        if(!check_defaults("mode transition"))return 96;
         p=camera.update(.25f,t,&scene);
         if (p.position.z>-0.3f || p.position.z<-4.5f)return 3;
         scene.objects.push_back({"Wall",{0,1,-2},1.5f,0x888888,false,0.f});
@@ -30,22 +51,26 @@ int main() {
         p=camera.update(.016f,t,&scene);
         // Occlusion constrains the camera in front of the wall.
         if (p.position.z<-1.1f || p.position.z>0.f)return 4;
+        stage="vehicle";
         camera.set_mode(CameraMode::vehicle_chase,0.f);
         scene.objects.pop_back();
         camera.reset();
         p=camera.update(.016f,t,&scene);
         if (!std::isfinite(p.position.x) || p.position.z>-6.f)return 5;
+        stage="orbit";
         camera.set_mode(CameraMode::orbit,0.f);
         camera.reset();
         auto o1=camera.update(.016f,t,&scene);
         auto o2=camera.update(.2f,t,&scene);
         if (approx(o1.position.x,o2.position.x,0.001f))return 6;
         CameraPose cp;cp.position={3,4,5};cp.yaw=0.5f;cp.fov_y_degrees=80;
+        stage="free";
         camera.set_free_pose(cp);
         camera.set_mode(CameraMode::free,0.f);
         camera.reset();
         p=camera.update(.016f,t,&scene);
         if (!approx(p.position.x,3.f) || !approx(p.fov_y_degrees,80.f))return 7;
+        stage="cinematic";
         camera.set_cinematic_pose(cp);
         camera.set_mode(CameraMode::cinematic,0.f);
         camera.reset();
@@ -67,6 +92,7 @@ int main() {
         if (!approx(halfway.position.x,5.f) ||
             !approx(track.duration(),4.f) || track.size()!=3) return 16;
         if (!approx(track.sample(99.f).position.x,20.f)) return 17;
+        stage="track";
         camera.set_track(std::move(track),true);
         camera.set_mode(CameraMode::cinematic,0.f);
         camera.reset();
@@ -88,6 +114,7 @@ int main() {
         } catch(std::invalid_argument const&){}
         // Vehicle dynamics: speed responsive FOV and orbit distance,
         // turn banking and reverse camera positioning.
+        stage="vehicle-dynamics";
         CameraSettings vehicle_settings;
         vehicle_settings.follow_smoothing=0.f;
         CameraDirector vehicle(vehicle_settings);
@@ -106,6 +133,7 @@ int main() {
         t.velocity={0,0,0};
 
         // Cinematic recording, file serializer round-trip and playback.
+        stage="replay";
         CameraReplayRecorder recorder;
         recorder.start(0.02f);
         CameraPose shot=cp;
@@ -129,6 +157,7 @@ int main() {
         if(!approx(camera.track_time(),.04f))return 26;
         try { camera.set_track_playback_rate(0.f);return 27; }
         catch(std::invalid_argument const&){}
+        stage="attachment";
         CameraDirector socket;
         t.attachment.enabled=true;
         t.attachment.world_position={1.f,2.f,3.f};
@@ -152,6 +181,7 @@ int main() {
 
         // Native transition must animate dollying both into and out of
         // third person. Wheel distance changes must use follow smoothing.
+        stage="third-person-transition";
         CameraSettings smooth_settings;
         CameraDirector smooth(smooth_settings);
         CameraTarget person;
@@ -163,7 +193,10 @@ int main() {
         if (!(approaching.position.z<0.f && approaching.position.z>-4.f))
             return 31;
         for (int i=0;i<60;++i) approaching=smooth.update(.016f,person,&scene);
-        if (!approx(approaching.position.z,-4.f,.03f)) return 32;
+        if (!approx(approaching.position.z,-4.f,.03f)) {
+            std::cerr<<"Third-person convergence z="<<approaching.position.z<<"\n";
+            return 32;
+        }
         smooth.set_mode(CameraMode::first_person,.45f);
         auto zooming_in=smooth.update(.016f,person,&scene);
         if (!(zooming_in.position.z<0.f && zooming_in.position.z>-4.f))
@@ -188,5 +221,8 @@ int main() {
         catch(std::invalid_argument const&){}
         std::cout<<"Camera system smoke passed\n";
         return 0;
-    }catch(std::exception const& e){std::cerr<<e.what()<<'\n';return 42;}
+    }catch(std::exception const& e){
+        std::cerr<<"camera_smoke stage="<<stage<<": "<<e.what()<<'\n';
+        return 42;
+    }
 }

@@ -28,6 +28,15 @@ int main(int argc, char** argv)
         catalog.favorite(created.directory, true);
         if (!catalog.list().front().favorite) return 6;
         catalog.update_description(created.directory, L"Playable test level", L"Games");
+        catalog.set_provider(created.directory,"engine.render","vulkan");
+        catalog.set_provider(created.directory,"engine.physics","jolt");
+        auto choices=catalog.inspect(created.directory).provider_choices;
+        if(choices.size()!=2 || choices.at("engine.render")!="vulkan" ||
+           choices.at("engine.physics")!="jolt")return 23;
+        bool invalid_provider=false;
+        try {catalog.set_provider(created.directory,"engine.render","../bad.dll");}
+        catch(std::invalid_argument const&) {invalid_provider=true;}
+        if(!invalid_provider)return 24;
         catalog.rename(created.directory, L"Catalog Renamed");
         auto inspected = catalog.inspect(created.directory);
         if (inspected.name != L"Catalog Renamed" ||
@@ -37,6 +46,13 @@ int main(int argc, char** argv)
         auto duplicate = catalog.duplicate(created.directory, L"Catalog Copy");
         if (duplicate.status != Project::Status::ready || catalog.list().size() != 2)
             return 8;
+        if(duplicate.provider_choices.at("engine.render")!="vulkan" ||
+           duplicate.provider_choices.at("engine.physics")!="jolt")
+            return 25;
+        catalog.set_provider(created.directory,"engine.render","");
+        if(catalog.inspect(created.directory).provider_choices.count("engine.render")!=0 ||
+           catalog.inspect(created.directory).provider_choices.at("engine.physics")!="jolt")
+            return 26;
         auto external_root = root / "External";
         fs::create_directories(external_root);
         auto external = catalog.duplicate(created.directory, L"External Copy", external_root);

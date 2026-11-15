@@ -100,11 +100,11 @@ add_custom_command(TARGET northstarcpp_scripting_v8 POST_BUILD
 # Optional real V8 integration test against the existing C ABI host executable.
 include(CTest)
 set(NORTHSTARCPP_HOST_SMOKE_EXE "" CACHE FILEPATH "Built northstarcpp_scripting_smoke.exe")
-set(NORTHSTARCPP_HOST_ASSETS_DLL "" CACHE FILEPATH "Built assets_directory.dll")
+set(NORTHSTARCPP_HOST_ASSETS_DLL "" CACHE FILEPATH "Built AssetManager.dll")
 if(BUILD_TESTING AND NORTHSTARCPP_HOST_SMOKE_EXE AND NORTHSTARCPP_HOST_ASSETS_DLL)
     if(NOT EXISTS "${NORTHSTARCPP_HOST_SMOKE_EXE}" OR
        NOT EXISTS "${NORTHSTARCPP_HOST_ASSETS_DLL}")
-        message(FATAL_ERROR "Cannot find the host smoke EXE / assets_directory DLL")
+        message(FATAL_ERROR "Cannot find the host smoke EXE / AssetManager DLL")
     endif()
     add_custom_command(TARGET northstarcpp_scripting_v8 POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different

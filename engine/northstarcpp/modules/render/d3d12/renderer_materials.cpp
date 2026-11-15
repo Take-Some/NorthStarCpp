@@ -1,5 +1,6 @@
 // Materials subsystem: independent D3D12 implementation.
 #include "renderer_private.hpp"
+#include "../shared/shader_disk_cache.hpp"
 namespace northstarcpp::render::d3d12::detail {
 std::shared_ptr<MaterialGpuTexture> RendererState::material_texture(
         NorthStarMaterialTexture const& image,bool is_srgb,
@@ -167,11 +168,10 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
         material_cpu_vertices.swap(vertices);
         material_draws.swap(draws);
     }
-ComPtr<ID3D12PipelineState> RendererState::material_graph_pipeline(
-        std::string const& prefix,unsigned blend_mode){
-        if(auto it=material_shader_cache.find(prefix);
-           it!=material_shader_cache.end())return it->second;
-        if(material_shader_cache.size()>=128)material_shader_cache.clear();
+static ComPtr<ID3D12PipelineState> create_material_graph_pso(
+    ComPtr<ID3D12Device> device,
+    ComPtr<ID3D12RootSignature> material_signature,
+    std::string const& prefix,unsigned blend_mode,bool hdr_enabled) {
         std::string const source=(hdr_enabled&&blend_mode==2?
             "#define NS_HDR_OUTPUT 1\n":"")+prefix+authored_material_shader;
         auto vs=compile_material_variant(source,"material_vs","vs_5_0");
@@ -225,12 +225,86 @@ ComPtr<ID3D12PipelineState> RendererState::material_graph_pipeline(
                 desc.BlendState.RenderTarget[i].RenderTargetWriteMask=
                     D3D12_COLOR_WRITE_ENABLE_ALL;
         }
+        // D3D12 cached pipelines are device/driver specific. Include the
+        // adapter LUID, shader source, shader targets and pipeline mode.
+        // The D3D runtime validates every cached PSO before accepting it.
+        auto const adapter=device->GetAdapterLuid();
+        std::string const diskKey="d3d12|material|ps_5_0|vs_5_0|"+
+            std::to_string(adapter.HighPart)+":"+
+            std::to_string(adapter.LowPart)+"|"+
+            std::to_string(blend_mode)+"|"+
+            (hdr_enabled?"HDR|":"LDR|")+source;
+        auto cached=shader_disk_cache::read("d3d12",diskKey);
         ComPtr<ID3D12PipelineState> pipeline;
-        check(device->CreateGraphicsPipelineState(&desc,
-            IID_PPV_ARGS(&pipeline)),"Create D3D12 Material Graph variant PSO");
-        material_shader_cache.emplace(prefix,pipeline);
+        HRESULT result=E_FAIL;
+        if(cached && !cached->empty()) {
+            desc.CachedPSO={cached->data(),cached->size()};
+            result=device->CreateGraphicsPipelineState(
+                &desc,IID_PPV_ARGS(&pipeline));
+            if(FAILED(result)) {
+                pipeline.Reset();
+                desc.CachedPSO={};
+                shader_disk_cache::erase("d3d12",diskKey);
+            }
+        }
+        if(!pipeline) {
+            check(device->CreateGraphicsPipelineState(&desc,
+                IID_PPV_ARGS(&pipeline)),
+                "Create D3D12 Material Graph variant PSO");
+            ComPtr<ID3DBlob> blob;
+            if(SUCCEEDED(pipeline->GetCachedBlob(&blob))&&blob &&
+               blob->GetBufferSize()>0)
+                shader_disk_cache::write("d3d12",diskKey,
+                    blob->GetBufferPointer(),blob->GetBufferSize());
+        }
         return pipeline;
+}
+ComPtr<ID3D12PipelineState> RendererState::material_graph_pipeline(
+        std::string const& prefix,unsigned blend_mode) {
+    // The prefix already contains validated graph defines and blend settings.
+    // HDR is included in the key to avoid stale PSOs after mode changes.
+    std::string const key=(hdr_enabled?"hdr:":"ldr:")+
+                          std::to_string(blend_mode)+":"+prefix;
+    if(auto it=material_shader_cache.find(key);
+       it!=material_shader_cache.end())return it->second;
+    if(material_pipeline_failed.count(key))return {};
+    auto pending=material_pipeline_pending.find(key);
+    if(pending!=material_pipeline_pending.end()) {
+        if(pending->second.wait_for(std::chrono::milliseconds(0))!=
+           std::future_status::ready)return {};
+        try {
+            auto pipeline=pending->second.get();
+            if(material_shader_cache.size()>=128)material_shader_cache.clear();
+            material_shader_cache.emplace(key,pipeline);
+            material_pipeline_pending.erase(pending);
+            return pipeline;
+        }catch(std::exception const& error) {
+            material_pipeline_pending.erase(pending);
+            material_pipeline_failed.insert(key);
+            std::fprintf(stderr,
+                "[WARN] D3D12 Material Graph PSO variant failed: %s\n",
+                error.what());
+            return {};
+        }
     }
+    if(material_pipeline_pending.size()>=8)return {};
+    auto context=device;
+    auto signature=material_signature;
+    bool const hdr=hdr_enabled;
+    material_pipeline_pending.emplace(key,std::async(std::launch::async,
+        [context,signature,prefix,blend_mode,hdr]() {
+            return create_material_graph_pso(
+                context,signature,prefix,blend_mode,hdr);
+        }));
+    return {}; // Keep last valid/fallback pipeline during async compile.
+}
+void RendererState::resolve_material_graph_pipelines() {
+    for(auto& draw:material_draws) {
+        if(!draw.variant_pipeline&&!draw.variant_prefix.empty())
+            draw.variant_pipeline=material_graph_pipeline(
+                draw.variant_prefix,draw.blend_mode);
+    }
+}
 void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,UINT count){
         if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES||(count&&!batches))
             throw std::invalid_argument("Invalid D3D12 Material Graph batch count");
@@ -253,6 +327,7 @@ void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batc
             auto& draw=material_draws[i];
             draw.blend_mode=item.blend_mode;
             if(item.graph_hlsl_bytes==0&&item.blend_mode==0)continue;
+            draw.variant_prefix=prefix;
             draw.variant_pipeline=material_graph_pipeline(prefix,item.blend_mode);
         }
     }

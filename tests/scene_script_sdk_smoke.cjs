@@ -19,7 +19,19 @@ const original = [
 const data = original.map(item => structuredClone(item));
 const colors = new Map();
 const animations = new Map();
+const cameraActions = [];
 const engine = {
+    camera: {
+        cut() { cameraActions.push(["cut"]); },
+        shake(amount, seconds) {
+            cameraActions.push(["shake", amount, seconds]);
+        },
+        pushShot(...values) { cameraActions.push(["pushShot", ...values]); },
+        clearShot(source) { cameraActions.push(["clearShot", source]); },
+        clearShots() { cameraActions.push(["clearShots"]); },
+        activeShot() { return "cinematic.intro"; },
+        applyPreset(id) { cameraActions.push(["applyPreset", id]); }
+    },
     scene: {
         objects(start = 0, count = 256) { return data.slice(start, start + count); },
         objectCount() { return data.length; },
@@ -44,6 +56,32 @@ const bootstrap = path.resolve(__dirname,
 vm.runInContext(fs.readFileSync(bootstrap, "utf8"), sandbox,
     {filename: bootstrap, timeout: 1500});
 const Scene = vm.runInContext("NorthStar.modules.engine.Scene", sandbox);
+const Camera = vm.runInContext("NorthStar.modules.engine.Camera", sandbox);
+Camera.cut();
+Camera.shake(0.15, 0.4);
+assert.deepEqual(cameraActions, [["cut"], ["shake", 0.15, 0.4]]);
+Camera.pushShot("cinematic.intro", {
+    position:{x:10,y:3,z:-8}, yaw:.25,pitch:-.1,fovY:62
+},80,.25);
+Camera.applyPreset("cinematic.wide");
+assert.equal(Camera.activeShot(), "cinematic.intro");
+Camera.clearShot("cinematic.intro");
+Camera.clearShots();
+assert.deepEqual(cameraActions.slice(2), [
+    ["pushShot","cinematic.intro",10,3,-8,.25,-.1,0,62,80,.25],
+    ["applyPreset","cinematic.wide"],
+    ["clearShot","cinematic.intro"],
+    ["clearShots"]
+]);
+assert.throws(() => Camera.pushShot("invalid/path", {
+    position:{x:0,y:0,z:0},yaw:0,pitch:0
+}),/source/);
+assert.throws(() => Camera.pushShot("cinematic.intro", {
+    position:{x:NaN,y:0,z:0},yaw:0,pitch:0
+}),/transform/);
+assert.throws(() => Camera.pushShot("cinematic.intro", {
+    position:{x:0,y:0,z:0},yaw:0,pitch:0
+},101),/priority/);
 assert.equal(Scene.objectCount(), 4);
 assert.equal(Scene.get(1).name, "Explorer");
 assert.equal(Scene.get(999), null);
@@ -75,4 +113,4 @@ assert.throws(() => Scene.findByName(""), /name/);
 assert.throws(() => Scene.nearby({x: NaN, y: 0, z: 0}, 10), /sphere/);
 assert.throws(() => Scene.moveStatic(1, {x: Infinity, y: 0, z: 0}), /position/);
 assert.throws(() => Scene.setColor(2, 0x1000000), /RGB/);
-console.log("PASS: scene SDK search, paging, nearby and static edits");
+console.log("PASS: scene SDK queries, camera cut/shake and static edits");

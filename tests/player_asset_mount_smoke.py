@@ -58,7 +58,7 @@ def main() -> int:
 
         base = [str(player), "--runtime-init-smoke", "--scene", str(scene)]
         # This EXACT misuse of --shared-assets used to raise the message box
-        # from assets_directory.dll and was invisible to --check-scene.
+        # from AssetManager.dll and was invisible to --check-scene.
         launch(base + ["--shared-assets", str(assets)],
                cwd=player.parent,env=env)
         # Canonical-equivalent paths must not mount twice, either.

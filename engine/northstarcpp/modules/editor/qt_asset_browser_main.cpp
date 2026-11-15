@@ -1,6 +1,7 @@
 // NorthStar native Qt 6 Content Browser host.
 // Reusable QtContentBrowser can be docked in a future Qt editor QMainWindow.
 #include "qt_content_browser.hpp"
+#include "qt_menu_theme.hpp"
 #include "qt_asset_card_delegate.hpp"
 #include "qt_prefab_preview.hpp"
 #include <northstarcpp/scene.hpp>
@@ -40,6 +41,8 @@ int main(int argc,char** argv) {
     QApplication app(argc,argv);
     app.setApplicationName("NorthStar Content Browser");
     app.setOrganizationName("Kayla's Systems");
+    northstarcpp::editor::installMenuTheme(
+        app,northstarcpp::editor::MenuTheme::Dark);
     QCommandLineParser parser;
     parser.setApplicationDescription("Native, cross-platform NorthStar asset browser");
     parser.addHelpOption();

@@ -3,6 +3,7 @@
 // Updated: 2026
 
 #include "module_loader.hpp"
+#include <northstarcpp/provider_identity.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
 #include <algorithm>
@@ -246,6 +247,17 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
     }
 
     bool const script = api_version == NORTHSTARCPP_SCRIPT_SERVICE_ABI;
+    auto provider_variable=environment_variable(capability_id,false);
+    provider_variable.replace(provider_variable.size()-7,7,"_PROVIDER");
+    auto const preferred = !script && preferred_provider_id.empty()
+        ? lowercase(environment_path(provider_variable).u8string()) : std::string{};
+    auto const explicit_choice=preferred_provider_id.empty()?
+        preferred:preferred_provider_id;
+    auto matching_choice=[&](NorthStarModule const* module) {
+        if(!module)return false;
+        if(explicit_choice.empty())return true;
+        return canonical_provider_id(module->provider,capability_id)==explicit_choice;
+    };
     auto requested = environment_path(environment_variable(capability_id, script));
     fs::path executable;
     Tree bootstrap;
@@ -268,6 +280,12 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
         auto const query = reinterpret_cast<NorthStarModuleQuery>(
             find_symbol(library.get(), "northstar_module_query"));
         auto const* module = match(query);
+        if(module && !matching_choice(module))
+            throw std::runtime_error("Plugin path override conflicts with selected provider '"+
+                explicit_choice+"' for "+capability_id+": "+path.u8string());
+        if(!query && mode==Mode::legacy && !explicit_choice.empty())
+            throw std::runtime_error("Legacy module cannot confirm selected provider for "+
+                capability_id);
         if (module || (!query && mode == Mode::legacy)) {
             descriptor = module;
             selected_query = query;
@@ -279,16 +297,14 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
     }
 
     auto const directory = plugin_directory(executable, bootstrap);
-    auto const preferred = !script && capability_id == NORTHSTARCPP_CAPABILITY_PHYSICS
-        ? lowercase(environment_path("NORTHSTARCPP_PHYSICS_PROVIDER").u8string()) : std::string{};
+    // Per-process project preferences are applied to all engine.* capabilities
+    // by the Project Browser. A direct Module(preferred_provider) request is
+    // authoritative, so diagnostics may still inspect another implementation.
     auto accepts = [&](NorthStarModule const* module) {
-        if (!module || (!preferred.empty() && lowercase(module->provider) != preferred))
-            return false;
-        if (preferred_provider_id.empty()) return true;
-        auto const name = lowercase(module->provider);
-        return name == preferred_provider_id ||
-            (preferred_provider_id == "d3d11" && name == "direct3d 11") ||
-            (preferred_provider_id == "d3d12" && name == "direct3d 12");
+        if(!module)return false;
+        auto const id=canonical_provider_id(module->provider,capability_id);
+        if(!preferred.empty()&&id!=preferred)return false;
+        return preferred_provider_id.empty()||id==preferred_provider_id;
     };
     for (auto const& candidate : external_candidates(directory)) {
         std::unique_ptr<void, CloseModule> library(load_module(candidate));

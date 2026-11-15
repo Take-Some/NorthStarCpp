@@ -108,3 +108,36 @@ does not rely on a global Qt installation.
 The current cards are generated from project metadata with Font Awesome
 icons. Actual project-scene thumbnail renderers are a separate future
 feature; the project catalog does not currently expose a thumbnail API.
+
+## Engine API provider selection (2026-11-15)
+
+The Qt Project Browser offers project-scoped **ENGINE API PROVIDERS** controls
+when multiple ABI-compatible implementations of an `engine.*` capability are
+available. The list is based on live validated module exports (external DLLs)
+and the builtin inventory. It includes renderer (D3D11 / D3D12 / experimental
+Vulkan) and physics (Bullet / Jolt) when installed.
+
+A project may persist choices in `northstarcpp.project.json`:
+
+```json
+"providers": {"engine.render":"d3d12","engine.physics":"jolt"}
+```
+
+A missing entry means **Automatic**, retaining the established render
+fallback. When opening a project with unselected multi-provider APIs, the
+browser prompts for a choice. Choices are passed only to the child Editor via
+`NORTHSTARCPP_RENDER_PROVIDER`, `NORTHSTARCPP_PHYSICS_PROVIDER`, and their
+`engine.*` equivalents; global Windows variables are never overwritten.
+Explicit selections must resolve to the chosen provider rather than silently
+using another. Unavailable selections are highlighted and block launch.
+
+The runtime and browser use the same normalized provider identity contract.
+The provider's advertised ABI and function table are checked before listing;
+this does not guarantee hardware support or feature parity.
+
+Details and QA evidence:
+`docs/NORTHSTAR_PROJECT_BROWSER_PROVIDER_SELECTION_2026-11-15.md`.
+
+The updated isolated QA browser `out/project-manager-qt/qa_project_browser_provider_choices.exe`
+passed `--smoke`; final official build/release packaging still require
+an uncontended full build.

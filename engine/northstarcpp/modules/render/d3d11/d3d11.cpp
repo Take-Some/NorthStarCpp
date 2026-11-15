@@ -1,5 +1,8 @@
 // D3D11 engine.render provider ABI remains version 5.
 #include "renderer_private.hpp"
+#include <northstarcpp/render_features_api.h>
+#include <northstarcpp/render_device_api.h>
+#include <wrl/client.h>
 namespace {
 using namespace northstarcpp::module_provider;
 using Renderer = northstarcpp::render::d3d11::detail::RendererState;
@@ -114,6 +117,43 @@ int set_character_pose(void* renderer, NorthStarCharacterVertex const* data, std
 const NorthStarRenderCharacterApi character_api{
     NORTHSTARCPP_RENDER_CHARACTER_ABI, set_character_model, set_character_pose};
 const NorthStarRenderApi api{create, destroy, draw, set_sky};
+int read_actual_gpu(void* renderer,NorthStarRenderDeviceInfo* result) {
+    return guarded([&] {
+        if(!renderer||!result)throw std::invalid_argument("Invalid GPU device query");
+        auto* state=static_cast<Renderer*>(renderer);
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+        if(FAILED(state->device.get()->QueryInterface(IID_PPV_ARGS(&dxgi))))
+            throw std::runtime_error("D3D11 device has no IDXGIDevice");
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        if(FAILED(dxgi->GetAdapter(&adapter)))
+            throw std::runtime_error("D3D11 cannot resolve active adapter");
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter1;
+        if(FAILED(adapter.As(&adapter1)))
+            throw std::runtime_error("D3D11 cannot identify adapter type");
+        DXGI_ADAPTER_DESC1 desc{};
+        if(FAILED(adapter1->GetDesc1(&desc)))
+            throw std::runtime_error("D3D11 GetDesc1 failed");
+        *result={};
+        result->abi_version=NORTHSTARCPP_RENDER_DEVICE_ABI;
+        result->struct_size=sizeof(*result);
+        result->backend=NORTHSTARCPP_RENDER_DEVICE_D3D11;
+        result->software=(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)?1u:0u;
+        result->vendor_id=desc.VendorId;result->device_id=desc.DeviceId;
+        result->api_version=static_cast<std::uint32_t>(state->device->GetFeatureLevel());
+        if(WideCharToMultiByte(CP_UTF8,0,desc.Description,-1,
+            result->adapter_name_utf8,sizeof(result->adapter_name_utf8),
+            nullptr,nullptr)==0)
+            throw std::runtime_error("D3D11 adapter name conversion failed");
+    });
+}
+const NorthStarRenderDeviceApi device_api{
+    NORTHSTARCPP_RENDER_DEVICE_ABI,read_actual_gpu};
+const NorthStarRenderFeaturesApi features_api{
+    NORTHSTARCPP_RENDER_FEATURES_ABI,sizeof(NorthStarRenderFeaturesApi),
+    NS_RENDER_FEATURE_COLORED_GEOMETRY |
+    NS_RENDER_FEATURE_TEXTURED_MATERIALS | NS_RENDER_FEATURE_MATERIAL_GRAPH |
+    NS_RENDER_FEATURE_GPU_SKINNING | NS_RENDER_FEATURE_WORLD_SURFACES |
+    NS_RENDER_FEATURE_CHARACTER};
 const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
     NORTHSTARCPP_CAPABILITY_RENDER, "Direct3D 11", "5.0.0", NORTHSTARCPP_RENDER_ABI,
     sizeof(api), &api, last_error};
@@ -123,6 +163,15 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if(version==NORTHSTARCPP_RENDER_FEATURES_MODULE_ABI) {
+        static const NorthStarModule ext{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "Direct3D 11","5.0.0",
+            NORTHSTARCPP_RENDER_FEATURES_MODULE_ABI,sizeof(features_api),
+            &features_api,last_error};
+        return match(ext,host,capability,version);
+    }
+
     if (version == NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
@@ -136,6 +185,14 @@ extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
             "Direct3D 11","5.4.0",NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI,
             sizeof(materials_api_v2),&materials_api_v2,last_error};
         return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_DEVICE_MODULE_ABI) {
+        static const NorthStarModule info{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"Direct3D 11","5.0.0",
+            NORTHSTARCPP_RENDER_DEVICE_MODULE_ABI,
+            sizeof(device_api),&device_api,last_error};
+        return match(info,host,capability,version);
     }
     if (version == NORTHSTARCPP_RENDER_MATERIALS_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule),

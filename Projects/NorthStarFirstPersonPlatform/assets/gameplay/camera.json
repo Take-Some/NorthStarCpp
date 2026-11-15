@@ -9,7 +9,9 @@
   "third_person": {
     "distance": 4.2,
     "height": 0.75,
-    "shoulder_offset": 0.35
+    "shoulder_offset": 0.35,
+    "lookahead_seconds": 0.12,
+    "lookahead_max": 1.5
   },
   "vehicle": {
     "distance": 7.5,
@@ -26,10 +28,13 @@
   },
   "smoothing": {
     "seconds": 0.14,
-    "teleport_cut_distance": 25.0
+    "teleport_cut_distance": 25.0,
+    "spring_frequency_hz": 2.6,
+    "lookahead_seconds": 0.12
   },
   "collision": {
     "radius": 0.22,
-    "padding": 0.08
+    "padding": 0.08,
+    "restore_seconds": 0.1
   }
 }

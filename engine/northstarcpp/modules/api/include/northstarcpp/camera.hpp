@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace northstarcpp {
 class AssetStore;
@@ -48,6 +49,18 @@ struct CameraSettings {
     float aimed_fov_y = 55.f;
     float near_plane = 0.08f;
     float far_plane = 500.f;
+
+    // Frame-rate-independent follow response. A zero spring frequency keeps
+    // the established exponential follow behavior for existing projects.
+    float follow_spring_frequency_hz = 0.f;
+    // Predictive framing, filtered independently of the camera pose to
+    // avoid camera snaps when vehicle / character speed changes.
+    float third_person_lookahead_seconds = 0.12f;
+    float third_person_lookahead_max = 1.5f;
+    float lookahead_damping_seconds = 0.12f;
+    // Camera pulls toward the target immediately when obstructed, but
+    // restores its orbit distance smoothly once clearance returns.
+    float collision_restore_seconds = 0.10f;
 };
 
 // Engine animation graph can supply a world-space camera/head socket pose
@@ -70,6 +83,22 @@ struct CameraTarget {
     bool reversing = false;
     std::size_t ignore_object = std::numeric_limits<std::size_t>::max();
 };
+
+// One fixed world-space cinematic camera request. Priority arbitration is
+// engine-owned; gameplay cameras remain active when the stack is empty.
+struct CameraShot {
+    std::string source;  // unique validated source/preset id
+    CameraPose pose{};
+    int priority=0;      // [-100,100], higher number wins
+    float blend_seconds=.35f;
+};
+
+void validate_camera_shot(CameraShot const& shot);
+// Game/Editor consume the same bounded JSON preset contract through VFS.
+std::vector<CameraShot> parse_camera_presets(std::string const& json);
+std::string serialize_camera_presets(std::vector<CameraShot> const& shots);
+std::vector<CameraShot> load_camera_presets(AssetStore const& assets,
+    std::string const& virtual_path="gameplay/camera_presets.json");
 
 // Optional project tuning; configuration bytes must come from the active VFS
 // provider, not a direct filesystem read in camera gameplay.
@@ -103,6 +132,16 @@ public:
     bool has_track() const noexcept { return bool(track_); }
     float track_time() const noexcept { return track_time_; }
     void shake(float amplitude_metres, float duration_seconds);
+    // Arbitration: higher priority wins; most recently updated wins ties.
+    // A source is updated in-place, never duplicated. At most 16 active
+    // requests, regardless of which JS/plugin subsystem owns the source.
+    void push_shot(CameraShot shot);
+    void clear_shot(std::string const& source);
+    void clear_shots() noexcept;
+    std::string const& active_shot() const noexcept {return active_shot_;}
+    std::size_t shot_count() const noexcept {return shots_.size();}
+    // Immediate view cut (teleport/shot) without rewinding a cinematic track.
+    void cut() noexcept;
     void reset();
     CameraPose update(float dt, CameraTarget const& target, Scene const* world = nullptr,
                       PhysicsScene const* physics = nullptr);
@@ -125,6 +164,9 @@ private:
     bool track_playing_ = true;
     float track_rate_ = 1.f;
     Vector3 previous_eye_{0.f, 0.f, 0.f};
+    Vector3 follow_velocity_{0.f, 0.f, 0.f};
+    Vector3 lookahead_offset_{0.f, 0.f, 0.f};
+    float collision_limit_ = -1.f;
     bool initialized_ = false;
     float transition_seconds_ = 0.f;
     float transition_elapsed_ = 0.f;
@@ -134,6 +176,14 @@ private:
     float shake_remaining_ = 0.f;
     float shake_duration_ = 0.f;
     float shake_amplitude_ = 0.f;
+    struct SequencedShot {
+        CameraShot shot;
+        std::uint64_t order=0;
+    };
+    std::vector<SequencedShot> shots_;
+    std::string active_shot_;
+    std::uint64_t shot_order_=0;
+    float last_shot_blend_seconds_=0.f;
 };
 
 } // namespace northstarcpp

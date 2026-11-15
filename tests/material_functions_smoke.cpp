@@ -52,10 +52,13 @@ int main(int argc,char** argv) {
               "Nested Material Function did not compile");
         northstarcpp::AssetStore assets;
         assets.mount_directory("",root);
-        auto runtime=northstarcpp::load_material_definition(
-            assets,"Materials/SoftTintDemo.material.json");
-        check(runtime.graph_shader_defines.find("lerp(")!=std::string::npos,
-              "Actual AssetStore VFS path failed nested Material Function loading");
+        auto native=northstarcpp::load_material_definition(
+            assets,"Materials/SoftTintDemo.ymat");
+        check(native.graph_shader_defines.find("lerp(")!=std::string::npos,
+              "Native NEF8 YMAT Material Graph did not expand Material Functions");
+        check(native.roughness>0.44f && native.roughness<0.46f,
+              "Native YMAT roughness lost on import");
+        std::cout<<"Native YMAT Material Functions through VFS: PASS\\n";
         auto multi=R"({
           "nodes":[
             {"id":"c","op":"color","value":[0.2,0.4,0.6,0.8]},

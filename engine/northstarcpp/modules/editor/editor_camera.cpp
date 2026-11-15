@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Kayla's Systems — Kayla Verner.
 #include "editor_camera.hpp"
 #include "editor_tools.hpp"
+#include <northstarcpp/camera_dynamics.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -33,6 +34,14 @@ void EditorCamera::look(float dx,float dy,float sensitivity) noexcept {
     pose.yaw=std::remainder(pose.yaw+dx*sensitivity,2.f*pi);
     pose.pitch=std::clamp(pose.pitch-dy*sensitivity,-1.52f,1.52f);
 }
+void EditorCamera::drag_look(
+    float pointer_dx,float pointer_dy,float sensitivity) noexcept
+{
+    // Positive Qt X means moving the cursor right: turn the camera right.
+    // Qt Y grows down, and look() already converts it to upward-positive
+    // pitch; do not invert either axis at this call site.
+    look(pointer_dx,pointer_dy,sensitivity);
+}
 void EditorCamera::move(float sideways,float vertical,float forward_distance) noexcept {
     pose.position=plus(pose.position,plus(mul(right(),sideways),
         plus(mul(up(),vertical),mul(forward(),forward_distance))));
@@ -44,6 +53,58 @@ void EditorCamera::fly(float sideways,float world_up,
     Vector3 const direction=plus(mul(right(),sideways),
         plus(Vector3{0.f,world_up,0.f},mul(forward(),forward_distance)));
     pose.position=plus(pose.position,direction);
+}
+bool EditorCamera::fly_damped(
+    float sideways,float world_up,float forward_axis,
+    float meters_per_second,float dt,float acceleration_seconds,
+    float deceleration_seconds) noexcept {
+    if(!std::isfinite(sideways)||!std::isfinite(world_up)||
+       !std::isfinite(forward_axis)||!std::isfinite(meters_per_second)||
+       !std::isfinite(dt)||!std::isfinite(acceleration_seconds)||
+       !std::isfinite(deceleration_seconds) ||
+       dt<=0.f || dt>0.25f || meters_per_second<0.f ||
+       meters_per_second>10000.f || acceleration_seconds<0.f ||
+       acceleration_seconds>10.f || deceleration_seconds<0.f ||
+       deceleration_seconds>10.f)
+        return false;
+    auto const magnitude=std::hypot(sideways,world_up,forward_axis);
+    if(!std::isfinite(magnitude))return false;
+    auto const scale=magnitude>1.f?1.f/magnitude:1.f;
+    // Exactly match the existing fly() basis: right, absolute up, forward.
+    auto const direction=plus(mul(right(),sideways*scale),
+        plus(Vector3{0.f,world_up*scale,0.f},
+             mul(forward(),forward_axis*scale)));
+    auto const wanted=mul(direction,meters_per_second);
+    auto const finite_bounded=[](Vector3 v,float max_abs) {
+        return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z) &&
+               std::abs(v.x)<=max_abs && std::abs(v.y)<=max_abs &&
+               std::abs(v.z)<=max_abs;
+    };
+    // A loaded scene or stale provider must never let invalid inertia
+    // teleport the Editor viewport arbitrarily far outside the map.
+    if(!finite_bounded(flight_velocity_,10000.f))flight_velocity_={};
+    if(!finite_bounded(wanted,10000.f))return false;
+    auto const tau=magnitude>0.f?acceleration_seconds:deceleration_seconds;
+    auto const alpha=camera_dynamics::exponential_alpha(dt,tau);
+    auto const before=flight_velocity_;
+    flight_velocity_=plus(mul(before,1.f-alpha),mul(wanted,alpha));
+    // Integrate the full velocity curve, rather than stepping using only
+    // the end-of-frame velocity. Constant input stays consistent at 30/120 FPS.
+    auto const offset=mul(plus(before,mul(wanted,-1.f)),tau*alpha);
+    auto const displacement=plus(mul(wanted,dt),offset);
+    if(magnitude==0.f && dot(flight_velocity_,flight_velocity_)<
+                           1.e-8f)flight_velocity_={};
+    auto const travelled=dot(displacement,displacement);
+    if(!finite_bounded(flight_velocity_,10000.f) ||
+       !finite_bounded(displacement,meters_per_second*dt+1.e-3f)) {
+        flight_velocity_={};
+        return false;
+    }
+    if(travelled>1.e-12f) {
+        pose.position=plus(pose.position,displacement);
+        return true;
+    }
+    return false;
 }
 void EditorCamera::dolly(float amount) noexcept {
     if(std::isfinite(amount))move(0.f,0.f,std::clamp(amount,-5000.f,5000.f));

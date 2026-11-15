@@ -47,6 +47,9 @@ MaterialPreviewSource loadMaterialPreviewSource(
         throw std::runtime_error("Unsafe material entry");
     auto materials=shared_assets::load_materials_from_bytes(
         readFile(root,library),library);
+    if(selected.empty() && materials.size()!=1)
+        throw std::runtime_error(
+            "YMAT is a material library; select a named material entry");
     auto it=selected.empty()?materials.begin():
         std::find_if(materials.begin(),materials.end(),
             [&](auto const& item){return item.name==selected;});

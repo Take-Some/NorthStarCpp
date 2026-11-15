@@ -1,5 +1,6 @@
 #include "qt_material_graph_editor.hpp"
 #include "qt_material_authoring.hpp"
+#include "qt_material_function_editor.hpp"
 #include <QFile>
 #include <QFileInfo>
 #include <northstarcpp/material.hpp>
@@ -63,6 +64,7 @@ QString nodeTitle(QJsonObject const& node) {
     if(op=="parameter")return "Parameter: "+node.value("parameter").toString();
     if(op=="texture")return "Texture: "+node.value("slot").toString();
     if(op=="function")return "Function: "+QFileInfo(node.value("path").toString()).completeBaseName()+" / "+node.value("output").toString();
+    if(op=="function_input")return "Input: "+node.value("name").toString();
     if(op=="scalar")return "Scalar: "+QString::number(node.value("value").toDouble(),'g',4);
     if(op=="color")return "Color Constant";
     if(op=="vector2")return "Vector2 Constant";
@@ -280,6 +282,16 @@ QStringList MaterialGraphEditor::nodeInputs(QJsonObject const& node) const {
 }
 QString MaterialGraphEditor::nodePinType(
     QJsonObject const& node,QString const& input) const {
+    if(node.value("op").toString()=="function_input") {
+        for(auto const& raw:functionDefinition_.value("inputs").toArray()) {
+            auto pin=raw.toObject();
+            if(pin.value("name").toString()!=node.value("name").toString())continue;
+            QString const type=pin.value("type").toString();
+            return type=="scalar"?"Scalar":type=="vector2"?"Vector2":
+                   type=="vector3"?"Vector3":type=="vector4"?"Vector4":"Numeric";
+        }
+        return "Numeric";
+    }
     if(node.value("op").toString()!="function")return "Numeric";
     auto const details=functionDescriptor(node.value("path").toString());
     auto const field=input.isEmpty()?"outputs":"inputs";
@@ -348,7 +360,10 @@ MaterialGraphEditor::MaterialGraphEditor(QJsonObject const& graph,QWidget* paren
     connect(groupButton,&QPushButton::clicked,this,[this]{createCommentGroup();});
     connect(back,&QPushButton::clicked,this,[this]{undo();});
     connect(forward,&QPushButton::clicked,this,[this]{redo();});
-    connect(reset,&QPushButton::clicked,this,[this]{commit(starter());});
+    connect(reset,&QPushButton::clicked,this,[this] {
+        if(functionMode_)setFunctionDocument(functionDefinition_,functionReference_);
+        else commit(starter());
+    });
     connect(enable,&QPushButton::clicked,this,[this] {
         enabled_=true;
         emit graphChanged();
@@ -384,9 +399,91 @@ MaterialGraphEditor::MaterialGraphEditor(QJsonObject const& graph,QWidget* paren
 QJsonObject MaterialGraphEditor::graph() const {
     return enabled_?withPositions():QJsonObject{};
 }
+void MaterialGraphEditor::setGraph(QJsonObject const& graph) {
+    if(functionMode_)
+        throw std::invalid_argument("Cannot apply material document to Function editor");
+    document_=graph.isEmpty()?starter():graph;
+    enabled_=!graph.isEmpty();
+    undo_.clear();
+    redo_.clear();
+    draw();
+    emit graphChanged();
+}
+QStringList MaterialGraphEditor::outputNames() const {
+    if(!functionMode_)return materialOutputs;
+    QStringList names;
+    for(auto const& value:functionDefinition_.value("outputs").toArray())
+        names.append(value.toObject().value("name").toString());
+    return names;
+}
+QString MaterialGraphEditor::outputType(QString const& name) const {
+    if(!functionMode_)
+        return name=="roughness"||name=="metallic"||name=="opacity"?
+            "Scalar":"Vector4";
+    for(auto const& value:functionDefinition_.value("outputs").toArray()) {
+        auto pin=value.toObject();
+        if(pin.value("name").toString()!=name)continue;
+        auto type=pin.value("type").toString();
+        return type=="scalar"?"Scalar":type=="vector2"?"Vector2":
+               type=="vector3"?"Vector3":type=="vector4"?"Vector4":"Numeric";
+    }
+    return "Numeric";
+}
+void MaterialGraphEditor::setFunctionDocument(
+    QJsonObject const& function,std::string reference) {
+    if(function.value("schema").toString()!="northstar.material-function.v1")
+        throw std::invalid_argument("Invalid Material Function graph schema");
+    functionMode_=true;
+    functionReference_=std::move(reference);
+    functionDefinition_=function;
+    QJsonObject outputs;
+    for(auto const& raw:function.value("outputs").toArray()) {
+        auto pin=raw.toObject();
+        outputs[pin.value("name").toString()]=pin.value("node").toString();
+    }
+    // Imported functions may have no canvas coordinates. Preserve their
+    // IDs and references: the compiler treats the same nodes as executable.
+    auto nodes=function.value("nodes").toArray();
+    for(int i=0;i<nodes.size();++i) {
+        auto node=nodes[i].toObject();
+        if(!node.contains("x"))node["x"]=-220.+(i%4)*235.;
+        if(!node.contains("y"))node["y"]=45.+(i/4)*150.;
+        nodes[i]=node;
+    }
+    document_=QJsonObject{{"nodes",nodes},{"outputs",outputs}};
+    if(function.contains("groups"))document_["groups"]=function.value("groups");
+    undo_.clear();redo_.clear();
+    enabled_=true;
+    draw();
+    emit graphChanged();
+    setMessage("Material Function graph: connect typed inputs to output pins.");
+}
+QJsonObject MaterialGraphEditor::functionDocument() const {
+    if(!functionMode_)return {};
+    QJsonObject function=functionDefinition_;
+    auto doc=withPositions();
+    function["nodes"]=doc.value("nodes").toArray();
+    auto outputs=function.value("outputs").toArray();
+    auto map=doc.value("outputs").toObject();
+    for(int i=0;i<outputs.size();++i) {
+        auto pin=outputs[i].toObject();
+        pin["node"]=map.value(pin.value("name").toString()).toString();
+        outputs[i]=pin;
+    }
+    function["outputs"]=outputs;
+    if(doc.contains("groups"))function["groups"]=doc.value("groups");
+    else function.remove("groups");
+    return function;
+}
 bool MaterialGraphEditor::validate(QString* reason) const {
     if(!enabled_)return true;
     try {
+        if(functionMode_) {
+            validateMaterialFunctionDocument(
+                functionDocument(),functionRoot_,functionReference_);
+            if(reason)reason->clear();
+            return true;
+        }
         auto data=QJsonDocument(withPositions()).toJson(QJsonDocument::Compact);
         (void)northstarcpp::compile_material_graph_with_functions(
             data.toStdString(),[this](std::string const& reference) {
@@ -527,14 +624,17 @@ void MaterialGraphEditor::draw() {
         box->setToolTip("Double click to edit; Delete removes selected node");
         auto* bar=new QGraphicsRectItem(0,0,212,30,box);
         bar->setPen(Qt::NoPen);
-        QColor barColor=op=="texture"?QColor("#406875"):
+        QColor barColor=op=="function_input"?QColor("#366b61"):
+           op=="function"?QColor("#69527e"):
+           op=="texture"?QColor("#406875"):
           op=="parameter"?QColor("#5b587b"):
           op=="color"||op=="scalar"?QColor("#686147"):QColor("#345b68");
         bar->setBrush(barColor);
         addText(box,nodeTitle(item).left(28),9,6);
         addText(box,id,12,height-22,QColor("#91a9bc"));
         addPin(box,id,{},true,212,44,
-               op=="function"?nodePinType(item,{}):sourceTypeLabel(item));
+               op=="function"||op=="function_input"?
+               nodePinType(item,{}):sourceTypeLabel(item));
         for(int j=0;j<in.size();++j) {
             qreal y=44+j*28;
             QString required=op=="function"?nodePinType(item,in[j]):
@@ -561,20 +661,21 @@ void MaterialGraphEditor::draw() {
             grouped.insert(id);
         }
     }
-    // The material output is not itself a shader node and cannot be deleted.
-    auto* output=scene_->addRect(0,0,220,220,
+    // Material Function output pins are derived from the selected asset's
+    // typed signature; material outputs remain the existing five slots.
+    auto names=outputNames();
+    auto* output=scene_->addRect(0,0,220,
+        std::max(95,65+30*int(names.size())),
         QPen(QColor("#cba55f"),1.7),QBrush(QColor("#302d31")));
     output->setPos(625,80);
     output->setZValue(2);
     auto* bar=new QGraphicsRectItem(0,0,220,37,output);
     bar->setPen(Qt::NoPen);bar->setBrush(QColor("#80653b"));
-    addText(output,"Material Output",14,9);
-    for(int i=0;i<materialOutputs.size();++i) {
+    addText(output,functionMode_?"Function Outputs":"Material Output",14,9);
+    for(int i=0;i<names.size();++i) {
         int y=60+i*30;
-        addPin(output,{},materialOutputs[i],false,0,y,
-               materialOutputs[i]=="roughness"||materialOutputs[i]=="metallic"||
-               materialOutputs[i]=="opacity"?"Scalar":"Vector4");
-        addText(output,QString(materialOutputs[i]).replace('_',' ').toUpper(),14,y-11);
+        addPin(output,{},names[i],false,0,y,outputType(names[i]));
+        addText(output,names[i].toUpper(),14,y-11);
     }
     refreshWires();
     if(search_)highlightSearch(search_->text());
@@ -606,7 +707,7 @@ void MaterialGraphEditor::refreshWires() {
         }
     }
     auto outputs=document_.value("outputs").toObject();
-    for(auto const& field:materialOutputs) {
+    for(auto const& field:outputNames()) {
         auto source=outputs.value(field).toString();
         if(!source.isEmpty())wire(source,{},field);
     }
@@ -667,9 +768,30 @@ void MaterialGraphEditor::connectPins(int a,int b) {
         }
         next["nodes"]=nodes;
     }
-    if(!destination.node.isEmpty()) {
+    if(!destination.node.isEmpty() || functionMode_) {
         QJsonArray const nodes=next.value("nodes").toArray();
-        int const sourceWidth=estimatedWidth(nodes,source.node);
+        int sourceWidth=estimatedWidth(nodes,source.node);
+        if(sourceWidth==0) {
+            for(auto const& raw:nodes) {
+                auto const src=raw.toObject();
+                if(src.value("id").toString()!=source.node)continue;
+                auto type=nodePinType(src,{});
+                sourceWidth=type=="Scalar"?1:type=="Vector2"?2:
+                            type=="Vector3"?3:type=="Vector4"?4:0;
+                break;
+            }
+        }
+        if(destination.node.isEmpty()) {
+            QString const to=outputType(destination.input);
+            int const expected=to=="Scalar"?1:to=="Vector2"?2:
+                               to=="Vector3"?3:to=="Vector4"?4:0;
+            if(expected>0 && sourceWidth>0 && sourceWidth!=expected) {
+                setMessage("Function output type mismatch. Insert an explicit Cast.",true);
+                return;
+            }
+            commit(next);
+            return;
+        }
         QJsonObject target;
         for(auto const& raw:nodes) {
             if(raw.toObject().value("id").toString()==destination.node) {
@@ -823,6 +945,16 @@ void MaterialGraphEditor::deleteSelected() {
     if(selection.isEmpty()) {
         ungroupSelected();
         return;
+    }
+    if(functionMode_) {
+        for(auto const& raw:document_.value("nodes").toArray()) {
+            auto item=raw.toObject();
+            if(selection.contains(item.value("id").toString()) &&
+               item.value("op").toString()=="function_input") {
+                setMessage("Function input nodes are managed by the signature editor.",true);
+                return;
+            }
+        }
     }
     auto next=withPositions();
     QJsonArray nodes;

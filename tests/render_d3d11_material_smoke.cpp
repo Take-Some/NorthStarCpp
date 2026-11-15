@@ -11,6 +11,8 @@
 #endif
 #include <windows.h>
 #include <array>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -219,9 +221,85 @@ int main(int argc,char** argv) {
         require(material_v2->set_batches_v2(renderer,&variant,1),
             module->last_error()?module->last_error():"Cannot compile graph variant");
         pixels.fill(0); // v2 must also copy all bytes into provider-owned storage.
+        // The graph variant is compiled asynchronously. First frames may
+        // render the last valid/base PBR pipeline. Wait for an actual green
+        // GPU pixel readback; never confuse an accepted batch with a ready PSO.
         frame.verify_pixels=3;
-        require(api->draw(renderer,&frame),
-            module->last_error()?module->last_error():"Material Graph GPU readback failed");
+        bool variant_ready=false;
+        auto const deadline=std::chrono::steady_clock::now()+
+                            std::chrono::seconds(14);
+        unsigned frames_waited=0;
+        while(std::chrono::steady_clock::now()<deadline) {
+            ++frames_waited;
+            if(api->draw(renderer,&frame)) {
+                variant_ready=true;
+                break;
+            }
+            auto const* error=module->last_error();
+            std::string const message=error?error:"";
+            if(message.find("Generated Material Graph GPU color mismatch")==
+                    std::string::npos &&
+               message.find("D3D12 programmable Material Graph GPU tint was not applied")==
+                    std::string::npos)
+                throw std::runtime_error("Async Material GPU draw failed: "+message);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        require(variant_ready,"Asynchronous GPU Material Graph shader/PSO "
+                              "did not become visible before timeout");
+        std::printf("Material Graph GPU PSO ready after %u draw(s)\n",
+                    frames_waited);
+        // The GPU must remain usable if a graph compiles to bad HLSL. The
+        // provider keeps the base pipeline, logs the variant failure and
+        // allows a subsequent independent variant to compile successfully.
+        static constexpr char invalid_graph[]=
+            "#define NS_GRAPH_BASE(p) (undefined_graph_call(0))\n";
+        static constexpr char recovered_graph[]=
+            "#define NS_GRAPH_BASE(p) (float4(0,0.98,0,1))\n";
+        auto upload_pixels=[&] {
+            for(int y=0;y<8;++y)for(int x=0;x<8;++x) {
+                auto const at=std::size_t(y*8+x)*4;
+                pixels[at+0]=x<4?255:0;
+                pixels[at+1]=x>=4?255:0;
+                pixels[at+2]=0;pixels[at+3]=255;
+            }
+        };
+        variant.graph_hlsl_defines=invalid_graph;
+        variant.graph_hlsl_bytes=sizeof(invalid_graph)-1;
+        upload_pixels();
+        require(material_v2->set_batches_v2(renderer,&variant,1),
+            "Invalid HLSL variant unexpectedly blocked material submission");
+        pixels.fill(0);
+        frame.verify_pixels=0;
+        for(unsigned i=0;i<48;++i) {
+            require(api->draw(renderer,&frame),
+                "Invalid shader variant crashed GPU fallback rendering");
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        variant.graph_hlsl_defines=recovered_graph;
+        variant.graph_hlsl_bytes=sizeof(recovered_graph)-1;
+        upload_pixels();
+        require(material_v2->set_batches_v2(renderer,&variant,1),
+            "Valid shader variant could not be submitted after compile error");
+        pixels.fill(0);
+        frame.verify_pixels=3;
+        bool recovered=false;
+        auto const recovery_deadline=std::chrono::steady_clock::now()+
+                                     std::chrono::seconds(14);
+        while(std::chrono::steady_clock::now()<recovery_deadline) {
+            if(api->draw(renderer,&frame)) {
+                recovered=true;break;
+            }
+            auto const* error=module->last_error();
+            std::string const message=error?error:"";
+            if(message.find("Generated Material Graph GPU color mismatch")==
+                    std::string::npos &&
+               message.find("D3D12 programmable Material Graph GPU tint was not applied")==
+                    std::string::npos)
+                throw std::runtime_error("Material variant recovery failed: "+message);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        require(recovered,"GPU variant did not recover after a shader compile failure");
+        std::puts("Asynchronous shader failure/fallback/recovery: PASS");
         frame.verify_pixels=1;
         if(light_api)
             require(light_api->set_lights(renderer,nullptr,0),

@@ -513,8 +513,16 @@ QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
             [this](QTreeWidgetItem* item,int) {
         openFolder(item->data(0,role_path).toString());
     });
+    connect(folders_,&QTreeWidget::itemDoubleClicked,this,
+            [this](QTreeWidgetItem* item,int) {
+        if(!item)return;
+        openFolder(item->data(0,role_path).toString());
+    });
     connect(grid_,&QListView::doubleClicked,this,[this](QModelIndex const& index) {
         auto ref=itemPath(index);
+        // NEF8 YMAT is a library, never the first material implicitly.
+        // Double-click the library to browse every material record; double-
+        // click an entry to open the Material Editor for that exact name.
         if(index.data(role_directory).toBool())openFolder(ref);
         else if(!ref.isEmpty())openAssetPreview(ref);
     });
@@ -667,8 +675,15 @@ void QtContentBrowser::openAssetPreview(QString const& virtualPath) {
         openFolder(virtualPath);
         return;
     }
-    // Previewing is read-only. Scene insertion is an explicit separate action
-    // in the context menu, avoiding accidental actors on a double-click.
+    // Only a concrete NEF8 material record may open the Material Editor.
+    // The YMAT file itself is a browsable virtual directory.
+    if(record->kind==AssetKind::material) {
+        auto const reference=QString::fromUtf8(record->asset_reference().c_str());
+        if(receivers(SIGNAL(materialEditorRequested(QString)))>0) {
+            emit materialEditorRequested(reference);
+            return;
+        }
+    }
     openAssetPreviewModal(this,native(root_),record->asset_reference(),record->kind);
 }
 void QtContentBrowser::changeFolder(QString const& folder) {

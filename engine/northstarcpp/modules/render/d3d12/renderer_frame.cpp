@@ -30,6 +30,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         RECT rect{};GetClientRect(hwnd,&rect);
         if(rect.right<=0||rect.bottom<=0)return;
         resize(rect.right,rect.bottom);
+        resolve_material_graph_pipelines();
         using namespace northstarcpp::math;
         float3 focus(frame.camera_x,frame.camera_y,frame.camera_z);
         float3 direction(std::sin(frame.camera_yaw)*std::cos(frame.camera_pitch),

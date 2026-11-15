@@ -23,6 +23,12 @@ public:
     explicit MaterialGraphEditor(QJsonObject const& graph={},QWidget* parent=nullptr,
                                  std::filesystem::path functionRoot={});
     QJsonObject graph() const;
+    void setGraph(QJsonObject const& graph);
+    // Function mode reuses exactly the Material Graph canvas, including
+    // undo/redo, typed wires, grouping, zoom and clipboard.
+    void setFunctionDocument(QJsonObject const& function,std::string reference);
+    QJsonObject functionDocument() const;
+    bool isFunctionMode() const noexcept {return functionMode_;}
     bool enabled() const noexcept {return enabled_;}
     bool validate(QString* reason=nullptr) const;
     void showDiagnostic(QString const& message);
@@ -54,6 +60,11 @@ private:
     };
     QJsonObject document_;
     std::filesystem::path functionRoot_;
+    bool functionMode_=false;
+    std::string functionReference_;
+    QJsonObject functionDefinition_;
+    QStringList outputNames() const;
+    QString outputType(QString const& output) const;
     QJsonObject functionDescriptor(QString const& reference) const;
     QStringList nodeInputs(QJsonObject const& node) const;
     QString nodePinType(QJsonObject const& node,QString const& input) const;

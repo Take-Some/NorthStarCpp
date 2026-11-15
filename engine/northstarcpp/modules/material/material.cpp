@@ -293,6 +293,16 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
             native=std::move(list.front());
         }
         result.unlit=native.shader=="unlit";
+        if(!native.graph_source.empty()) {
+            result.graph_shader_defines=compile_material_graph_with_functions(
+                native.graph_source,[&assets](std::string const& function_path) {
+                    if(assets.size(function_path)>32768)
+                        throw std::invalid_argument(
+                            "Native YMAT Material Function exceeds 32 KiB");
+                    auto source=assets.read(function_path);
+                    return std::string(source.begin(),source.end());
+                });
+        }
         for(auto const& param:native.parameters) {
             if(param.name=="base_color" && param.values.size()>=3)
                 for(unsigned i=0;i<3;++i)result.base_color[i]=unit(param.values[i]);

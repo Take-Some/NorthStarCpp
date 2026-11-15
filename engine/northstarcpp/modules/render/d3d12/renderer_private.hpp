@@ -42,6 +42,9 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
+#include <future>
+#include <chrono>
 
 namespace northstarcpp::render::d3d12::detail {
 using namespace northstarcpp::module_provider;
@@ -77,6 +80,7 @@ struct MaterialGpuTexture {
 };
 struct MaterialDraw {
     ComPtr<ID3D12PipelineState> variant_pipeline;
+    std::string variant_prefix;
     unsigned blend_mode=0;
     UINT first=0,count=0;
     MaterialParams params{};
@@ -141,6 +145,11 @@ struct RendererState {
     ComPtr<ID3D12PipelineState> material_pipeline;
     std::unordered_map<std::string,ComPtr<ID3D12PipelineState>>
         material_shader_cache;
+    // Bounded nonblocking async variant workers. Futures own the device and
+    // root signature while compiling, never RendererState or draw pointers.
+    std::unordered_map<std::string,
+        std::future<ComPtr<ID3D12PipelineState>>> material_pipeline_pending;
+    std::unordered_set<std::string> material_pipeline_failed;
     ComPtr<ID3D12RootSignature> deferred_signature;
     ComPtr<ID3D12PipelineState> deferred_pipeline,hdr_deferred_pipeline;
     ComPtr<ID3D12RootSignature> fxaa_signature;
@@ -227,6 +236,7 @@ struct RendererState {
     void set_material_batches(NorthStarMaterialBatch const* batches,UINT count);
     ComPtr<ID3D12PipelineState> material_graph_pipeline(
         std::string const& prefix,unsigned blend_mode);
+    void resolve_material_graph_pipelines();
     void set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,UINT count);
     void set_triangles(const NorthStarRenderTriangleVertex* source,UINT count);
     void set_sky(NorthStarSky const* source);

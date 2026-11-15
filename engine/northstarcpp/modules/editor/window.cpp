@@ -3528,6 +3528,72 @@ private:
             return std::string("{\"yaw\":")+std::to_string(script_yaw)+
                 ",\"pitch\":"+std::to_string(script_pitch)+"}";
         });
+        runtime.bind("engine.camera","cut",[this](std::string_view json) {
+            if (!script_args(json).empty() || !fps_camera)
+                throw std::invalid_argument("camera.cut()");
+            // Explicit teleport / shot boundary. Keep active cinematic
+            // track time, session state, and plugin-owned resources intact.
+            fps_camera->cut();
+            return std::string("null");
+        });
+        runtime.bind("engine.camera","pushShot",[this](std::string_view json) {
+            auto const args=script_args(json);
+            if(args.size()!=10 || !fps_camera)
+                throw std::invalid_argument(
+                    "camera.pushShot(source,x,y,z,yaw,pitch,roll,fov,priority,blend)");
+            CameraShot shot;
+            shot.source=args[0];
+            shot.pose.position={
+                static_cast<float>(script_number(args[1])),
+                static_cast<float>(script_number(args[2])),
+                static_cast<float>(script_number(args[3]))};
+            shot.pose.yaw=static_cast<float>(script_number(args[4]));
+            shot.pose.pitch=static_cast<float>(script_number(args[5]));
+            shot.pose.roll=static_cast<float>(script_number(args[6]));
+            shot.pose.fov_y_degrees=static_cast<float>(script_number(args[7]));
+            shot.pose.near_plane=fps_camera->settings().near_plane;
+            shot.pose.far_plane=fps_camera->settings().far_plane;
+            auto const priority=script_number(args[8]);
+            if(priority<-100. || priority>100. ||
+               std::floor(priority)!=priority)
+                throw std::invalid_argument("Camera shot priority must be an integer -100..100");
+            shot.priority=static_cast<int>(priority);
+            shot.blend_seconds=static_cast<float>(script_number(args[9]));
+            fps_camera->push_shot(std::move(shot));
+            return std::string("null");
+        });
+        runtime.bind("engine.camera","clearShot",[this](std::string_view json) {
+            auto const args=script_args(json);
+            if(args.size()!=1 || !fps_camera)
+                throw std::invalid_argument("camera.clearShot(source)");
+            fps_camera->clear_shot(args[0]);
+            return std::string("null");
+        });
+        runtime.bind("engine.camera","clearShots",[this](std::string_view json) {
+            if(!script_args(json).empty() || !fps_camera)
+                throw std::invalid_argument("camera.clearShots()");
+            fps_camera->clear_shots();
+            return std::string("null");
+        });
+        runtime.bind("engine.camera","activeShot",[this](std::string_view json) {
+            if(!script_args(json).empty() || !fps_camera)
+                throw std::invalid_argument("camera.activeShot()");
+            return script_json_quote(fps_camera->active_shot());
+        });
+        runtime.bind("engine.camera","applyPreset",[this](std::string_view json) {
+            auto const args=script_args(json);
+            if(args.size()!=1 || !fps_camera || !script_assets)
+                throw std::invalid_argument("camera.applyPreset(presetId) requires project VFS");
+            auto const presets=load_camera_presets(*script_assets);
+            auto const it=std::find_if(presets.begin(),presets.end(),
+                [&](CameraShot const& preset) {
+                    return preset.source==args[0];
+                });
+            if(it==presets.end())
+                throw std::invalid_argument("Camera preset source not found");
+            fps_camera->push_shot(*it);
+            return std::string("null");
+        });
         runtime.bind("engine.camera","shake",[this](std::string_view json) {
             auto args=script_args(json);
             if (args.size()!=2 || !fps_camera)

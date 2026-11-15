@@ -31,6 +31,35 @@
 #include "../viewport/viewport.hpp"
 #endif
 namespace northstarcpp::editor {
+namespace {
+// Qt's key() uses the active keyboard layout. Windows native scan codes
+// keep WASD/QE bound to the physical keys (also with Cyrillic layouts).
+// Synthetic Qt tests and other platforms use their logical Qt keys.
+int flyNavigationKey(QKeyEvent const* event) {
+#ifdef _WIN32
+    switch(event->nativeScanCode()) {
+    case 0x11:return Qt::Key_W;
+    case 0x1e:return Qt::Key_A;
+    case 0x1f:return Qt::Key_S;
+    case 0x20:return Qt::Key_D;
+    case 0x10:return Qt::Key_Q;
+    case 0x12:return Qt::Key_E;
+    default:break;
+    }
+#endif
+    switch(event->key()) {
+    case Qt::Key_W:case Qt::Key_A:case Qt::Key_S:case Qt::Key_D:
+    case Qt::Key_Q:case Qt::Key_E:
+    case Qt::Key_Shift:case Qt::Key_Control:
+        return event->key();
+    default:return 0;
+    }
+}
+bool flyModifiersAllowed(Qt::KeyboardModifiers modifiers) {
+    return !modifiers.testFlag(Qt::AltModifier) &&
+           !modifiers.testFlag(Qt::MetaModifier);
+}
+}
 #ifdef _WIN32
 // Native Qt child HWND dedicated to the engine swapchain. The parent stays
 // a normal Qt QWidget and remains responsible for input, DnD and toolbars.
@@ -76,7 +105,14 @@ QtEditorViewport::QtEditorViewport(QWidget* parent):QWidget(parent) {
     fly_timer_->setTimerType(Qt::PreciseTimer);
     fly_timer_->setInterval(16); // time-integrated input independent of FPS
     connect(fly_timer_,&QTimer::timeout,this,[this] {
-        if(!rotating_) {fly_timer_->stop();held_keys_.clear();return;}
+        // Unreal-style navigation: hold RMB and press WASD/QE to fly.
+        // Releasing RMB stops flight immediately; Ctrl is never required.
+        if(orbit_mode_ || !rotating_ || !hasFocus()) {
+            fly_timer_->stop();
+            held_keys_.clear();
+            camera_.reset_flight();
+            return;
+        }
         float const dt=std::clamp(float(fly_clock_.restart_seconds()),0.f,.05f);
         advanceFly(dt);
     });
@@ -148,6 +184,19 @@ void QtEditorViewport::drawGpu() {
     }
 #endif
 }
+bool QtEditorViewport::event(QEvent* e) {
+    if(e->type()==QEvent::ShortcutOverride &&
+       rotating_ && !orbit_mode_) {
+        auto const* key=static_cast<QKeyEvent const*>(e);
+        if(flyNavigationKey(key) && flyModifiersAllowed(key->modifiers())) {
+            // Prevent window/menu QActions from consuming unmodified WASD
+            // while RMB is held over the scene, even in the GPU viewport.
+            e->accept();
+            return true;
+        }
+    }
+    return QWidget::event(e);
+}
 bool QtEditorViewport::eventFilter(QObject* object,QEvent* event) {
     if(object==gpu_surface_) {
         switch(event->type()) {
@@ -160,6 +209,7 @@ bool QtEditorViewport::eventFilter(QObject* object,QEvent* event) {
         case QEvent::Drop:
         case QEvent::KeyPress:
         case QEvent::KeyRelease:
+        case QEvent::ShortcutOverride:
             // Surface is aligned to the parent's (0,0), so its local
             // pointer coordinates equal authoring Viewport coordinates.
             QCoreApplication::sendEvent(this,event);
@@ -187,6 +237,7 @@ void QtEditorViewport::setCameraPose(CameraPose pose) {
     pose.position.x=std::clamp(pose.position.x,-900000.f,900000.f);
     pose.position.y=std::clamp(pose.position.y,-900000.f,900000.f);
     pose.position.z=std::clamp(pose.position.z,-900000.f,900000.f);
+    camera_.reset_flight();
     camera_.pose=pose;
     gpu_dirty_=true;update();
 }
@@ -209,6 +260,7 @@ void QtEditorViewport::setOrbitMode(bool enabled,Vector3 target,float distance) 
     orbit_distance_=std::clamp(distance,1.1f,200.f);
     rotating_=false;
     held_keys_.clear();
+    camera_.reset_flight();
     fly_timer_->stop();
     unsetCursor();
     if(orbit_mode_)updateOrbitCamera();
@@ -254,22 +306,23 @@ void QtEditorViewport::setFlySpeed(float value) {
     update();
 }
 void QtEditorViewport::advanceFly(float elapsedSeconds) {
-    if(!rotating_ || !std::isfinite(elapsedSeconds) || elapsedSeconds<=0.f)return;
+    if(!rotating_ || orbit_mode_ ||
+       !std::isfinite(elapsedSeconds) || elapsedSeconds<=0.f)
+        return;
     float const sideways=float(held_keys_.contains(Qt::Key_D))-
                          float(held_keys_.contains(Qt::Key_A));
     float const forward=float(held_keys_.contains(Qt::Key_W))-
                         float(held_keys_.contains(Qt::Key_S));
     float const vertical=float(held_keys_.contains(Qt::Key_E))-
                          float(held_keys_.contains(Qt::Key_Q));
-    float const length=std::sqrt(sideways*sideways+forward*forward+
-                                  vertical*vertical);
-    if(length<=0.f)return;
     float speed=fly_speed_;
     if(held_keys_.contains(Qt::Key_Shift))speed*=3.f;
     if(held_keys_.contains(Qt::Key_Control))speed*=.25f;
-    float const step=std::min(0.1f,elapsedSeconds)*speed/length;
-    camera_.fly(sideways*step,vertical*step,forward*step);
-    gpu_dirty_=true;update();
+    if(camera_.fly_damped(sideways,vertical,forward,speed,
+                          std::min(0.1f,elapsedSeconds))) {
+        gpu_dirty_=true;
+        update();
+    }
 }
 QPointF QtEditorViewport::projected(Vector3 point) const {
     auto position=camera_.project(point,float(width()),float(height()));
@@ -507,11 +560,11 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     painter.setPen(QColor("#c1d7ec"));
     painter.setFont(QFont("Segoe UI",9));
     painter.drawText(QRect(14,10,width()-28,26),Qt::AlignLeft|Qt::AlignVCenter,
-        "PERSPECTIVE  |  PROXY VIEWPORT  |  RMB + WASD FLY  |  Q/E UP-DOWN  |  MMB PAN");
+        "PERSPECTIVE  |  PROXY VIEWPORT  |  HOLD RMB + WASD FLY  |  Q/E UP-DOWN  |  MMB PAN");
     painter.setPen(QColor("#8ea6c2"));
     painter.drawText(QRect(14,height()-31,width()-28,22),
         Qt::AlignLeft|Qt::AlignVCenter,
-        QString("Objects: %1  |  %2  |  Fly: %3 m/s  |  Shift ×3, Ctrl ×0.25  |  F Focus")
+        QString("Objects: %1  |  %2  |  Fly: %3 m/s  |  Shift Г—3, Ctrl Г—0.25  |  F Focus")
             .arg(scene_?scene_->objects.size():0)
             .arg(draw_mode_==DrawMode::Wireframe?"Wireframe":
                  draw_mode_==DrawMode::Shaded?"Shaded proxy":"Shaded + edges")
@@ -519,6 +572,9 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
 }
 void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
     previous_=event->position().toPoint();
+    // Capture keyboard navigation while RMB is held. The native GPU child
+    // surface forwards mouse events here; no Ctrl modifier is needed.
+    setFocus(Qt::MouseFocusReason);
     if(orbit_mode_ && (event->button()==Qt::LeftButton ||
                        event->button()==Qt::RightButton)) {
         rotating_=true;
@@ -530,9 +586,14 @@ void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
     if(event->button()==Qt::RightButton) {
         setFocus(Qt::MouseFocusReason);
         rotating_=true;
+        // RMB activates free-flight input. Keys are collected only while
+        // this button remains pressed; keyboard focus stays on the viewport.
         held_keys_.clear();
-        fly_clock_.start();
-        fly_timer_->start();
+        camera_.reset_flight();
+        if(!fly_timer_->isActive()) {
+            fly_clock_.start();
+            fly_timer_->start();
+        }
         setCursor(Qt::ClosedHandCursor);
         event->accept();
         return;
@@ -586,15 +647,14 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
         if(!(event->buttons()&(Qt::LeftButton|Qt::RightButton))) {
             rotating_=false;unsetCursor();return;
         }
-        camera_.look(float(difference.x()),float(-difference.y()),.006f);
+        camera_.drag_look(float(difference.x()),float(difference.y()),.006f);
         camera_.pose.pitch=std::clamp(camera_.pose.pitch,-1.45f,1.45f);
         updateOrbitCamera();
     } else if(rotating_) {
         if(!event->buttons().testFlag(Qt::RightButton)) {
-            rotating_=false;held_keys_.clear();fly_timer_->stop();
-            unsetCursor();return;
+            rotating_=false;unsetCursor();return;
         }
-        camera_.look(float(difference.x()),float(-difference.y()));
+        camera_.drag_look(float(difference.x()),float(difference.y()));
         gpu_dirty_=true;update();
     } else if(panning_ && event->buttons().testFlag(Qt::MiddleButton)) {
         float const scale=fly_speed_*.002f;
@@ -613,7 +673,11 @@ void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
         rotating_=false;unsetCursor();event->accept();return;
     }
     if(event->button()==Qt::RightButton) {
-        rotating_=false;held_keys_.clear();fly_timer_->stop();unsetCursor();
+        rotating_=false;
+        held_keys_.clear();
+        camera_.reset_flight();
+        fly_timer_->stop();
+        unsetCursor();
         event->accept();
     }
     if(event->button()==Qt::MiddleButton) {panning_=false;unsetCursor();}
@@ -637,39 +701,42 @@ void QtEditorViewport::wheelEvent(QWheelEvent* event) {
 }
 void QtEditorViewport::keyPressEvent(QKeyEvent* event) {
     if(event->key()==Qt::Key_Escape && rotating_) {
-        rotating_=false;held_keys_.clear();fly_timer_->stop();
-        unsetCursor();event->accept();return;
+        rotating_=false;
+        held_keys_.clear();
+        camera_.reset_flight();
+        fly_timer_->stop();
+        unsetCursor();
+        event->accept();
+        return;
     }
-    if(!rotating_ && !event->isAutoRepeat() && event->modifiers()==Qt::NoModifier) {
-        if(event->key()==Qt::Key_W || event->key()==Qt::Key_E ||
-           event->key()==Qt::Key_R) {
-            emit gizmoModeRequested(event->key()==Qt::Key_W?0:
-                                   event->key()==Qt::Key_E?1:2);
+    // Hold RMB to fly. Plain WASD/QE works; Shift and Ctrl only modify speed.
+    if(rotating_ && !orbit_mode_ && flyModifiersAllowed(event->modifiers())) {
+        auto const key=flyNavigationKey(event);
+        if(key) {
+            if(!event->isAutoRepeat())held_keys_.insert(key);
             event->accept();
             return;
+        }
+    }
+    if(!rotating_ && !event->isAutoRepeat() &&
+       event->modifiers()==Qt::NoModifier) {
+        if(event->key()==Qt::Key_R) {
+            emit gizmoModeRequested(2);
+            event->accept();return;
         }
         if(event->key()==Qt::Key_F) {
             frameSelected();
-            event->accept();
-            return;
-        }
-    }
-    if(rotating_ && !event->isAutoRepeat()) {
-        switch(event->key()) {
-        case Qt::Key_W:case Qt::Key_A:case Qt::Key_S:case Qt::Key_D:
-        case Qt::Key_Q:case Qt::Key_E:
-        case Qt::Key_Shift:case Qt::Key_Control:
-            held_keys_.insert(event->key());
             event->accept();return;
-        default:break;
         }
     }
     QWidget::keyPressEvent(event);
 }
 void QtEditorViewport::keyReleaseEvent(QKeyEvent* event) {
-    if(!event->isAutoRepeat() && held_keys_.contains(event->key())) {
-        held_keys_.remove(event->key());
-        event->accept();return;
+    auto const key=flyNavigationKey(event);
+    if(key && held_keys_.contains(key)) {
+        if(!event->isAutoRepeat())held_keys_.remove(key);
+        event->accept();
+        return;
     }
     QWidget::keyReleaseEvent(event);
 }
@@ -677,6 +744,7 @@ void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
     if(drag_axis_>=0)emit gizmoDragFinished();
     rotating_=false;panning_=false;drag_axis_=-1;
     held_keys_.clear();
+    camera_.reset_flight();
     if(fly_timer_)fly_timer_->stop();
     unsetCursor();
     QWidget::focusOutEvent(event);

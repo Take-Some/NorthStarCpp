@@ -1,6 +1,9 @@
 #include "qt_editor_window.hpp"
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
+#include "qt_camera_studio.hpp"
+#include "qt_asset_preview_dialog.hpp"
+#include "qt_material_asset_dialog.hpp"
 #include "qt_prefab_preview.hpp"
 #include "editor_prefab.hpp"
 #include "qt_material_authoring.hpp"
@@ -251,7 +254,7 @@ QPushButton,QToolButton {
  color:#e0e9f6;padding:5px;border-radius:4px;
 }
 QPushButton:hover,QToolButton:hover {background:#386180;}
-QMenuBar,QMenu,QStatusBar {background:#1d2a3a;color:#e1ebf4;}
+QStatusBar {background:#1d2a3a;color:#e1ebf4;}
 QToolBar {background:#202c3d;border:0;spacing:6px;}
 QCheckBox {color:#dce7f5;}
 )QSS");
@@ -619,6 +622,13 @@ QCheckBox {color:#dce7f5;}
                     QString("Camera bookmark %1 is empty").arg(bookmark),3500);
         });
     }
+    auto* studio=viewMenu->addAction("Camera Studio...");
+    studio->setObjectName("openCameraStudioAction");
+    studio->setToolTip("Edit world-space cinematic camera presets for this project");
+    connect(studio,&QAction::triggered,this,[this] {
+        auto assets=file_.empty()?fs::path{}:file_.parent_path()/"assets";
+        openCameraStudio(this,viewport_,assets);
+    });
     toolbar->addSeparator();
     auto* snap=new QCheckBox("Snap",this);
     snap->setChecked(true);
@@ -1094,6 +1104,8 @@ QCheckBox {color:#dce7f5;}
         else if(material_authoring::is_material(ref))openMaterialEditor(ref);
         else log("Selected asset: "+ref);
     });
+    connect(browser_,&QtContentBrowser::materialEditorRequested,this,
+            [this](QString const& reference){openMaterialEditor(reference);});
     connect(browser_,&QtContentBrowser::assetSelected,this,
             [this](QString ref){if(!ref.isEmpty())
                 statusBar()->showMessage("Content / "+ref,2500);});
@@ -1878,57 +1890,78 @@ void QtEditorWindow::openMaterialEditor(QString const& reference) {
         }
         return;
     }
-    if(!reference.endsWith(".material.json",Qt::CaseInsensitive)) {
-        QMessageBox::information(this,"Material Editor",
-            "This is a compiled or external material. The native YMAT "
-            "asset cannot be edited as a JSON descriptor. "
-            "Edit its source material instead.");
+    if(reference.contains(".ymat@",Qt::CaseInsensitive)) {
+        // The Material Editor operates on a selected NEF8 material entry.
+        // A library itself remains a browsable Content Browser directory.
+        try {
+            auto const root=native(folderRoot(file_));
+            auto const library=reference.left(reference.indexOf('@'));
+            auto const local=root/std::filesystem::u8path(utf8(library));
+            auto const shared=sharedMaterialRoot();
+            auto const base=std::filesystem::is_regular_file(local)?root:shared;
+            (void)openMaterialAssetDialog(this,base,utf8(reference));
+            browser_->refresh();
+            viewport_->setAssetSources(file_.parent_path());
+            refreshMaterialChoices(true);
+            updateInspector();
+            viewport_->update();
+        }catch(std::exception const& e) {
+            QMessageBox::warning(this,"Material Editor",from8(e.what()));
+        }
+        return;
+    }
+    if(!reference.endsWith(".ymat",Qt::CaseInsensitive) &&
+       !reference.endsWith(".material.json",Qt::CaseInsensitive)) {
+        openAssetPreviewModal(this,native(folderRoot(file_)),
+            utf8(reference),AssetKind::material);
         return;
     }
     namespace ma=material_authoring;
     try {
         auto const root=native(folderRoot(file_));
         if(!availableMaterial(root,reference)) {
-            QMessageBox::information(this,"Shared Material",
-                "This is a shared material asset. It is read-only here. "
-                "Create a project-local material to edit its properties.");
+            openAssetPreviewModal(this,sharedMaterialRoot(),
+                                  utf8(reference),AssetKind::material);
             return;
         }
-        QJsonObject original=ma::load_descriptor(root,reference);
+        QJsonObject original;
+        try {
+            original=ma::load_descriptor(root,reference);
+        }catch(std::exception const&) {
+            if(!reference.endsWith(".ymat",Qt::CaseInsensitive))throw;
+            // Imported YMAT kind-4 or multi-entry kind-30 libraries have no
+            // editable single-material editor payload: inspect safely, do not
+            // overwrite their binary library with a synthetic descriptor.
+            openAssetPreviewModal(this,root,utf8(reference),AssetKind::material);
+            return;
+        }
         QDialog dialog(this);
         dialog.setObjectName("northstarMaterialEditor");
         dialog.setWindowTitle("Material Editor — "+reference);
-        dialog.resize(1100,750);
+        dialog.resize(1150,790);
         auto* layout=new QVBoxLayout(&dialog);
-        auto* split=new QSplitter(Qt::Horizontal,&dialog);
-        auto* tabs=new QTabWidget(split);
+        auto* tabs=new QTabWidget(&dialog);
         tabs->setObjectName("materialEditorTabs");
         auto* properties=new QWidget(tabs);
         auto* surfaceLayout=new QVBoxLayout(properties);
         auto* graphEditor=new MaterialGraphEditor(
             original.value("graph").toObject(),tabs,root);
+        auto* gpuPreview=new MaterialGpuPreview(root,tabs);
+        tabs->addTab(gpuPreview,"Preview");
         tabs->addTab(properties,"Surface");
         tabs->addTab(graphEditor,"Material Graph");
-        auto* gpuPreview=new MaterialGpuPreview(root,split);
-        split->addWidget(tabs);
-        split->addWidget(gpuPreview);
-        split->setStretchFactor(0,3);
-        split->setStretchFactor(1,2);
-        layout->addWidget(split,1);
+        layout->addWidget(tabs,1);
         // Material Editor has its own workspace; do not reset preferred
         // panel widths and active tab every time an asset is opened.
         QSettings workspace("KaylasSystems","NorthStarQtEditor");
         dialog.restoreGeometry(workspace.value(
             "MaterialEditor/WindowGeometry").toByteArray());
-        split->restoreState(workspace.value(
-            "MaterialEditor/SplitterState").toByteArray());
         tabs->setCurrentIndex(std::clamp(
-            workspace.value("MaterialEditor/ActiveTab",0).toInt(),0,1));
+            workspace.value("MaterialEditor/ActiveTab",0).toInt(),0,2));
         connect(&dialog,&QDialog::finished,&dialog,
-                [&dialog,split,tabs](int) {
+                [&dialog,tabs](int) {
             QSettings state("KaylasSystems","NorthStarQtEditor");
             state.setValue("MaterialEditor/WindowGeometry",dialog.saveGeometry());
-            state.setValue("MaterialEditor/SplitterState",split->saveState());
             state.setValue("MaterialEditor/ActiveTab",tabs->currentIndex());
         });
         auto* form=new QFormLayout;

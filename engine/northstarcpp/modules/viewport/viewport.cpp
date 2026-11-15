@@ -85,22 +85,31 @@ struct Viewport::State {
     State(HWND window, bool software)
         : window_handle(window), software_renderer(software)
     {
-        // Explicit path overrides are still resolved by Module; only the
-        // automatic default is retried with D3D11.
-        for (auto const* backend : {"d3d12", "d3d11"}) {
+        // A project-selected provider must never silently fall back to
+        // another backend: unsupported ABI/features must remain visible.
+        std::array<char,128> selected{};
+        auto const selection_length=GetEnvironmentVariableA(
+            "NORTHSTARCPP_RENDER_PROVIDER",selected.data(),
+            static_cast<DWORD>(selected.size()));
+        if(selection_length>=selected.size())
+            throw std::runtime_error("Selected renderer provider ID is too long");
+        std::vector<std::string> providers;
+        if(selection_length)providers.emplace_back(selected.data());
+        else providers={"d3d12","d3d11"}; // Existing automatic fallback.
+        for(std::size_t i=0;i<providers.size();++i) {
             try {
-                auto candidate = std::make_unique<Module>(
-                    NORTHSTARCPP_CAPABILITY_RENDER, backend);
-                auto const* candidate_api =
+                auto candidate=std::make_unique<Module>(
+                    NORTHSTARCPP_CAPABILITY_RENDER,providers[i]);
+                auto const* candidate_api=
                     candidate->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
-                void* instance=candidate_api->create(window, software ? 1u : 0u);
-                if (!instance) throw candidate->error("Cannot create viewport");
+                void* instance=candidate_api->create(window, software?1u:0u);
+                if(!instance)throw candidate->error("Cannot create viewport");
                 module=std::move(candidate);
                 api=candidate_api;
                 renderer=instance;
                 break;
-            } catch (std::exception const&) {
-                if (std::string(backend)=="d3d11") throw;
+            }catch(std::exception const&) {
+                if(i+1==providers.size())throw;
             }
         }
         triangle_api = module->query_extension<NorthStarRenderTrianglesApi>(
@@ -135,6 +144,11 @@ struct Viewport::State {
 
     void fallback_to_d3d11() {
         if (module && module->provider()!="d3d12") return;
+        std::array<char,8> selected{};
+        if(GetEnvironmentVariableA("NORTHSTARCPP_RENDER_PROVIDER",
+             selected.data(),static_cast<DWORD>(selected.size()))>0)
+            throw std::runtime_error(
+                "Selected renderer lacks character support; explicit provider fallback disabled");
         auto next_module=std::make_unique<Module>(NORTHSTARCPP_CAPABILITY_RENDER,"d3d11");
         auto next_api=next_module->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
         // DXGI only permits one active flip-model swapchain per HWND.

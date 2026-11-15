@@ -2,9 +2,11 @@
 #include "qt_material_instances.hpp"
 #include "editor_asset_thumbnails.hpp"
 #include "editor_asset_material_source.hpp"
+#include "qt_material_library_edit.hpp"
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/material.hpp>
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/material_ymat_authoring.hpp>
 #include <QImageReader>
 #include <QColor>
 #include <northstarcpp/editor_asset_catalog.hpp>
@@ -74,11 +76,12 @@ QStringList enumerate(fs::path const& root,bool materials) {
     records.removeDuplicates();
     return records;
 }
-void require_descriptor(fs::path const& root,QJsonObject const& object) {
+void require_descriptor(fs::path const& root,QJsonObject const& object,
+                        bool compileGraph=true) {
     if(object.value("schema").toInt(-1)!=1 ||
        object.value("name").toString().trimmed().isEmpty() ||
-       !QStringList{"standard_lit","unlit"}.contains(
-           object.value("shader").toString()))
+       object.value("shader").toString().trimmed().isEmpty() ||
+       object.value("shader").toString().size()>128)
         throw std::invalid_argument("Invalid editable material descriptor");
     auto const color=object.value("base_color").toString();
     static QRegularExpression const hex("^#[0-9a-fA-F]{6}$");
@@ -92,12 +95,16 @@ void require_descriptor(fs::path const& root,QJsonObject const& object) {
     if(object.contains("graph")) {
         if(!object.value("graph").isObject())
             throw std::invalid_argument("Material graph must be a JSON object");
-        auto const json=QJsonDocument(object.value("graph").toObject())
-            .toJson(QJsonDocument::Compact);
-        (void)northstarcpp::compile_material_graph_with_functions(
-            json.toStdString(),[&root](std::string const& reference) {
-                return material_function_source(root,reference);
-            });
+        // A broken shader or missing Material Function must never prevent
+        // opening the material to repair it in the editor.
+        if(compileGraph) {
+            auto const json=QJsonDocument(object.value("graph").toObject())
+                .toJson(QJsonDocument::Compact);
+            (void)northstarcpp::compile_material_graph_with_functions(
+                json.toStdString(),[&root](std::string const& reference) {
+                    return material_function_source(root,reference);
+                });
+        }
     }
     for(auto const field:{"base_color_texture","normal_texture",
                            "roughness_texture","metallic_texture","emissive_texture"}) {
@@ -112,11 +119,20 @@ void require_descriptor(fs::path const& root,QJsonObject const& object) {
 }
 bool is_material(QString const& path) {
     auto const p=path.toLower();
-    return p.endsWith(".material.json") || p.endsWith(".material-instance.json") || p.endsWith(".ymat") ||
+    return p.endsWith(".material.json") ||
+           p.endsWith(".material-instance.json") ||
+           p.endsWith(".ymat") ||
+           (p.contains(".ymat@") && p.indexOf(".ymat@")+6<p.size()) ||
            p.endsWith(".material") || p.endsWith(".mtl");
 }
 bool is_texture(QString const& path) {
-    auto const suffix=QFileInfo(path).suffix().toLower();
+    auto const at=path.indexOf('@');
+    QString const container=at<0?path:path.left(at);
+    if(at>=0 && (path.indexOf('@',at+1)>=0 || at==path.size()-1))
+        return false;
+    auto const suffix=QFileInfo(container).suffix().toLower();
+    if(at>=0)return suffix=="ytd" &&
+        !path.mid(at+1).contains(QRegularExpression(R"([/\\:])"));
     return QStringList{"ytd","png","jpg","jpeg","dds","tga","bmp",
                        "webp","ktx","ktx2","tif","tiff"}.contains(suffix);
 }
@@ -174,31 +190,56 @@ std::string material_function_source(
     return std::string(std::istreambuf_iterator<char>(source),{});
 }
 QJsonObject load_descriptor(fs::path const& root,QString const& reference) {
+    bool const native=reference.endsWith(".ymat",Qt::CaseInsensitive) ||
+        reference.contains(".ymat@",Qt::CaseInsensitive);
+    if(native) {
+        auto object=material_library_edit::load(root,reference);
+        require_descriptor(root,object,false);
+        return object;
+    }
     if(!reference.endsWith(".material.json",Qt::CaseInsensitive))
-        throw std::invalid_argument("Native compiled materials are read-only");
+        throw std::invalid_argument("Not an editable material");
     QFile file(string(resolve_existing(root,reference)));
     if(!file.open(QIODevice::ReadOnly) || file.size()>512*1024)
         throw std::runtime_error("Cannot read bounded material descriptor");
+    auto data=file.readAll();
     QJsonParseError error;
-    auto const doc=QJsonDocument::fromJson(file.readAll(),&error);
+    auto const doc=QJsonDocument::fromJson(data,&error);
     if(error.error!=QJsonParseError::NoError || !doc.isObject())
         throw std::runtime_error("Invalid material JSON");
     auto object=doc.object();
-    require_descriptor(root,object);
+    require_descriptor(root,object,false);
     return object;
 }
 void save_descriptor(fs::path const& root,QString const& reference,
                      QJsonObject const& descriptor) {
-    if(!reference.endsWith(".material.json",Qt::CaseInsensitive))
-        throw std::invalid_argument("Cannot edit compiled YMAT material directly");
+    bool const native=reference.endsWith(".ymat",Qt::CaseInsensitive) ||
+        reference.contains(".ymat@",Qt::CaseInsensitive);
+    if(!native && !reference.endsWith(".material.json",Qt::CaseInsensitive))
+        throw std::invalid_argument("Material output must be a native YMAT or legacy descriptor");
     require_descriptor(root,descriptor);
+    if(native) {
+        auto const at=reference.indexOf('@');
+        auto path=at<0?reference:reference.left(at);
+        if(fs::exists(root/fs::u8path(bytes(path)))) {
+            // Always replace only the named material in the existing library.
+            material_library_edit::save(root,reference,descriptor);
+            return;
+        }
+        if(at>=0)
+            throw std::invalid_argument("Cannot create YMAT entry without a library");
+    }
     auto relative=fs::u8path(bytes(reference));
     if(!safe_virtual_path(bytes(reference)) || !symlink_free(root,relative))
         throw std::invalid_argument("Unsafe destination material reference");
     for(auto const field:{"base_color_texture","normal_texture",
                            "roughness_texture","metallic_texture","emissive_texture"}) {
         auto value=descriptor.value(field).toString();
-        if(!value.isEmpty())(void)resolve_existing(root,value);
+        if(!native && !value.isEmpty()) {
+            QString const source=value.left(value.indexOf('@')<0?
+                value.size():value.indexOf('@'));
+            (void)resolve_existing(root,source);
+        }
     }
     auto target=root/relative;
     std::error_code ec;
@@ -207,7 +248,14 @@ void save_descriptor(fs::path const& root,QString const& reference,
     QSaveFile output(string(target));
     if(!output.open(QIODevice::WriteOnly))
         throw std::runtime_error("Cannot open material for atomic save");
-    auto const data=QJsonDocument(descriptor).toJson(QJsonDocument::Indented);
+    auto const json=QJsonDocument(descriptor).toJson(QJsonDocument::Compact);
+    QByteArray data;
+    if(native) {
+        auto packed=northstarcpp::shared_assets::encode_editor_ymat(
+            json.toStdString());
+        data=QByteArray(reinterpret_cast<char const*>(packed.data()),
+                        static_cast<qsizetype>(packed.size()));
+    }else data=QJsonDocument(descriptor).toJson(QJsonDocument::Indented);
     if(output.write(data)!=data.size() || !output.commit())
         throw std::runtime_error("Cannot commit project material descriptor");
 }
@@ -222,7 +270,7 @@ QString make_material_for_texture(fs::path const& root,QString const& texture) {
     QString ref;
     for(unsigned n=0;n<10000;++n) {
         ref="Materials/"+stem+"_Material"+
-            (n?QString("_%1").arg(n):QString{})+".material.json";
+            (n?QString("_%1").arg(n):QString{})+".ymat";
         if(!QFileInfo::exists(string(root/fs::u8path(bytes(ref)))))break;
         ref.clear();
     }

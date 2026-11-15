@@ -50,6 +50,8 @@ public:
 signals:
     void assetActivated(QString virtualPath);
     void assetSelected(QString virtualPath);
+    // Double-click always requests the material editor, not a generic read-only card.
+    void materialEditorRequested(QString materialReference);
 private:
     AssetCatalog catalog_;
     QString root_,folder_;

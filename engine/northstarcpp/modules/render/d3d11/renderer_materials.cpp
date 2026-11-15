@@ -1,5 +1,6 @@
 // D3D11 materials methods; independently compiled provider implementation.
 #include "renderer_private.hpp"
+#include "../shared/shader_disk_cache.hpp"
 namespace northstarcpp::render::d3d11::detail {
 std::shared_ptr<CachedTexture> RendererState::upload_material_texture(
         NorthStarMaterialTexture const& image,bool is_srgb){
@@ -86,6 +87,79 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,s
         material_cpu_vertices.swap(submitted);
         material_draws.swap(draws);
     }
+std::shared_ptr<MaterialPixelVariant> RendererState::material_shader_variant(
+        std::string const& prefix) {
+    if(auto it=material_shader_cache.find(prefix);
+       it!=material_shader_cache.end())return it->second;
+    if(material_shader_failed.count(prefix))return {};
+    auto pending=material_shader_pending.find(prefix);
+    if(pending!=material_shader_pending.end()) {
+        if(pending->second.wait_for(std::chrono::milliseconds(0))!=
+           std::future_status::ready)return {};
+        try {
+            auto bytes=pending->second.get();
+            auto program=std::make_shared<MaterialPixelVariant>();
+            HRESULT const gpuStatus=device->CreatePixelShader(
+                bytes.data(),bytes.size(),nullptr,program->shader.put());
+            if(FAILED(gpuStatus)) {
+                material_shader_pending.erase(pending);
+                shader_disk_cache::erase("d3d11",
+                    "d3d11|material_ps|ps_4_0|"+
+                        prefix+authored_material_shader);
+                // A bytecode cache may be stale even if its checksum matches.
+                // Retry once from source, then quarantine this graph variant.
+                if(material_shader_retry.insert(prefix).second)
+                    return material_shader_variant(prefix);
+                material_shader_failed.insert(prefix);
+                std::fprintf(stderr,
+                    "[WARN] D3D11 GPU rejected compiled shader, HRESULT=0x%08lx\n",
+                    static_cast<unsigned long>(gpuStatus));
+                return {};
+            }
+            material_shader_retry.erase(prefix);
+            if(material_shader_cache.size()>=128)material_shader_cache.clear();
+            material_shader_cache.emplace(prefix,program);
+            material_shader_pending.erase(pending);
+            return program;
+        }catch(std::exception const& error) {
+            material_shader_pending.erase(pending);
+            material_shader_failed.insert(prefix);
+            std::fprintf(stderr,
+                "[WARN] D3D11 Material Graph variant failed: %s\n",error.what());
+            return {};
+        }
+    }
+    if(material_shader_pending.size()>=8)return {};
+    std::string source=prefix+authored_material_shader;
+    std::string const diskKey="d3d11|material_ps|ps_4_0|"+source;
+    material_shader_pending.emplace(prefix,std::async(std::launch::async,
+        [source=std::move(source),diskKey]() {
+            if(auto cached=shader_disk_cache::read("d3d11",diskKey))
+                return std::move(*cached);
+            Com<ID3DBlob> compiled,errors;
+            auto status=D3DCompile(source.data(),source.size(),
+                "NorthStar Material Graph",nullptr,nullptr,
+                "material_ps","ps_4_0",D3DCOMPILE_ENABLE_STRICTNESS,0,
+                compiled.put(),errors.put());
+            if(FAILED(status)) {
+                if(errors.get())
+                    throw std::runtime_error(
+                        static_cast<char const*>(errors->GetBufferPointer()));
+                throw std::runtime_error("D3DCompile Material Graph PS failed");
+            }
+            auto size=compiled->GetBufferSize();
+            std::vector<std::uint8_t> bytes(size);
+            std::memcpy(bytes.data(),compiled->GetBufferPointer(),size);
+            shader_disk_cache::write("d3d11",diskKey,bytes.data(),bytes.size());
+            return bytes;
+        }));
+    return {}; // Do not block render frames waiting for D3DCompile.
+}
+void RendererState::resolve_material_shader_variants() {
+    for(auto& draw:material_draws)
+        if(!draw.shader_variant&&!draw.variant_key.empty())
+            draw.shader_variant=material_shader_variant(draw.variant_key);
+}
 void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,
                                  std::uint32_t count){
         if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES || (count&&!batches))
@@ -109,26 +183,8 @@ void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batc
                 input.graph_hlsl_defines,input.graph_hlsl_bytes,
                 input.blend_mode,input.alpha_cutoff);
             if(input.graph_hlsl_bytes==0 && input.blend_mode==0)continue;
-            auto found=material_shader_cache.find(prefix);
-            if(found==material_shader_cache.end()) {
-                if(material_shader_cache.size()>=128)material_shader_cache.clear();
-                auto object=std::make_shared<MaterialPixelVariant>();
-                std::string const source=prefix+authored_material_shader;
-                Com<ID3DBlob> compiled,errors;
-                HRESULT const status=D3DCompile(source.data(),source.size(),
-                    "NorthStar Material Graph",nullptr,nullptr,
-                    "material_ps","ps_4_0",D3DCOMPILE_ENABLE_STRICTNESS,0,
-                    compiled.put(),errors.put());
-                if(FAILED(status)&&errors.get())
-                    throw std::runtime_error(
-                        static_cast<char const*>(errors->GetBufferPointer()));
-                check(status,"Compile Material Graph PS");
-                check(device->CreatePixelShader(compiled->GetBufferPointer(),
-                    compiled->GetBufferSize(),nullptr,object->shader.put()),
-                    "Create Material Graph GPU program");
-                found=material_shader_cache.emplace(prefix,std::move(object)).first;
-            }
-            draw.shader_variant=found->second;
+            draw.variant_key=prefix;
+            draw.shader_variant=material_shader_variant(prefix);
         }
     }
 void RendererState::set_skinned_material_batches(
@@ -266,6 +322,7 @@ void RendererState::draw_skinned_materials(){
 
 void RendererState::draw_authored_materials(){
         if(material_draws.empty())return;
+        resolve_material_shader_variants();
         if(material_cpu_vertices.size()>material_gpu_capacity) {
             auto new_capacity=std::max<std::size_t>(4096,
                 (material_cpu_vertices.size()+1023u)&~std::size_t(1023));

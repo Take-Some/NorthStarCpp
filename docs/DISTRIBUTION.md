@@ -79,7 +79,7 @@ distributable/NorthStarCpp-0.1.0-windows-x64-Release/
     render_d3d11.dll
     audio_winmm.dll
     input_win32.dll
-    assets_directory.dll
+    AssetManager.dll
   tools/shader_generator.exe
   sdk/
     include/northstarcpp/...

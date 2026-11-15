@@ -36,7 +36,7 @@
 
 namespace northstarcpp::editor {
 namespace {
-constexpr auto previewReference="Materials/Preview.material.json";
+constexpr auto previewReference="Materials/Preview.ymat";
 std::filesystem::path diskPath(QString const& path) {
     return std::filesystem::u8path(path.toUtf8().toStdString());
 }

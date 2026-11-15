@@ -2,6 +2,7 @@
 // Author: Kayla Verner
 #include <northstarcpp/shared_assets.hpp>
 #include "asset_list_file.hpp"
+#include <boost/property_tree/json_parser.hpp>
 
 #include <boost/property_tree/xml_parser.hpp>
 
@@ -149,6 +150,13 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
                             "Invalid character YMAT parameter values");
                     material.parameters.push_back(std::move(param));
                 }
+            if(auto graph=value.get_child_optional("graph")) {
+                std::ostringstream serialized;
+                boost::property_tree::write_json(serialized,*graph,false);
+                material.graph_source=serialized.str();
+                require(material.graph_source.size()<=32768,
+                    "Native YMAT Material Graph exceeds 32 KiB");
+            }
             result.push_back(std::move(material));
         }
         return result;
@@ -217,6 +225,11 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
                 param.values = components(item.second.get<std::string>("<xmlattr>.value"), arity->second);
                 material.parameters.push_back(std::move(param));
             }
+        }
+        if(auto graph=tree.get_optional<std::string>("Graph")) {
+            require(graph->size()<=32768,
+                "Native XML YMAT Material Graph exceeds 32 KiB");
+            material.graph_source=*graph;
         }
         result.push_back(std::move(material));
     }

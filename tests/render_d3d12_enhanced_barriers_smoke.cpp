@@ -8,9 +8,12 @@
 #include "../engine/northstarcpp/modules/render/d3d12/renderer_enhanced_barriers.hpp"
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 #define REQUIRE(c) do {if(!(c)) throw std::runtime_error("Enhanced Barrier QA: " #c);} while(false)
 
-int main() {
+int main(int argc,char** argv) {
+    const bool hardware=argc==2 && std::string(argv[1])=="--hardware";
+    if(argc>2 || (argc==2&&!hardware))return 2;
     using namespace northstarcpp::render;
     using namespace northstarcpp::render::d3d12::detail;
     using Microsoft::WRL::ComPtr;
@@ -21,10 +24,26 @@ int main() {
     ComPtr<IDXGIFactory4> factory;
     if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()))))return 77;
     ComPtr<IDXGIAdapter> adapter;
-    if(FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf()))))return 77;
     ComPtr<ID3D12Device> device;
-    if(FAILED(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,
-        IID_PPV_ARGS(device.GetAddressOf()))))return 77;
+    if(hardware) {
+        for(UINT i=0;;++i) {
+            ComPtr<IDXGIAdapter1> candidate;
+            if(FAILED(factory->EnumAdapters1(i,candidate.GetAddressOf())))break;
+            DXGI_ADAPTER_DESC1 desc{};
+            candidate->GetDesc1(&desc);
+            if(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE)continue;
+            if(SUCCEEDED(D3D12CreateDevice(candidate.Get(),D3D_FEATURE_LEVEL_11_0,
+                    IID_PPV_ARGS(device.GetAddressOf())))) {
+                candidate.As(&adapter);break;
+            }
+        }
+        if(!device)return 77;
+    }else {
+        if(FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.GetAddressOf()))))
+            return 77;
+        if(FAILED(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,
+              IID_PPV_ARGS(device.GetAddressOf()))))return 77;
+    }
     if(!enhanced_barriers_supported(device.Get())) {
         std::puts("D3D12 Enhanced Barriers unsupported by this runtime/adapter");
         return 77;
@@ -90,5 +109,6 @@ int main() {
     }
     CloseHandle(event);
     REQUIRE(device->GetDeviceRemovedReason()==S_OK);
-    std::puts("D3D12 Enhanced Barriers: WARP execute/barrier/clear/fence passed");
+    std::printf("D3D12 Enhanced Barriers: %s execute/barrier/clear/fence passed\n",
+        hardware?"hardware":"WARP");
 }

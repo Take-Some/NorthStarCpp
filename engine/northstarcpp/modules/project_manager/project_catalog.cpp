@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <ctime>
 #include <climits>
+#include <cctype>
 #include <cwctype>
 #include <deque>
 #include <fstream>
@@ -448,6 +449,22 @@ Project Catalog::inspect(fs::path const& path) const
         project.description = to_wide(data.get<std::string>("description", ""));
         project.template_id = data.get<std::string>("template", "sandbox");
         project.engine_version = data.get<std::string>("engine_version", "");
+        if(auto providers=data.get_child_optional("providers")) {
+            for(auto const& item:*providers) {
+                auto const& id=item.first;
+                auto const& value=item.second.data();
+                if(id.compare(0,7,"engine.")!=0 || id.size()>96 ||
+                   value.empty() || value.size()>96 ||
+                   !std::all_of(id.begin(),id.end(),[](unsigned char c) {
+                       return std::islower(c)||std::isdigit(c)||c=='.'||c=='_';
+                   }) ||
+                   !std::all_of(value.begin(),value.end(),[](unsigned char c) {
+                       return std::islower(c)||std::isdigit(c)||c=='_'||c=='-';
+                   }) || !item.second.empty())
+                    throw std::runtime_error("Invalid project engine provider selection");
+                project.provider_choices.emplace(id,value);
+            }
+        }
         auto scene_name = data.get<std::string>("startup_scene", startup_name);
         if (!safe_scene(scene_name))
             throw std::runtime_error("Unsafe startup scene path");
@@ -687,6 +704,45 @@ void Catalog::opened(fs::path const& path)
     entry.hidden = false;
     entry.last_opened = timestamp();
     save_catalog(catalog_file_, entries);
+}
+
+void Catalog::set_provider(fs::path const& path,
+                           std::string const& capability,std::string const& provider)
+{
+    auto const project=inspect(path);
+    if(project.status!=Project::Status::ready)
+        throw std::runtime_error("Cannot change providers for an invalid project");
+    auto valid_capability=[](std::string const& id) {
+        return id.size()>7 && id.size()<=96 &&
+            id.compare(0,7,"engine.")==0 &&
+            std::all_of(id.begin(),id.end(),[](unsigned char ch) {
+                return std::islower(ch)||std::isdigit(ch)||ch=='.'||ch=='_';
+            });
+    };
+    if(!valid_capability(capability) ||
+       provider.size()>96 ||
+       !std::all_of(provider.begin(),provider.end(),[](unsigned char ch) {
+           return std::islower(ch)||std::isdigit(ch)||ch=='_'||ch=='-';
+       }))
+        throw std::invalid_argument("Invalid provider selection identifier");
+    auto const manifest=project.directory/manifest_name;
+    if(redirected(manifest))
+        throw std::runtime_error("Refusing to update redirected project manifest");
+    auto data=read_json(manifest);
+    pt::ptree providers;
+    if(auto existing=data.get_child_optional("providers"))providers=*existing;
+    providers.erase(capability);
+    if(!provider.empty()) {
+        // Capability IDs contain dots: put("engine.render",...) would
+        // incorrectly nest {"engine":{"render":...}} instead of preserving
+        // the literal object key "engine.render".
+        pt::ptree value;
+        value.put_value(provider);
+        providers.push_back({capability,std::move(value)});
+    }
+    if(providers.empty())data.erase("providers");
+    else data.put_child("providers",providers);
+    save_json(manifest,data); // existing atomic_write with rollback on failure
 }
 
 void Catalog::forget(fs::path const& path)

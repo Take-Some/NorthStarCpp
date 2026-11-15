@@ -67,6 +67,7 @@ signals:
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
+    bool event(QEvent*) override;
     bool eventFilter(QObject*,QEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;

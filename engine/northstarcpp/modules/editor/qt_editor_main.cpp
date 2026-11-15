@@ -2,6 +2,8 @@
 #include "../shared/startup_report.hpp"
 #include <northstarcpp/logger.hpp>
 #include "qt_editor_viewport.hpp"
+#include "qt_camera_studio.hpp"
+#include <northstarcpp/camera.hpp>
 #include "qt_material_gpu_preview.hpp"
 #include "qt_material_graph_editor.hpp"
 #include "qt_material_authoring.hpp"
@@ -10,6 +12,7 @@
 #include <northstarcpp/material.hpp>
 #include <northstarcpp/assets.hpp>
 #include <QApplication>
+#include "qt_menu_theme.hpp"
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
@@ -24,8 +27,15 @@
 #include <QGraphicsItem>
 #include <QGraphicsRectItem>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QDialog>
+#include <QFile>
 #include <QElapsedTimer>
+#include <QMouseEvent>
 #include <QThread>
 #include <cmath>
 #include <stdexcept>
@@ -41,6 +51,8 @@ static int run_editor(int argc,char** argv,
     });
     app->setApplicationName("NorthStar Qt Editor");
     app->setOrganizationName("Kayla's Systems");
+    northstarcpp::editor::installMenuTheme(
+        *app,northstarcpp::editor::MenuTheme::Dark);
     QCommandLineParser parser;
     parser.setApplicationDescription("Cross-platform Qt 6 NorthStar editor shell");
     parser.addHelpOption();
@@ -48,6 +60,8 @@ static int run_editor(int argc,char** argv,
     QCommandLineOption smoke("smoke","Run dock/scene/binary/asset-drop smoke.");
     QCommandLineOption gpuSmoke("gpu-smoke",
         "Render one real engine.render GPU frame inside Qt native viewport.");
+    QCommandLineOption mouseLookSmoke("mouse-look-smoke",
+        "Verify Qt RMB fly and LMB orbit camera mouse look directions.");
     QCommandLineOption smokeOutput("smoke-output",
         "Save a valid binary scene at FILE for packaged-editor smoke.", "file");
     QCommandLineOption materialPreviewGpuSmoke("material-preview-gpu-smoke",
@@ -58,15 +72,19 @@ static int run_editor(int argc,char** argv,
         "Test Material Graph authoring, compilation and isolated GPU asset staging.");
     QCommandLineOption functionSmoke("material-function-smoke",
         "Run Material Function typed GUI/VFS/GPU preview end-to-end regression.");
+    QCommandLineOption cameraStudioSmoke("camera-studio-smoke",
+        "Verify Camera Studio project VFS presets, UI preview and atomic saving.");
     QCommandLineOption playerCheck("player-check",
         "Verify installed Player can load a scene authored by this editor.");
     parser.addOption(scene);
     parser.addOption(smoke);
     parser.addOption(gpuSmoke);
+    parser.addOption(mouseLookSmoke);
     parser.addOption(smokeOutput);
     parser.addOption(playerCheck);
     parser.addOption(materialGraphSmoke);
     parser.addOption(functionSmoke);
+    parser.addOption(cameraStudioSmoke);
     parser.addOption(materialInstanceSmoke);
     parser.addOption(materialPreviewGpuSmoke);
     startup.measure("qt.arguments", [&] {parser.process(*app);});
@@ -86,8 +104,266 @@ static int run_editor(int argc,char** argv,
         }
     }
     startup.measure("qt.window_show", [&] {window->show();});
+    if(parser.isSet(mouseLookSmoke)) {
+        bool passed=false;
+        try {
+            auto* viewport=window->findChild<
+                northstarcpp::editor::QtEditorViewport*>("sceneViewport");
+            if(!viewport)throw std::runtime_error("Qt Scene Viewport not found");
+            QCoreApplication::processEvents();
+            auto mouseGesture=[&](Qt::MouseButton button,QPointF from,QPointF to) {
+                QMouseEvent press(QEvent::MouseButtonPress,from,
+                    QPointF(viewport->mapToGlobal(from.toPoint())),
+                    button,button,Qt::NoModifier);
+                QCoreApplication::sendEvent(viewport,&press);
+                QMouseEvent move(QEvent::MouseMove,to,
+                    QPointF(viewport->mapToGlobal(to.toPoint())),
+                    Qt::NoButton,button,Qt::NoModifier);
+                QCoreApplication::sendEvent(viewport,&move);
+                QMouseEvent release(QEvent::MouseButtonRelease,to,
+                    QPointF(viewport->mapToGlobal(to.toPoint())),
+                    button,Qt::NoButton,Qt::NoModifier);
+                QCoreApplication::sendEvent(viewport,&release);
+            };
+            auto pose=viewport->camera().pose;
+            pose.position={0.f,1.f,-10.f};
+            pose.yaw=pose.pitch=0.f;
+            viewport->setOrbitMode(false,{0,1,0},4.f);
+            viewport->setCameraPose(pose);
+            mouseGesture(Qt::RightButton,{260,180},{305,138});
+            if(viewport->camera().pose.yaw<=.001f ||
+               viewport->camera().pose.pitch<=.001f)
+                throw std::runtime_error(
+                    "RMB fly drag right/up uses inverted look direction");
+            // Hover without a held mouse button must not rotate the view.
+            auto const afterDrag=viewport->camera().pose;
+            QMouseEvent hover(QEvent::MouseMove,{275,210},
+                QPointF(viewport->mapToGlobal(QPoint(275,210))),
+                Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+            QCoreApplication::sendEvent(viewport,&hover);
+            if(std::abs(viewport->camera().pose.yaw-afterDrag.yaw)>1.e-6f ||
+               std::abs(viewport->camera().pose.pitch-afterDrag.pitch)>1.e-6f)
+                throw std::runtime_error("Camera rotates on passive hover");
+            viewport->setOrbitMode(true,{0.f,1.f,0.f},4.f);
+            viewport->setOrbitAngles(0.f,0.f);
+            mouseGesture(Qt::LeftButton,{260,180},{305,138});
+            auto const& orbit=viewport->camera();
+            if(orbit.pose.yaw<=.001f || orbit.pose.pitch<=.001f)
+                throw std::runtime_error(
+                    "LMB orbit drag right/up uses inverted look direction");
+            auto const f=orbit.forward();
+            auto const d=viewport->orbitDistance();
+            auto const pivot=northstarcpp::Vector3{
+                orbit.pose.position.x+f.x*d,
+                orbit.pose.position.y+f.y*d,
+                orbit.pose.position.z+f.z*d};
+            if(std::abs(pivot.x)>1.e-3f ||
+               std::abs(pivot.y-1.f)>1.e-3f ||
+               std::abs(pivot.z)>1.e-3f)
+                throw std::runtime_error("Orbit target moved during mouse look");
+            viewport->setOrbitMode(false,{0.f,1.f,0.f},4.f);
+            // Unreal-style flight: RMB must be held; plain W/A/S/D/Q/E
+            // must work without Ctrl. A standalone key press must not fly.
+            auto keyboard=[&](int key,bool down,Qt::KeyboardModifiers modifiers=
+                    Qt::NoModifier) {
+                QKeyEvent evt(down?QEvent::KeyPress:QEvent::KeyRelease,
+                              key,modifiers);
+                QCoreApplication::sendEvent(viewport,&evt);
+                return evt.isAccepted();
+            };
+            auto mouseButton=[&](bool down) {
+                QMouseEvent evt(down?QEvent::MouseButtonPress:
+                    QEvent::MouseButtonRelease,{260,180},
+                    QPointF(viewport->mapToGlobal(QPoint(260,180))),
+                    Qt::RightButton,
+                    down?Qt::RightButton:Qt::NoButton,Qt::NoModifier);
+                QCoreApplication::sendEvent(viewport,&evt);
+            };
+            viewport->setFocus(Qt::OtherFocusReason);
+            viewport->setCameraPose(pose);
+            keyboard(Qt::Key_W,true);
+            viewport->advanceFly(.1f);
+            keyboard(Qt::Key_W,false);
+            if(viewport->camera().pose.position.z!=pose.position.z)
+                throw std::runtime_error("W moves the camera without RMB");
+            mouseButton(true);
+            // Qt's ShortcutOverride must capture W before menu actions,
+            // independent of Ctrl modifier.
+            QKeyEvent shortcut(QEvent::ShortcutOverride,Qt::Key_W,Qt::NoModifier);
+            shortcut.ignore();
+            QCoreApplication::sendEvent(viewport,&shortcut);
+            if(!shortcut.isAccepted())
+                throw std::runtime_error("RMB+W not protected from menu shortcut");
+            mouseButton(false);
+            shortcut.ignore();
+            QCoreApplication::sendEvent(viewport,&shortcut);
+            if(shortcut.isAccepted())
+                throw std::runtime_error("W shortcut captured outside flight");
+            auto checkMovement=[&](int key,northstarcpp::Vector3 expected) {
+                viewport->setCameraPose(pose);
+                mouseButton(true);
+                if(!keyboard(key,true))
+                    throw std::runtime_error("RMB navigation key was rejected");
+                viewport->advanceFly(.1f);
+                keyboard(key,false);
+                mouseButton(false);
+                auto const now=viewport->camera().pose.position;
+                auto const delta=northstarcpp::Vector3{now.x-pose.position.x,
+                    now.y-pose.position.y,now.z-pose.position.z};
+                auto const along=delta.x*expected.x+
+                    delta.y*expected.y+delta.z*expected.z;
+                if(along<=.005f)
+                    throw std::runtime_error(
+                        "RMB+key="+std::to_string(key)+
+                        " wrong direction: dx="+std::to_string(delta.x)+
+                        " dy="+std::to_string(delta.y)+
+                        " dz="+std::to_string(delta.z));
+                // Releasing RMB must also cancel held flight/inertia.
+                viewport->advanceFly(.1f);
+                auto const after=viewport->camera().pose.position;
+                if(after.x!=now.x || after.y!=now.y || after.z!=now.z)
+                    throw std::runtime_error("Flight continues after RMB release");
+            };
+            checkMovement(Qt::Key_W,{0.f,0.f,1.f});
+            checkMovement(Qt::Key_S,{0.f,0.f,-1.f});
+            checkMovement(Qt::Key_A,{-1.f,0.f,0.f});
+            checkMovement(Qt::Key_D,{1.f,0.f,0.f});
+            checkMovement(Qt::Key_Q,{0.f,-1.f,0.f});
+            checkMovement(Qt::Key_E,{0.f,1.f,0.f});
+#ifdef _WIN32
+            // Windows physical scan code for the W key. Supports Cyrillic
+            // keyboard layouts even when Qt's symbolic key is not Latin W.
+            viewport->setCameraPose(pose);
+            mouseButton(true);
+            QKeyEvent nativeW(QEvent::KeyPress,Qt::Key_unknown,
+                Qt::NoModifier,0x11,0,0);
+            QCoreApplication::sendEvent(viewport,&nativeW);
+            viewport->advanceFly(.1f);
+            QKeyEvent nativeWRelease(QEvent::KeyRelease,Qt::Key_unknown,
+                Qt::NoModifier,0x11,0,0);
+            QCoreApplication::sendEvent(viewport,&nativeWRelease);
+            mouseButton(false);
+            if(viewport->camera().pose.position.z<=pose.position.z+.005f)
+                throw std::runtime_error(
+                    "Physical W scan code ignored in non-Latin keyboard layout");
+#endif
+            passed=true;
+        }catch(std::exception const& error) {
+            std::cerr<<"Qt camera mouse-look smoke failed: "<<error.what()
+                     <<std::endl;
+        }
+        std::cout<<"Qt RMB fly + LMB orbit mouse-look direction: "
+                 <<(passed?"PASS":"FAIL")<<std::endl;
+        return passed?0:17;
+    }
     if(parser.isSet(functionSmoke))
         return run_material_function_smoke();
+    if(parser.isSet(cameraStudioSmoke)) {
+        QTemporaryDir project;
+        bool ok=project.isValid();
+        QString error;
+        try {
+            if(!ok)throw std::runtime_error("No temporary camera project");
+            auto const root=std::filesystem::u8path(
+                (project.path()+"/assets").toUtf8().toStdString());
+            auto* viewport=window->findChild<
+                northstarcpp::editor::QtEditorViewport*>();
+            if(!viewport)
+                throw std::runtime_error("Qt Editor Viewport not available");
+            if(!window->findChild<QAction*>("openCameraStudioAction"))
+                throw std::runtime_error("Camera Studio View action absent");
+            northstarcpp::editor::openCameraStudio(window.get(),viewport,root);
+            QCoreApplication::processEvents();
+            auto* dialog=window->findChild<QDialog*>("northstarCameraStudio");
+            if(!dialog)
+                throw std::runtime_error("Camera Studio dialog did not open");
+            auto* id=dialog->findChild<QLineEdit*>("cameraPresetSource");
+            auto* x=dialog->findChild<QDoubleSpinBox*>("cameraPresetField0");
+            auto* fov=dialog->findChild<QDoubleSpinBox*>("cameraPresetField6");
+            auto* priority=dialog->findChild<QSpinBox*>("cameraPresetPriority");
+            auto* blend=dialog->findChild<QDoubleSpinBox*>("cameraPresetBlend");
+            auto* preview=dialog->findChild<QPushButton*>("cameraPresetPreview");
+            auto* store=dialog->findChild<QPushButton*>("cameraPresetStore");
+            auto* save=dialog->findChild<QPushButton*>("cameraPresetSave");
+            auto* reload=dialog->findChild<QPushButton*>("cameraPresetReload");
+            if(!id||!x||!fov||!priority||!blend||
+               !preview||!store||!save||!reload)
+                throw std::runtime_error("Camera Studio controls not ready");
+            id->setText("cinematic.qt_smoke");
+            x->setValue(27.5);
+            fov->setValue(58.0);
+            priority->setValue(70);
+            blend->setValue(.4);
+            preview->click();
+            QCoreApplication::processEvents();
+            if(std::abs(viewport->camera().pose.position.x-27.5f)>.01f ||
+               std::abs(viewport->camera().pose.fov_y_degrees-58.f)>.01f)
+                throw std::runtime_error("Camera Studio preview did not drive viewport");
+            store->click();
+            save->click();
+            QCoreApplication::processEvents();
+            auto file=root/"gameplay"/"camera_presets.json";
+            QFile disk(QString::fromUtf8(file.u8string().c_str()));
+            if(!disk.open(QIODevice::ReadOnly))
+                throw std::runtime_error("Camera Studio did not create project preset");
+            auto bytes=disk.readAll();
+            auto presets=northstarcpp::parse_camera_presets(std::string(
+                bytes.constData(),std::size_t(bytes.size())));
+            if(presets.size()!=1 ||
+               presets.front().source!="cinematic.qt_smoke" ||
+               presets.front().priority!=70 ||
+               std::abs(presets.front().pose.position.x-27.5f)>.01f ||
+               std::abs(presets.front().pose.fov_y_degrees-58.f)>.01f)
+                throw std::runtime_error("Studio save/codec project roundtrip failed");
+            reload->click();
+            QCoreApplication::processEvents();
+            auto* picker=dialog->findChild<QComboBox*>("cameraPresetPicker");
+            if(!picker || picker->count()!=1 ||
+               picker->currentText()!="cinematic.qt_smoke")
+                throw std::runtime_error("Camera Studio reload did not preserve asset");
+
+            auto* editTuning=dialog->findChild<QPushButton*>("cameraTuningOpen");
+            if(!editTuning)
+                throw std::runtime_error("Gameplay Camera Tuning action missing");
+            editTuning->click();
+            QCoreApplication::processEvents();
+            auto* tuning=dialog->findChild<QDialog*>("northstarCameraTuning");
+            if(!tuning)
+                throw std::runtime_error("Gameplay Camera Tuning dialog missing");
+            auto* frequency=tuning->findChild<QDoubleSpinBox*>("cameraTuningField9");
+            auto* collisionRadius=tuning->findChild<QDoubleSpinBox*>(
+                "cameraTuningField12");
+            auto* tuningSave=tuning->findChild<QPushButton*>("cameraTuningSave");
+            if(!frequency||!collisionRadius||!tuningSave)
+                throw std::runtime_error("Gameplay tuning fields are incomplete");
+            frequency->setValue(3.7);
+            collisionRadius->setValue(.31);
+            tuningSave->click();
+            QCoreApplication::processEvents();
+            auto tuningPath=root/"gameplay"/"camera.json";
+            QFile tuningFile(QString::fromUtf8(tuningPath.u8string().c_str()));
+            if(!tuningFile.open(QIODevice::ReadOnly))
+                throw std::runtime_error("Gameplay Camera Tuning did not save");
+            auto config=tuningFile.readAll();
+            auto parsed=northstarcpp::parse_camera_settings(
+                std::string(config.constData(),std::size_t(config.size())));
+            if(std::abs(parsed.follow_spring_frequency_hz-3.7f)>.001f ||
+               std::abs(parsed.collision_radius-.31f)>.001f)
+                throw std::runtime_error(
+                    "Gameplay Camera Tuning save did not retain native fields");
+            dialog->close();
+            ok=true;
+        }catch(std::exception const& e) {
+            ok=false;
+            error=QString::fromUtf8(e.what());
+        }
+        std::cout<<"Qt Camera Studio Viewport/VFS/atomic-save: "
+                 <<(ok?"PASS":"FAIL");
+        if(!error.isEmpty())std::cout<<" "<<error.toStdString();
+        std::cout<<std::endl;
+        return ok?0:14;
+    }
+
     if(parser.isSet(materialPreviewGpuSmoke)) {
         QTemporaryDir project;
         if(!project.isValid())return 10;

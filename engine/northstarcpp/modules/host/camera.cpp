@@ -8,6 +8,8 @@
 #include <sstream>
 #include <northstarcpp/collision_queries.hpp>
 #include <algorithm>
+#include <cctype>
+#include <utility>
 #include <cmath>
 #include <stdexcept>
 
@@ -30,13 +32,38 @@ Vector3 delta(Vector3 const& a, Vector3 const& b) {
 float distance(Vector3 const& a, Vector3 const& b) {
     auto const d=delta(a,b);return std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
 }
+// Closed-form critically damped spring: invariant for fixed targets.
+void critically_damped(float& x,float& velocity,float goal,float omega,
+                       float dt) noexcept {
+    float const offset=x-goal;
+    float const impulse=(velocity+omega*offset)*dt;
+    float const decay=std::exp(-omega*dt);
+    x=goal+(offset+impulse)*decay;
+    velocity=(velocity-omega*impulse)*decay;
+}
+Vector3 bounded(Vector3 v,float max_distance) noexcept {
+    auto const magnitude=std::hypot(v.x,v.y,v.z);
+    if (magnitude>max_distance && magnitude>0.f) {
+        auto const ratio=max_distance/magnitude;
+        v.x*=ratio;v.y*=ratio;v.z*=ratio;
+    }
+    return v;
+}
 void ensure(bool condition, char const* message) {
     if (!condition) throw std::invalid_argument(message);
 }
 void check_pose(CameraPose const& p) {
-    ensure(finite(p.position) && finite(p.yaw) && finite(p.pitch) && finite(p.roll) &&
-           finite(p.fov_y_degrees) && finite(p.near_plane) && finite(p.far_plane),
-           "Non-finite camera pose");
+    if(!(finite(p.position) && finite(p.yaw) && finite(p.pitch) &&
+         finite(p.roll) && finite(p.fov_y_degrees) &&
+         finite(p.near_plane) && finite(p.far_plane))) {
+        std::ostringstream message;
+        message<<"Non-finite camera pose x="<<p.position.x
+               <<" y="<<p.position.y<<" z="<<p.position.z
+               <<" yaw="<<p.yaw<<" pitch="<<p.pitch
+               <<" roll="<<p.roll<<" fov="<<p.fov_y_degrees
+               <<" near="<<p.near_plane<<" far="<<p.far_plane;
+        throw std::invalid_argument(message.str());
+    }
     ensure(std::abs(p.pitch) < pi*.5f && p.fov_y_degrees>=25.f &&
            p.fov_y_degrees<=120.f && p.near_plane>=0.01f &&
            p.near_plane<=2.f && p.far_plane>p.near_plane+1.f &&
@@ -50,7 +77,9 @@ void check_settings(CameraSettings const& s) {
             s.orbit_distance,s.orbit_speed,
             s.follow_smoothing,s.collision_radius,s.collision_padding,
             s.teleport_cut_distance,s.default_fov_y,s.aimed_fov_y,
-            s.near_plane,s.far_plane})
+            s.near_plane,s.far_plane,s.follow_spring_frequency_hz,
+            s.third_person_lookahead_seconds,s.third_person_lookahead_max,
+            s.lookahead_damping_seconds,s.collision_restore_seconds})
         ensure(finite(v),"Non-finite camera settings");
     ensure(s.third_person_distance>=0.5f && s.third_person_distance<=100.f &&
            s.third_person_height>=-10.f && s.third_person_height<=20.f &&
@@ -71,7 +100,17 @@ void check_settings(CameraSettings const& s) {
            s.default_fov_y>=25.f && s.default_fov_y<=120.f &&
            s.aimed_fov_y>=25.f && s.aimed_fov_y<=120.f &&
            s.near_plane>=0.01f && s.near_plane<=2.f &&
-           s.far_plane>s.near_plane+1.f && s.far_plane<=10000.f,
+           s.far_plane>s.near_plane+1.f && s.far_plane<=10000.f &&
+           s.follow_spring_frequency_hz>=0.f &&
+           s.follow_spring_frequency_hz<=20.f &&
+           s.third_person_lookahead_seconds>=0.f &&
+           s.third_person_lookahead_seconds<=2.f &&
+           s.third_person_lookahead_max>=0.f &&
+           s.third_person_lookahead_max<=20.f &&
+           s.lookahead_damping_seconds>=0.f &&
+           s.lookahead_damping_seconds<=2.f &&
+           s.collision_restore_seconds>=0.f &&
+           s.collision_restore_seconds<=4.f,
            "Camera settings outside supported range");
 }
 CameraPose blend(CameraPose const& a, CameraPose const& b, float t) {
@@ -90,7 +129,21 @@ void look_at(CameraPose& p, Vector3 const& goal) {
     p.yaw=std::atan2(d.x,d.z);
     p.pitch=std::atan2(d.y,std::hypot(d.x,d.z));
 }
-} // namespace
+ } // namespace
+
+void validate_camera_shot(CameraShot const& shot) {
+    ensure(!shot.source.empty() && shot.source.size()<=80,
+           "Camera shot source must contain 1..80 characters");
+    for(unsigned char c:shot.source)
+        ensure(std::isalnum(c) || c=='.' || c=='_' || c=='-' || c==':',
+               "Camera shot source contains unsupported characters");
+    ensure(shot.priority>=-100 && shot.priority<=100,
+           "Camera shot priority must be -100..100");
+    ensure(finite(shot.blend_seconds) &&
+           shot.blend_seconds>=0.f && shot.blend_seconds<=10.f,
+           "Camera shot blend must be 0..10 seconds");
+    check_pose(shot.pose);
+}
 
 CameraSettings parse_camera_settings(std::string const& json) {
     ensure(json.size()<=16384,"Camera settings exceed 16 KiB");
@@ -125,6 +178,16 @@ CameraSettings parse_camera_settings(std::string const& json) {
     settings.aimed_fov_y=data.get<float>("projection.aimed_fov_y_degrees",settings.aimed_fov_y);
     settings.near_plane=data.get<float>("projection.near",settings.near_plane);
     settings.far_plane=data.get<float>("projection.far",settings.far_plane);
+    settings.follow_spring_frequency_hz=data.get<float>(
+        "smoothing.spring_frequency_hz",settings.follow_spring_frequency_hz);
+    settings.third_person_lookahead_seconds=data.get<float>(
+        "third_person.lookahead_seconds",settings.third_person_lookahead_seconds);
+    settings.third_person_lookahead_max=data.get<float>(
+        "third_person.lookahead_max",settings.third_person_lookahead_max);
+    settings.lookahead_damping_seconds=data.get<float>(
+        "smoothing.lookahead_seconds",settings.lookahead_damping_seconds);
+    settings.collision_restore_seconds=data.get<float>(
+        "collision.restore_seconds",settings.collision_restore_seconds);
     check_settings(settings);
     return settings;
 }
@@ -148,9 +211,37 @@ void CameraDirector::set_mode(CameraMode mode, float duration) {
            "Invalid camera transition duration");
     if (mode_==mode) return;
     mode_=mode;
+    follow_velocity_={0.f,0.f,0.f};
+    lookahead_offset_={0.f,0.f,0.f};
+    collision_limit_=-1.f;
     transition_from_=pose_;
     transition_seconds_=(initialized_ ? duration : 0.f);
     transition_elapsed_=0.f;
+}
+void CameraDirector::push_shot(CameraShot shot) {
+    validate_camera_shot(shot);
+    auto const found=std::find_if(shots_.begin(),shots_.end(),
+        [&](SequencedShot const& entry){
+            return entry.shot.source==shot.source;
+        });
+    if(found==shots_.end() && shots_.size()>=16)
+        throw std::length_error("Camera director supports at most 16 active shots");
+    auto const next_order=++shot_order_;
+    if(found==shots_.end())
+        shots_.push_back({std::move(shot),next_order});
+    else {
+        found->shot=std::move(shot);
+        found->order=next_order;
+    }
+}
+void CameraDirector::clear_shot(std::string const& source) {
+    shots_.erase(std::remove_if(shots_.begin(),shots_.end(),
+        [&](SequencedShot const& entry){
+            return entry.shot.source==source;
+        }),shots_.end());
+}
+void CameraDirector::clear_shots() noexcept {
+    shots_.clear();
 }
 void CameraDirector::set_zoom(float amount) {
     ensure(finite(amount) && amount>=0.f && amount<=1.f,"Invalid camera zoom");
@@ -194,8 +285,17 @@ void CameraDirector::shake(float amplitude, float duration) {
     shake_duration_=duration;
     shake_remaining_=duration;
 }
-void CameraDirector::reset() {
+void CameraDirector::cut() noexcept {
     initialized_=false;
+    transition_seconds_=transition_elapsed_=0.f;
+    follow_velocity_={0.f,0.f,0.f};
+    lookahead_offset_={0.f,0.f,0.f};
+    collision_limit_=-1.f;
+}
+void CameraDirector::reset() {
+    cut();
+    clear_shots();
+    active_shot_.clear();
     transition_seconds_=transition_elapsed_=0.f;
     shake_remaining_=shake_duration_=shake_amplitude_=0.f;
     time_=orbit_phase_=0.f;
@@ -235,9 +335,7 @@ CameraPose CameraDirector::desired(CameraTarget const& t, float dt) {
     bool const vehicle = mode_==CameraMode::vehicle_chase;
     float heading=vehicle ? t.heading : t.yaw;
     float const vehicle_speed=vehicle ?
-        std::sqrt(t.velocity.x*t.velocity.x+
-                  t.velocity.y*t.velocity.y+
-                  t.velocity.z*t.velocity.z) : 0.f;
+        std::hypot(t.velocity.x,t.velocity.y,t.velocity.z) : 0.f;
     float radius=vehicle
         ? (t.reversing ? settings_.vehicle_reverse_distance
                        : settings_.vehicle_distance +
@@ -251,11 +349,32 @@ CameraPose CameraDirector::desired(CameraTarget const& t, float dt) {
         heading+=orbit_phase_;
     }
     Vector3 anchor=vehicle ? t.eye : p.position;
+    // Independent predictive framing with a bounded, damped lead offset.
+    // math::float3 has a user-declared default constructor; do not assume
+    // brace-default construction clears all components on every compiler.
+    Vector3 predicted{0.f,0.f,0.f};
     if (vehicle) {
-        float const lead=settings_.vehicle_lookahead_seconds;
-        anchor.x+=std::clamp(t.velocity.x*lead,-6.f,6.f);
-        anchor.y+=std::clamp(t.velocity.y*lead,-3.f,3.f);
-        anchor.z+=std::clamp(t.velocity.z*lead,-6.f,6.f);
+        predicted={std::clamp(t.velocity.x*settings_.vehicle_lookahead_seconds,
+                              -6.f,6.f),
+                   std::clamp(t.velocity.y*settings_.vehicle_lookahead_seconds,
+                              -3.f,3.f),
+                   std::clamp(t.velocity.z*settings_.vehicle_lookahead_seconds,
+                              -6.f,6.f)};
+    } else if (mode_==CameraMode::third_person) {
+        predicted=bounded({
+            t.velocity.x*settings_.third_person_lookahead_seconds,
+            t.velocity.y*settings_.third_person_lookahead_seconds,
+            t.velocity.z*settings_.third_person_lookahead_seconds
+        },settings_.third_person_lookahead_max);
+    }
+    float const lead_tau=settings_.lookahead_damping_seconds;
+    float const amount=lead_tau>0.f?1.f-std::exp(-dt/lead_tau):1.f;
+    if (!initialized_)lookahead_offset_=predicted;
+    else lookahead_offset_=lerp(lookahead_offset_,predicted,amount);
+    anchor.x+=lookahead_offset_.x;
+    anchor.y+=lookahead_offset_.y;
+    anchor.z+=lookahead_offset_.z;
+    if (vehicle) {
         p.fov_y_degrees=std::clamp(p.fov_y_degrees +
             vehicle_speed*settings_.vehicle_speed_fov,25.f,120.f);
         p.roll=std::clamp(-t.steering,-1.f,1.f) *
@@ -282,8 +401,26 @@ Vector3 CameraDirector::clip_line_of_sight(Vector3 pivot, Vector3 wanted,
     for (std::size_t i=0;i<world.objects.size();++i) {
         if (i==ignore) continue;
         auto const& obj=world.objects[i];
+        if (world.version==3 && (!obj.node.visible || !obj.node.collision))
+            continue;
         if (!finite(obj.position) || !finite(obj.size) || obj.size<=0.f) continue;
+        // Cheap conservative bound rejects distant actors before creating
+        // their AABB or entering narrow-phase ray/box intersection. This is
+        // valuable for large streamed cities when the physics provider is
+        // temporarily unavailable during editor or startup previews.
         float const r=obj.size*.5f+settings_.collision_radius;
+        float const sphere=1.7320508075688772f*r;
+        Vector3 const center{obj.position.x,
+            obj.position.y+obj.size*.5f,obj.position.z};
+        Vector3 const relative=delta(center,pivot);
+        float const along=relative.x*direction.x+
+                          relative.y*direction.y+
+                          relative.z*direction.z;
+        if (along < -sphere || along > nearest+sphere)continue;
+        float const perpendicular_squared=std::max(0.f,
+            relative.x*relative.x+relative.y*relative.y+
+            relative.z*relative.z-along*along);
+        if(perpendicular_squared>sphere*sphere)continue;
         math::aabb bounds;
         bounds.min={obj.position.x-r,
                     obj.position.y-settings_.collision_radius,
@@ -311,11 +448,43 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
               t.attachment.weight>=0.f && t.attachment.weight<=1.f)),
            "Non-finite camera target");
     time_+=dt;
-    CameraPose wanted=desired(t,dt);
     Vector3 const pivot=(t.attachment.enabled &&
             mode_!=CameraMode::vehicle_chase)
         ? lerp(t.eye,t.attachment.world_position,t.attachment.weight)
         : t.eye;
+    if(initialized_ &&
+       distance(pivot,previous_eye_)>settings_.teleport_cut_distance)
+        cut(); // No temporal trail or stale collision state across sectors.
+    // Deterministic request arbitration; the most recently registered
+    // request wins priority ties. A gameplay camera remains authoritative
+    // whenever there is no active cinematic request.
+    SequencedShot const* selected=nullptr;
+    for(auto const& request:shots_)
+        if(!selected || request.shot.priority>selected->shot.priority ||
+           (request.shot.priority==selected->shot.priority &&
+            request.order>selected->order))
+            selected=&request;
+    std::string const winner=selected?selected->shot.source:std::string{};
+    if(winner!=active_shot_) {
+        transition_from_=pose_;
+        auto const blend_seconds=selected?
+            selected->shot.blend_seconds :
+            (mode_==CameraMode::first_person?0.f:last_shot_blend_seconds_);
+        if(selected)
+            last_shot_blend_seconds_=selected->shot.blend_seconds;
+        transition_seconds_=initialized_?blend_seconds:0.f;
+        transition_elapsed_=0.f;
+        follow_velocity_={0.f,0.f,0.f};
+        collision_limit_=-1.f;
+        lookahead_offset_={0.f,0.f,0.f};
+        active_shot_=winner;
+    }
+    CameraPose wanted=selected?selected->shot.pose:desired(t,dt);
+    try {check_pose(wanted);}
+    catch(std::invalid_argument const& error) {
+        throw std::invalid_argument(
+            std::string("Camera pre-collision pose: ")+error.what());
+    }
     auto clip_physics = [&](Vector3 const& desired_position) {
         auto const ray=delta(desired_position,pivot);
         float const length=distance(desired_position,pivot);
@@ -329,20 +498,56 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
                        pivot.y+ray.y*fraction,
                        pivot.z+ray.z*fraction};
     };
-    bool const has_collision = mode_!=CameraMode::first_person &&
+    bool const has_collision = !selected &&
+        mode_!=CameraMode::first_person &&
         mode_!=CameraMode::free && mode_!=CameraMode::cinematic;
-    if (has_collision && physics) {
-        wanted.position=clip_physics(wanted.position);
-    } else if (has_collision && world) {
-        wanted.position=clip_line_of_sight(pivot,wanted.position,*world,t.ignore_object);
+    if (has_collision && (physics || world)) {
+        Vector3 const requested=wanted.position;
+        if (physics)
+            wanted.position=clip_physics(wanted.position);
+        else {
+            auto const requested_position=wanted.position;
+            wanted.position=clip_line_of_sight(
+                pivot,wanted.position,*world,t.ignore_object);
+            if(!finite(wanted.position)) {
+                std::ostringstream detail;
+                detail<<"Camera fallback collision returned non-finite position"
+                      <<" pivot="<<pivot.x<<","<<pivot.y<<","<<pivot.z
+                      <<" requested="<<requested_position.x<<","
+                      <<requested_position.y<<","<<requested_position.z
+                      <<" occluders="<<world->objects.size();
+                throw std::invalid_argument(detail.str());
+            }
+        }
+        float const allowed=distance(pivot,wanted.position);
+        if (!initialized_ || collision_limit_<0.f ||
+            allowed<collision_limit_) {
+            // Instantly move toward an occluder: no wall clipping or
+            // delayed response when a fast vehicle enters a narrow gap.
+            collision_limit_=allowed;
+        } else {
+            float const tau=settings_.collision_restore_seconds;
+            float const amount=tau>0.f?1.f-std::exp(-dt/tau):1.f;
+            collision_limit_=lerp(collision_limit_,allowed,amount);
+        }
+        float const requested_distance=distance(pivot,requested);
+        if (requested_distance>1.e-6f && collision_limit_<allowed) {
+            auto const ratio=collision_limit_/requested_distance;
+            wanted.position={pivot.x+(requested.x-pivot.x)*ratio,
+                             pivot.y+(requested.y-pivot.y)*ratio,
+                             pivot.z+(requested.z-pivot.z)*ratio};
+        }
+    } else collision_limit_=-1.f;
+    try {check_pose(wanted);}
+    catch(std::invalid_argument const& error) {
+        throw std::invalid_argument(std::string("Camera desired pose: ")+error.what());
     }
-    check_pose(wanted);
 
-    bool const snap=!initialized_ ||
-        distance(pivot,previous_eye_)>settings_.teleport_cut_distance;
+    bool const snap=!initialized_;
     previous_eye_=pivot;
     if (snap) {
         pose_=wanted;
+        follow_velocity_={0.f,0.f,0.f};
         transition_seconds_=transition_elapsed_=0.f;
         initialized_=true;
     } else {
@@ -350,13 +555,36 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         float const a=tau>0.f ? 1.f-std::exp(-dt/tau) : 1.f;
         // FPS camera must exactly track gameplay orientation and eye point:
         // aiming and hitscan use the same authoritative yaw/pitch.
-        if (mode_==CameraMode::first_person) {
+        if(selected || mode_==CameraMode::cinematic ||
+           mode_==CameraMode::free) {
+            // Authored cinematic tracks and free-camera poses are already
+            // authoritative. Do not apply third-person follow inertia
+            // when returning from a priority override.
+            pose_=wanted;
+            follow_velocity_={0.f,0.f,0.f};
+        } else if (mode_==CameraMode::first_person) {
             float const previous_fov=pose_.fov_y_degrees;
             pose_=wanted;
+            follow_velocity_={0.f,0.f,0.f};
             // FPS aiming remains exact; only the lens FOV eases.
             pose_.fov_y_degrees=lerp(previous_fov,wanted.fov_y_degrees,a);
         } else {
-            pose_=blend(pose_,wanted,a);
+            CameraPose smoothed=blend(pose_,wanted,a);
+            float const frequency=settings_.follow_spring_frequency_hz;
+            if (frequency>0.f) {
+                float const omega=2.f*pi*frequency;
+                // Apply the analytic spring to the previous authoritative
+                // position, never to an already linearly filtered value:
+                // that would make the response depend on frame subdivision.
+                smoothed.position=pose_.position;
+                critically_damped(smoothed.position.x,follow_velocity_.x,
+                    wanted.position.x,omega,dt);
+                critically_damped(smoothed.position.y,follow_velocity_.y,
+                    wanted.position.y,omega,dt);
+                critically_damped(smoothed.position.z,follow_velocity_.z,
+                    wanted.position.z,omega,dt);
+            } else follow_velocity_={0.f,0.f,0.f};
+            pose_=smoothed;
         }
         if (transition_seconds_>0.f) {
             transition_elapsed_+=dt;
@@ -367,10 +595,25 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         }
     }
     // Never leave a third-person camera behind an occluder after smoothing.
-    if (has_collision && physics)
-        pose_.position=clip_physics(pose_.position);
-    else if (has_collision && world)
-        pose_.position=clip_line_of_sight(pivot,pose_.position,*world,t.ignore_object);
+    if (has_collision && (physics || world)) {
+        auto const attempted=pose_.position;
+        if (physics)
+            pose_.position=clip_physics(pose_.position);
+        else
+            pose_.position=clip_line_of_sight(
+                pivot,pose_.position,*world,t.ignore_object);
+        auto const length=distance(pivot,pose_.position);
+        if (collision_limit_>=0.f && length>collision_limit_ &&
+            length>1.e-6f) {
+            float const ratio=collision_limit_/length;
+            pose_.position={
+                pivot.x+(pose_.position.x-pivot.x)*ratio,
+                pivot.y+(pose_.position.y-pivot.y)*ratio,
+                pivot.z+(pose_.position.z-pivot.z)*ratio};
+        }
+        if (distance(attempted,pose_.position)>1.e-4f)
+            follow_velocity_={0.f,0.f,0.f}; // Contact must not leave hidden spring energy.
+    }
 
     CameraPose render=pose_;
     if (shake_remaining_>0.f && shake_duration_>0.f) {
@@ -380,7 +623,10 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         render.position.y+=std::sin(time_*35.7f+1.1f)*amplitude*.6f;
         shake_remaining_=std::max(0.f,shake_remaining_-dt);
     }
-    check_pose(render);
+    try {check_pose(render);}
+    catch(std::invalid_argument const& error) {
+        throw std::invalid_argument(std::string("Camera render pose: ")+error.what());
+    }
     return render;
 }
 
