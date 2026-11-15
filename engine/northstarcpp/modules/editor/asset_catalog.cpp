@@ -1,5 +1,6 @@
 // Cross-platform asset catalog; source of truth is project Content directory.
 #include <northstarcpp/editor_asset_catalog.hpp>
+#include "asset_catalog_nef8_cache.hpp"
 #include <northstarcpp/shared_assets.hpp>
 #include <northstarcpp/scene.hpp>
 #include <algorithm>
@@ -57,12 +58,13 @@ char const* kind_name(AssetKind k) noexcept {
     case AssetKind::script:return "Script";
     case AssetKind::animation:return "Animation";
     case AssetKind::shader:return "Shader";
+    case AssetKind::skeleton:return "Skeleton";
     default:return "Other";
     }
 }
 AssetKind kind_from_extension(fs::path const& p) noexcept {
     auto e=lowercase(p.extension().u8string());
-    if(e==".ydd" || e==".mesh" || e==".obj" || e==".fbx" ||
+    if(e==".ydd" || e==".ydr" || e==".mesh" || e==".obj" || e==".fbx" ||
        e==".gltf" || e==".glb")return AssetKind::mesh;
     auto const filename=lowercase(p.filename().u8string());
     static constexpr char character_suffix[]=".character.json";
@@ -90,6 +92,7 @@ AssetKind kind_from_extension(fs::path const& p) noexcept {
     if(e==".nscn" || e==".nscene" || e==".ymap" || e==".world")return AssetKind::scene;
     if(e==".js" || e==".mjs" || e==".ysc" || e==".lua" ||
        e==".ts" || e==".py")return AssetKind::script;
+    if(e==".ymt")return AssetKind::skeleton;
     if(e==".anim" || e==".ycd" || e==".gltfanim")return AssetKind::animation;
     if(e==".hlsl" || e==".hlsli" || e==".shader" || e==".vs" ||
        e==".ps" || e==".cs" || e==".glsl" || e==".spv")
@@ -111,7 +114,11 @@ bool safe_virtual_path(std::string const& name) noexcept {
     return name.back()!='/';
 }
 void AssetCatalog::scan(fs::path root,std::size_t max_records) {
-    entries_.clear();truncated_=false;
+    entries_.clear();
+    entry_index_.clear();
+    cache_hits_=0;
+    cache_misses_=0;
+    truncated_=false;
     root_=fs::absolute(root).lexically_normal();
     std::error_code ec;
     if(!fs::is_directory(root_,ec))
@@ -147,26 +154,25 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
             if(rec.kind==AssetKind::prefab)
                 index_prefab(rec,it->path());
             auto ext=lowercase(it->path().extension().u8string());
-            if((ext==".ytd" || ext==".ydd" || ext==".ymat") && rec.size>=128) {
+            if((ext==".ytd" || ext==".ydd" || ext==".ydr" ||
+                 ext==".ymat" || ext==".ymt" || ext==".ycd") && rec.size>=128) {
                 // Only valid NEF8 ListFiles are virtual directories.
                 // Invalid/legacy files stay visible as ordinary assets.
                 try {
                     if(rec.size>64u*1024u*1024u)
                         throw std::runtime_error("Oversized NEF8 dictionary");
-                    std::ifstream input(it->path(),std::ios::binary);
-                    if(!input)throw std::runtime_error("Cannot read ListFile");
-                    std::vector<std::uint8_t> data(static_cast<std::size_t>(rec.size));
-                    if(!input.read(reinterpret_cast<char*>(data.data()),
-                                   static_cast<std::streamsize>(data.size())))
-                        throw std::runtime_error("Incomplete ListFile");
-                    auto const contents=shared_assets::list_dictionary_entries(
-                        data,relative);
+                    auto const indexed=detail::inspect_dictionary(
+                        it->path(),relative,rec.size);
+                    auto const& contents=*indexed.entries;
+                    if(indexed.cache_hit)++cache_hits_;
+                    else ++cache_misses_;
                     if(contents.size()>max_records-entries_.size()-1) {
                         truncated_=true;
                         break;
                     }
                     rec.directory=true;
                     rec.kind=AssetKind::folder;
+                    rec.virtual_child_count=contents.size();
                     rec.container_path=relative;
                     entries_.push_back(rec);
                     for(auto const& item:contents) {
@@ -174,8 +180,11 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
                         child.virtual_path=relative+"/"+item.name;
                         child.filename=item.name;
                         child.directory=false;
-                        child.kind=ext==".ydd"?AssetKind::mesh:
-                                   ext==".ymat"?AssetKind::material:AssetKind::texture;
+                        child.kind=(ext==".ydd"||ext==".ydr")?AssetKind::mesh:
+                                   ext==".ymat"?AssetKind::material:
+                                   ext==".ycd"?AssetKind::animation:
+                                   ext==".ymt"?AssetKind::skeleton:
+                                   AssetKind::texture;
                         child.container_path=relative;
                         child.entry_name=item.name;
                         child.size=item.size;
@@ -239,16 +248,32 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
             entries_.push_back(std::move(record));
         }
     }
+    // Previous comparator allocated two lowercase strings for every
+    // comparison (O(N log N) heap churn). Compare ASCII-folded bytes
+    // directly; preserve deterministic order for case-only differences.
     std::sort(entries_.begin(),entries_.end(),
         [](AssetRecord const& a,AssetRecord const& b){
             if(a.directory!=b.directory)return a.directory>b.directory;
-            return lowercase(a.virtual_path)<lowercase(b.virtual_path);
+            auto const& left=a.virtual_path;
+            auto const& right=b.virtual_path;
+            const auto count=std::min(left.size(),right.size());
+            for(std::size_t i=0;i<count;++i) {
+                auto x=static_cast<unsigned char>(left[i]);
+                auto y=static_cast<unsigned char>(right[i]);
+                x=static_cast<unsigned char>(std::tolower(x));
+                y=static_cast<unsigned char>(std::tolower(y));
+                if(x!=y)return x<y;
+            }
+            if(left.size()!=right.size())return left.size()<right.size();
+            return left<right;
         });
+    entry_index_.reserve(entries_.size());
+    for(std::size_t index=0;index<entries_.size();++index)
+        entry_index_.emplace(entries_[index].virtual_path,index);
 }
 AssetRecord const* AssetCatalog::find(std::string const& virtual_path) const noexcept {
-    auto it=std::find_if(entries_.begin(),entries_.end(),
-        [&](AssetRecord const& value){return value.virtual_path==virtual_path;});
-    return it==entries_.end()?nullptr:&*it;
+    const auto it=entry_index_.find(virtual_path);
+    return it==entry_index_.end()?nullptr:&entries_[it->second];
 }
 fs::path AssetCatalog::backing_file(std::string const& virtual_path) const {
     auto rec=find(virtual_path);

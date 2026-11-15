@@ -1,4 +1,5 @@
 #include <northstarcpp/skeleton.hpp>
+#include <northstarcpp/assets.hpp>
 #include "asset_list_file.hpp"
 #include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
@@ -53,10 +54,10 @@ std::string name_at(Bytes const& bytes, std::uint64_t base, std::uint64_t limit,
 }
 }
 
-Skeleton load_skeleton(AssetStore const& assets, std::string const& path)
+Skeleton load_skeleton_from_bytes(std::vector<std::uint8_t> const& nef8)
 {
     using namespace shared_assets::detail;
-    auto file = read_list_file(assets, path);
+    auto file = parse_list_file(nef8);
     require(file.kind == 10 && file.entries == 1 && file.body.size() <= 8 * 1024 * 1024,
         "Expected a YMT skeleton");
     std::istringstream input(std::string(file.body.begin(), file.body.end()));
@@ -214,6 +215,12 @@ Skeleton load_skeleton(AssetStore const& assets, std::string const& path)
         }
     }
     return result;
+}
+Skeleton load_skeleton(AssetStore const& assets,std::string const& path)
+{
+    if(assets.size(path)>64u*1024u*1024u)
+        throw std::runtime_error("YMT source exceeds 64 MiB");
+    return load_skeleton_from_bytes(assets.read(path));
 }
 
 std::vector<SkeletalClip> load_skeletal_clips(AssetStore const& assets, std::string const& path,

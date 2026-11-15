@@ -65,6 +65,18 @@ int main(int argc,char** argv) {
         copyFixture(jsonSource,jsonTarget);
         copyFixture(xmlSource,xmlTarget);
 
+        auto demo=bytes(repo/
+            "Projects/NorthStarFirstPersonPlatform/assets/materials/SoftTintDemo.ymat");
+        auto normalized=native::migrate_ymat_to_xml(demo);
+        auto xmlBody=native::read_ymat_library(normalized);
+        check(xmlBody.kind==4 &&
+              xmlBody.body.find("<Graph>")!=std::string::npos &&
+              xmlBody.body.find("type=\"object\"")!=std::string::npos &&
+              xmlBody.body.find("editor_source")==std::string::npos &&
+              xmlBody.body.find("<Editor>")==std::string::npos,
+              "Canonical XML YMAT must use one authoritative Graph and no duplicate editor data");
+        check(native::migrate_ymat_to_xml(normalized)==normalized,
+              "Canonical XML YMAT normalization is not idempotent");
         auto const originalJson=bytes(jsonTarget);
         auto const jsonMeta=native::read_ymat_library(originalJson);
         check(jsonMeta.kind==30 && jsonMeta.count==2,
@@ -94,6 +106,14 @@ int main(int argc,char** argv) {
               "Editing second material damaged first material");
         check(!equivalent(beforeJson[1],afterJson[1]),
               "Second material did not change");
+        auto baseParameter=[](auto const& material) {
+            for(auto const& param:material.parameters)
+                if(param.name=="base_color")return param.values;
+            return std::vector<float>{};
+        };
+        check(baseParameter(afterJson[1]).size()==4 &&
+              std::abs(baseParameter(afterJson[1])[3]-.37f)<.00001f,
+              "Changing YMAT Base Color discarded existing alpha");
         check(afterJson[1].name=="Blue Ceramic" &&
               afterJson[1].parameters.size()>beforeJson[1].parameters.size(),
               "Custom YMAT parameters did not persist");
@@ -103,9 +123,9 @@ int main(int argc,char** argv) {
         auto reloadedBlue=ma::load_descriptor(root,"materials/TwoMaterials.ymat@Blue Ceramic");
         check(std::abs(reloadedBlue.value("roughness").toDouble()-.37)<.00001,
               "Edited YMAT roughness did not survive reload");
-        check(native::read_ymat_library(updatedJson).kind==jsonMeta.kind &&
+        check(native::read_ymat_library(updatedJson).kind==4 &&
               native::read_ymat_library(updatedJson).count==jsonMeta.count,
-              "Kind-30 NEF8 header count/kind changed");
+              "Legacy kind-30 YMAT was not migrated into canonical kind-4 XML");
         // Delete only custom fields from the selected material; every other
         // record and the mandatory PBR parameters must remain available.
         QJsonArray onlyStandard;
@@ -174,21 +194,16 @@ int main(int argc,char** argv) {
         auto post=native::read_ymat_library(updatedXml);
         check(post.kind==xmlMeta.kind && post.count==xmlMeta.count,
               "Kind-4 NEF8 header or record count changed");
-        // NEF8 v1 header and non-material metadata bytes remain byte-identical
-        // except for checksum and compressed-body size fields.
+        // Canonical YMAT stores no JSON metadata in the NEF8 header.
         auto u64=[](std::vector<std::uint8_t> const& bytes,std::size_t start) {
             std::uint64_t result=0;
             for(unsigned i=0;i<8;++i)result|=
                 std::uint64_t(bytes.at(start+i))<<(8*i);
             return result;
         };
-        auto begin=u64(originalXml,48);
-        auto size=u64(originalXml,56);
-        check(begin==u64(updatedXml,48) && size==u64(updatedXml,56) &&
-              std::equal(originalXml.begin()+begin,
-                         originalXml.begin()+begin+size,
-                         updatedXml.begin()+begin),
-              "Editing an XML YMAT damaged original NEF8 metadata");
+        check(u64(updatedXml,16)==128 &&
+              u64(updatedXml,48)==0 && u64(updatedXml,56)==0,
+              "Canonical XML YMAT must not carry JSON NEF8 metadata");
         // Safe failure must not change bytes already on disk.
         auto invalid=sky;
         invalid["name"]="Another Material";

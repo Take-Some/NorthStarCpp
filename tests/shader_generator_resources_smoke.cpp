@@ -80,7 +80,7 @@ bool verify_file_info(char const* path, char const* expected_version)
         {"FileVersion", expected_version},
         {"InternalName", "shader_generator"},
         {"OriginalFilename", "shader_generator.exe"},
-        {"ProductName", "NorthStar Engine"},
+        {"ProductName", "NorthStarCpp Engine"},
         {"ProductVersion", expected_version},
         {"LegalCopyright", "Copyright (C) 2026 Kayla's Systems - Kayla Verner"},
     };

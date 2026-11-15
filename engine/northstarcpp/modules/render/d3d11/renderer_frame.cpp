@@ -9,7 +9,7 @@ void RendererState::draw(NorthStarRenderFrame const& frame){
         resize(client.right, client.bottom);
 
         vertices.clear();
-        for (int n = -10; !frame.first_person && n <= 10; ++n) {
+        for (int n = -10; !frame.first_person && !frame.camera_override && n <= 10; ++n) {
             auto const i = static_cast<float>(n);
             float const tone = n == 0 ? 0.38f : 0.23f;
             vertices.push_back({i, -0.01f, -10.f, tone, tone, tone});
@@ -117,6 +117,7 @@ void RendererState::draw(NorthStarRenderFrame const& frame){
         if (sky_index_count)
             draw_sky(direction,up,projection);
         context->UpdateSubresource(camera.get(),0,nullptr,&view_projection,0,0);
+        draw_editor_grid(frame);
 
         UINT const stride = sizeof(Vertex), offset = 0;
         auto* buffer = vertex_buffer.get();
@@ -135,7 +136,7 @@ void RendererState::draw(NorthStarRenderFrame const& frame){
         auto* sampler=sky_sampler.get();
         context->PSSetSamplers(0,1,&sampler);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-        if (!frame.first_person) {
+        if (!frame.first_person && !frame.camera_override) {
             context->Draw(grid_vertices, 0);
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context->Draw(static_cast<UINT>(vertices.size()) - grid_vertices, grid_vertices);

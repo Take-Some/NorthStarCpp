@@ -1,6 +1,7 @@
 // NorthStarCpp D3D12 engine.render provider — stable C ABI 5.
 #include "renderer_private.hpp"
 #include <northstarcpp/render_features_api.h>
+#include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_device_api.h>
 namespace {
 using namespace northstarcpp::module_provider;
@@ -62,6 +63,25 @@ int set_dynamic_lights(void* renderer,NorthStarRenderLight const* lights,UINT co
     });
 }
 const NorthStarRenderLightsApi lights_api{NORTHSTARCPP_RENDER_LIGHTS_ABI,set_dynamic_lights};
+int set_editor_grid(void* renderer,
+                    NorthStarRenderEditorGridSettings const* settings) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing D3D12 grid renderer");
+        static_cast<Renderer*>(renderer)->set_editor_grid(settings);
+    });
+}
+const NorthStarRenderEditorGridApi editor_grid_api{
+    NORTHSTARCPP_RENDER_EDITOR_GRID_ABI,sizeof(NorthStarRenderEditorGridApi),
+    set_editor_grid,3u};
+int set_ui_rgba(void* renderer,const uint8_t* rgba,uint32_t w,
+                uint32_t h,uint32_t stride) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Null D3D12 UI renderer");
+        static_cast<Renderer*>(renderer)->set_ui_rgba(rgba,w,h,stride);
+    });
+}
+const NorthStarRenderUiApi ui_api{NORTHSTARCPP_RENDER_UI_ABI,
+    sizeof(NorthStarRenderUiApi),set_ui_rgba};
 const NorthStarRenderApi api{create,destroy,draw,set_sky};
 const NorthStarRenderTrianglesApi triangles_api{
     NORTHSTARCPP_RENDER_TRIANGLES_ABI,set_triangles};
@@ -101,7 +121,7 @@ const NorthStarRenderDeviceApi device_api{
     NORTHSTARCPP_RENDER_DEVICE_ABI,read_actual_gpu};
 const NorthStarRenderFeaturesApi features_api{
     NORTHSTARCPP_RENDER_FEATURES_ABI,sizeof(NorthStarRenderFeaturesApi),
-    NS_RENDER_FEATURE_COLORED_GEOMETRY |
+    NS_RENDER_FEATURE_DEPTH_TEST | NS_RENDER_FEATURE_COLORED_GEOMETRY |
     NS_RENDER_FEATURE_TEXTURED_MATERIALS | NS_RENDER_FEATURE_MATERIAL_GRAPH |
     NS_RENDER_FEATURE_DYNAMIC_LIGHTS | NS_RENDER_FEATURE_GBUFFER |
     NS_RENDER_FEATURE_DEFERRED | NS_RENDER_FEATURE_CSM |
@@ -116,6 +136,22 @@ const NorthStarModule module{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
 }
 extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarModule*
 northstar_module_query(uint32_t host,const char* capability,uint32_t version) {
+    if(version==NORTHSTARCPP_RENDER_UI_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.8.0",
+            NORTHSTARCPP_RENDER_UI_MODULE_ABI,sizeof(ui_api),
+            &ui_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.7.0",
+            NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI,sizeof(editor_grid_api),
+            &editor_grid_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_FEATURES_MODULE_ABI) {
         static const NorthStarModule ext{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
@@ -205,4 +241,10 @@ northstar_render_get_materials_api(uint32_t version) {
 extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarRenderMaterialsApiV2*
 northstar_render_get_materials_api_v2(uint32_t version) {
     return version==NORTHSTARCPP_RENDER_MATERIALS_V2_ABI?&materials_api_v2:nullptr;
+}
+
+extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarRenderEditorGridApi*
+northstar_render_get_editor_grid_api(uint32_t requested_version) {
+    return requested_version==NORTHSTARCPP_RENDER_EDITOR_GRID_ABI?
+        &editor_grid_api:nullptr;
 }

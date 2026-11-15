@@ -16,6 +16,17 @@ Texture2D normal_map : register(t1);
 Texture2D rough_map : register(t2);
 Texture2D metal_map : register(t3);
 Texture2D emissive_map : register(t4);
+#if defined(NS_D3D11_DYNAMIC_LIGHTS)
+struct NorthStarGpuLight {
+    float4 position_range;
+    float4 color_intensity;
+    float4 direction_cone;
+};
+cbuffer DynamicLights : register(b3) {
+    float4 ns_light_count;
+    NorthStarGpuLight ns_lights[256];
+};
+#endif
 #ifndef NS_GRAPH_BASE
 #define NS_GRAPH_BASE(p) float4(1,1,1,1)
 #endif
@@ -138,6 +149,40 @@ float4 material_ps(P p):SV_Target {
     float3 spec=(distribution*geom*fresnel)/max(4*NoV*NoL,0.001);
     float3 diffuse=(1-fresnel)*(1-metal)*albedo/3.14159265;
     float3 lit=(diffuse+spec)*NoL*3.0+albedo*0.16+emissive;
+#if defined(NS_D3D11_DYNAMIC_LIGHTS)
+    // Backend-neutral light ABI: 256 sources, copied to GPU b3.
+    // No silent CPU light averaging or per-vertex substitution.
+    [loop]for(uint i=0;i<(uint)min(ns_light_count.x,256.0);++i) {
+        NorthStarGpuLight source=ns_lights[i];
+        float3 relative=source.position_range.xyz-p.world;
+        float distance=length(relative);
+        if(distance>=source.position_range.w||distance<.0001)continue;
+        float3 light_dir=relative/distance;
+        float falloff=saturate(1.0-distance/source.position_range.w);
+        float attenuation=falloff*falloff;
+        if(source.direction_cone.w>=0.0) {
+            float3 spot_dir=normalize(source.direction_cone.xyz);
+            float cone=dot(spot_dir,-light_dir);
+            attenuation*=smoothstep(source.direction_cone.w,
+                min(1.0,source.direction_cone.w+0.1),cone);
+        }
+        float point_nol=saturate(dot(n,light_dir));
+        if(point_nol<=0.0)continue;
+        float3 point_half=normalize(light_dir+view);
+        float point_noh=saturate(dot(n,point_half));
+        float point_voh=saturate(dot(view,point_half));
+        float point_denom=point_noh*point_noh*(a2-1)+1;
+        float point_distribution=a2/max(3.14159265*point_denom*point_denom,1.e-5);
+        float point_geom=(NoV/(NoV*(1-k)+k))*
+                         (point_nol/(point_nol*(1-k)+k));
+        float3 point_fresnel=f0+(1-f0)*pow(1-point_voh,5);
+        float3 point_spec=(point_distribution*point_geom*point_fresnel)/
+            max(4*NoV*point_nol,.001);
+        float3 point_diff=(1-point_fresnel)*(1-metal)*albedo/3.14159265;
+        lit+=(point_diff+point_spec)*point_nol*
+            source.color_intensity.rgb*source.color_intensity.w*attenuation;
+    }
+#endif
     return float4(material_forward_output(lit),opacity);
 }
 // Deferred geometry: compact 3-MRT layout, no redundant world-position RT.

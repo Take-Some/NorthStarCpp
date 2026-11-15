@@ -160,6 +160,10 @@ struct Options {
     bool fps_ui_smoke = false;
     bool packaged_game = false;
     bool inspect_providers = false;
+    // Embed gameplay as a Win32 child of the Qt Editor full-client overlay.
+    // This is a renderer surface parent, not an HWND opened as a separate app.
+    HWND embed_parent = nullptr;
+    bool embed_handshake_smoke = false;
 };
 
 Options options()
@@ -184,6 +188,17 @@ Options options()
             result.character_smoke = true;
         else if (arg == L"--runtime-init-smoke")
             result.runtime_init_smoke = true;
+        else if (!editor && arg == L"--embed-parent" && i+1<count) {
+            std::wstring const value(args[++i]);
+            std::size_t end=0;
+            auto const parsed=std::stoull(value,&end,0);
+            if(end!=value.size() || !parsed)
+                throw std::invalid_argument("Invalid --embed-parent HWND");
+            result.embed_parent=reinterpret_cast<HWND>(
+                static_cast<std::uintptr_t>(parsed));
+        }
+        else if (!editor && arg == L"--embed-handshake-smoke")
+            result.embed_handshake_smoke = true;
         else if (arg == L"--shared-assets" && i + 1 < count)
             result.shared_asset_root = args[++i];
         else if (arg == L"--asset-zones" && i + 1 < count)
@@ -226,6 +241,20 @@ Options options()
         throw std::runtime_error("--runtime-init-smoke requires a player and --scene FILE");
     if (result.fps && editor)
         throw std::runtime_error("FPS mode is available in the standalone player");
+    if(result.embed_handshake_smoke && !result.embed_parent)
+        throw std::invalid_argument("--embed-handshake-smoke requires --embed-parent");
+    if(result.embed_parent) {
+        if(editor || result.smoke || result.check_scene || result.runtime_init_smoke ||
+           result.character_smoke || result.fps_ui_smoke || result.packaged_game)
+            throw std::invalid_argument(
+                "--embed-parent requires interactive Player mode");
+        if(!IsWindow(result.embed_parent))
+            throw std::invalid_argument("Editor game surface HWND is invalid");
+        DWORD parent_pid=0;
+        GetWindowThreadProcessId(result.embed_parent,&parent_pid);
+        if(!parent_pid || parent_pid==GetCurrentProcessId())
+            throw std::invalid_argument("Embedded Player requires a foreign Editor HWND");
+    }
     if (result.fps_ui_smoke && (!result.fps || result.scene_path.empty() || editor))
         throw std::runtime_error("--fps-ui-smoke requires a player, --fps and --scene");
     if (editor && result.smoke && result.smoke_output.empty())
@@ -687,10 +716,21 @@ public:
             throw std::runtime_error("Cannot register application window");
         });
         bootstrap_stage("window.create", [&] {
-        window = CreateWindowExW(WS_EX_CONTROLPARENT, window_class,
+        // In Play In Editor mode the Player still owns its GPU swapchain,
+        // world and input, but its native HWND is parented to the full
+        // Editor overlay. Never request exclusive fullscreen or a popup.
+        RECT target{0,0,1450,870};
+        if(config.embed_parent)GetClientRect(config.embed_parent,&target);
+        window = CreateWindowExW(config.embed_parent?0:WS_EX_CONTROLPARENT,
+            window_class,
             editor ? L"NorthStarCpp Editor" : L"NorthStarCpp Player",
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-            1450, 870, nullptr, nullptr, instance, this);
+            config.embed_parent?(WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN):
+                                (WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN),
+            config.embed_parent?0:CW_USEDEFAULT,
+            config.embed_parent?0:CW_USEDEFAULT,
+            config.embed_parent?std::max(1L,target.right-target.left):1450,
+            config.embed_parent?std::max(1L,target.bottom-target.top):870,
+            config.embed_parent,nullptr,instance,this);
         if (!window)
             throw std::runtime_error("Cannot create application window");
         });
@@ -761,7 +801,7 @@ public:
             });
             bootstrap_stage("window.show", [&] {
                 refresh();
-                ShowWindow(window,SW_SHOWNORMAL);
+                ShowWindow(window,config.embed_parent?SW_SHOW:SW_SHOWNORMAL);
                 UpdateWindow(window);
             });
             if (!script_window_title.empty())
@@ -1599,9 +1639,14 @@ private:
 
     void capture_fps_cursor()
     {
+        // In editor-embedded mode Windows foreground is the Qt Editor root,
+        // even while keyboard focus belongs to its child Player HWND.
+        auto const foreground=GetForegroundWindow();
+        bool const active=foreground==window ||
+            (config.embed_parent && foreground &&
+             foreground==GetAncestor(config.embed_parent,GA_ROOT));
         if (editor || (!fps && !scripted_first_person) || fps_captured ||
-            fps_menu_visible || script_paused || !window ||
-            GetForegroundWindow() != window) return;
+            fps_menu_visible || script_paused || !window || !active) return;
         RECT client{};
         GetClientRect(window, &client);
         POINT top{client.left, client.top}, bottom{client.right, client.bottom};
@@ -1625,6 +1670,18 @@ private:
 
     LRESULT message(HWND handle, UINT msg, WPARAM wparam, LPARAM lparam)
     {
+        if(config.embed_parent && msg==WM_KEYDOWN &&
+           wparam==VK_ESCAPE && !(lparam&(1LL<<30))) {
+            // Escape always exits Play In Editor, not an in-game pause
+            // menu. Send the request to the owning Qt Editor HWND before
+            // any game script, UI controller or provider consumes the key.
+            release_fps_cursor();
+            UINT const notify=RegisterWindowMessageW(
+                L"NorthStarCpp.PlayInEditor.Exit.v1");
+            if(!notify || !PostMessageW(config.embed_parent,notify,0,0))
+                PostMessageW(window,WM_CLOSE,0,0);
+            return 0;
+        }
         if (input)
             input->feed_message(msg, static_cast<uintptr_t>(wparam), static_cast<intptr_t>(lparam));
         switch (msg) {
@@ -2750,10 +2807,12 @@ private:
         if (notification != BN_CLICKED)
             return;
         if (id==menu_show_content) {
-            std::wstring arguments;
+            // ContentBrowser is part of the unified Qt Editor, not a
+            // separately launched asset browser process.
+            std::wstring arguments=L"--focus-content-browser";
             if (!file_path.empty())
-                arguments=L"--project \"" + fs::absolute(file_path).wstring() + L"\"";
-            launch_tool(L"northstarcpp_asset_browser.exe",arguments);
+                arguments+=L" --scene \"" + fs::absolute(file_path).wstring() + L"\"";
+            launch_tool(L"northstarcpp_editor_qt.exe",arguments);
             return;
         }
         if (id==menu_legacy_content) {
@@ -5014,6 +5073,40 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
             return 0;
         }
 #endif
+        if(settings.embed_handshake_smoke) {
+            // Test the actual cross-process HWND parenting and Escape
+            // notification without requiring a GPU or loading a city.
+            WNDCLASSW type{};
+            type.hInstance=instance;
+            type.lpszClassName=L"NorthStarCppWindow";
+            type.lpfnWndProc=DefWindowProcW;
+            if(!RegisterClassW(&type))
+                throw std::runtime_error("Cannot register embedded smoke window");
+            RECT area{};
+            GetClientRect(settings.embed_parent,&area);
+            HWND const embedded=CreateWindowExW(0,type.lpszClassName,
+                L"NorthStar embedded handshake",WS_CHILD|WS_VISIBLE,
+                0,0,std::max(1L,area.right),std::max(1L,area.bottom),
+                settings.embed_parent,nullptr,instance,nullptr);
+            if(!embedded)
+                throw std::runtime_error("Cannot create embedded Player HWND");
+            DWORD parent_pid=0,child_pid=0;
+            GetWindowThreadProcessId(settings.embed_parent,&parent_pid);
+            GetWindowThreadProcessId(embedded,&child_pid);
+            if(parent_pid==child_pid || child_pid!=GetCurrentProcessId())
+                throw std::runtime_error("Embedded HWND is not cross-process");
+            Sleep(120); // parent Qt timer must observe the embedded child
+            UINT const notify=RegisterWindowMessageW(
+                L"NorthStarCpp.PlayInEditor.Exit.v1");
+            if(!notify || !PostMessageW(settings.embed_parent,notify,0,0)) {
+                DestroyWindow(embedded);
+                throw std::runtime_error("Embedded Player Escape notification failed");
+            }
+            Sleep(300); // allow Qt to discover the real child HWND
+            DestroyWindow(embedded);
+            startup.complete("READY");
+            return 0;
+        }
         if(settings.runtime_init_smoke) {
             // Exercise the REAL Player startup pipeline: physics, scene-v3
             // streaming mounts, zones and scripts. Unlike --check-scene,

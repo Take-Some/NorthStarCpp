@@ -50,12 +50,14 @@ def read_nef8(raw: bytes) -> tuple[bytearray, dict, bytes]:
         raise ConversionError("Unsupported NEF8 file")
     if offset < 128 or compressed != len(raw) - offset or offset > len(raw):
         raise ConversionError("Invalid NEF8 ranges")
-    if meta_offset < 128 or meta_size > offset - meta_offset:
+    if (meta_size and (meta_offset < 128 or meta_size > offset - meta_offset)) or (
+        not meta_size and meta_offset != 0
+    ):
         raise ConversionError("Invalid NEF8 metadata")
     body = zlib.decompress(raw[offset:], -15)
     if len(body) != uncompressed or blake3(body).digest() != raw[64:96]:
         raise ConversionError("Invalid NEF8 body digest")
-    metadata = json.loads(raw[meta_offset:meta_offset + meta_size])
+    metadata = json.loads(raw[meta_offset:meta_offset + meta_size]) if meta_size else {}
     return bytearray(raw[:128]), metadata, body
 
 
@@ -86,20 +88,14 @@ def converted_material(raw: bytes, relative: str) -> bytes:
     if ("<YmtMaterialLibrary" not in old_xml or
             'schema="newviso.ymt.material_library.v1"' not in old_xml):
         raise ConversionError("Unexpected material schema")
-    xml = old_xml.replace("YmtMaterialLibrary", "YmatMaterialLibrary").replace(
-        "newviso.ymt.material_library.v1",
-        "northstarcpp.ymat.material_library.v1").encode("utf-8")
-    metadata["content_kind"] = "material_library"
-    metadata["logical_path"] = metadata["logical_path"].replace(".ymt", ".ymat")
-    for entry in metadata["entries"]:
-        entry["entry_ref"] = entry["entry_ref"].replace(".ymt@", ".ymat@")
-        entry["route"]["codec"] = "northstarcpp.ymat.v1"
-    metadata["policy"] = [
-        "YMAT is the native NorthStarCpp material storage format",
-        "runtime material contract is engine.materials",
-        "texture references resolve through engine.assets",
-    ]
-    return write_nef8(header, metadata, xml, 4)
+    from pack_native_ymat import build_ymat
+    import xml.etree.ElementTree as ET
+    document = ET.fromstring(old_xml.replace(
+        "YmtMaterialLibrary", "YmatMaterialLibrary"))
+    document.attrib["version"] = "2"
+    document.attrib["schema"] = "northstarcpp.ymat.material_library.v2"
+    xml = ET.tostring(document, encoding="utf-8", xml_declaration=True)
+    return build_ymat(xml)
 
 
 def converted_model(raw: bytes) -> bytes:
@@ -131,9 +127,10 @@ def verify() -> dict:
         if old.exists() or not path.is_file():
             raise ConversionError(f"Material file is not exclusively YMАТ: {stem}")
         h, metadata, body = read_nef8(path.read_bytes())
-        if struct.unpack_from("<H", h, 8)[0] != 4 or metadata.get("content_kind") != "material_library":
+        if struct.unpack_from("<H", h, 8)[0] != 4 or metadata:
             raise ConversionError(f"Non-native YMАТ material: {stem}")
-        if b"YmtMaterialLibrary" in body or b".ymt@" in body:
+        if (b"YmtMaterialLibrary" in body or b".ymt@" in body or
+                b"northstarcpp.ymat.material_library.v2" not in body):
             raise ConversionError(f"Historical material schema still present: {stem}")
         results[stem] = {"size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     model = ROOT / MODEL
@@ -177,7 +174,9 @@ def apply() -> dict:
             dest.write_bytes(raw)
         for stem in MATERIALS:
             h, m, b = read_nef8((ROOT / (stem + ".ymat")).read_bytes())
-            if m["content_kind"] != "material_library" or struct.unpack_from("<H", h, 8)[0] != 4:
+            if m or struct.unpack_from("<H", h, 8)[0] != 4 or (
+                b"northstarcpp.ymat.material_library.v2" not in b
+            ):
                 raise ConversionError("New YMАТ file verification failed")
         for stem in MATERIALS:
             (ROOT / (stem + ".ymt")).unlink()

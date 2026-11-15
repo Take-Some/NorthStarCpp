@@ -2,6 +2,7 @@
 // Author: Kayla Verner
 #include <northstarcpp/shared_assets.hpp>
 #include "asset_list_file.hpp"
+#include "material_graph_xml.hpp"
 #include <boost/property_tree/json_parser.hpp>
 
 #include <boost/property_tree/xml_parser.hpp>
@@ -162,17 +163,18 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
         return result;
     }
     auto const kind = file.metadata.get<std::string>("content_kind", "");
-    require(file.kind == 4 && kind == "material_library",
-        "Expected a native YMAT material library (NEF8 kind 4)");
+    require(file.kind == 4 && (kind.empty() || kind == "material_library"),
+        "Expected canonical XML YMAT (NEF8 kind 4)");
 
     Tree xml;
     std::istringstream input(std::string(file.body.begin(), file.body.end()));
     boost::property_tree::read_xml(input, xml, boost::property_tree::xml_parser::no_comments);
     auto const& library = xml.get_child("YmatMaterialLibrary");
-    require(library.get<unsigned>("<xmlattr>.version") == 1 &&
-        library.get<std::string>("<xmlattr>.schema") ==
-            "northstarcpp.ymat.material_library.v1",
-        "Unsupported material library schema");
+    auto const version=library.get<unsigned>("<xmlattr>.version");
+    auto const schema=library.get<std::string>("<xmlattr>.schema");
+    require((version==1 && schema=="northstarcpp.ymat.material_library.v1") ||
+            (version==2 && schema=="northstarcpp.ymat.material_library.v2"),
+        "Unsupported XML material library schema");
     std::vector<Material> result;
     std::set<std::string> names;
     for (auto const& node : library) {
@@ -226,10 +228,13 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
                 material.parameters.push_back(std::move(param));
             }
         }
-        if(auto graph=tree.get_optional<std::string>("Graph")) {
-            require(graph->size()<=32768,
+        if(auto graph=tree.get_child_optional("Graph")) {
+            if(auto value=graph->get_child_optional("Value"))
+                material.graph_source=
+                    detail::graph_json_from_xml_value(*value);
+            else material.graph_source=graph->get_value<std::string>();
+            require(material.graph_source.size()<=32768,
                 "Native XML YMAT Material Graph exceeds 32 KiB");
-            material.graph_source=*graph;
         }
         result.push_back(std::move(material));
     }

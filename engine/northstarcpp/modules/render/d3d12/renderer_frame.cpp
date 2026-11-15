@@ -75,7 +75,8 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         }
         std::vector<Vertex> vertices;
         vertices.reserve(std::min<size_t>(capacity,frame.count*36u+84u+mesh_vertices.size()));
-        if(!frame.first_person)for(int n=-10;n<=10;++n) {
+        if(!frame.first_person && !frame.camera_override)
+            for(int n=-10;n<=10;++n) {
             float k=float(n),tone=n==0?.38f:.23f;
             vertices.push_back({k,-.01f,-10.f,tone,tone,tone});
             vertices.push_back({k,-.01f,10.f,tone,tone,tone});

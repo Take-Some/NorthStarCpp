@@ -4,6 +4,7 @@
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/geometry_plugin.h>
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include <QVector3D>
 #include <QString>
 #include <QStringList>
@@ -28,6 +29,7 @@ class QDialog;
 namespace northstarcpp::editor {
 class QtContentBrowser;
 class QtEditorViewport;
+class QtPlaySurface;
 class QtEditorWindow final : public QMainWindow {
     Q_OBJECT
 public:
@@ -39,11 +41,18 @@ public:
     bool runPlayerCheckSmoke(QString const& root);
     QString playerExecutable() const;
     void playGame();
+    void playGameStandalone();
     void stopGame();
+    bool runEmbeddedPlaySmoke(QString const& playerExecutable);
+    bool runEmbeddedRenderSmoke(QString const& playerExecutable,
+                                QString const& scene);
     int objectCount() const noexcept {return static_cast<int>(scene_.objects.size());}
     QtContentBrowser* contentBrowser() const {return browser_;}
+    // Editor-owned Content Browser: no external process or second window.
+    void showContentBrowser(QString const& virtualReference={});
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 private:
     Scene scene_;
     std::filesystem::path file_;
@@ -53,6 +62,8 @@ private:
     bool dirty_=false, uiSync_=false;
     std::optional<Scene> gizmoBefore_;
     bool gizmoChanged_=false;
+    float gizmoRawTotal_=0.f, gizmoAppliedTotal_=0.f;
+    QElapsedTimer gizmoInspectorTimer_;
     QtEditorViewport* viewport_{};
     QtContentBrowser* browser_{};
     QTreeWidget* outliner_{};
@@ -78,11 +89,19 @@ private:
     QAction *undoAction_{},*redoAction_{},*saveAction_{};
     QAction *playAction_{},*stopAction_{};
     QProcess* playerProcess_{};
+    QtPlaySurface* playSurface_{};
+    QByteArray playWorkspaceBefore_{};
+    bool playMenuWasVisible_=false;
+    bool playStatusWasVisible_=false;
+    bool embeddedPlay_=false;
     QString configuredPlayerPath_;
     QAction* exploreModeAction_{};
     QAction* fpsModeAction_{};
 
     void choosePlayerExecutable();
+    void launchGame(bool embedded);
+    QtPlaySurface* beginPlayOverlay();
+    void endPlayOverlay();
     void setupUi();
     void updateAll();
     void updateOutliner();

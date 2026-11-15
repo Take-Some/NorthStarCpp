@@ -4,12 +4,14 @@
 #include <northstarcpp/project_catalog.hpp>
 #include "provider_inventory.hpp"
 #include <northstarcpp/render_features_api.h>
+#include <northstarcpp/render_feature_requirements.hpp>
 #include <northstarcpp/logger.hpp>
 
 #include <QApplication>
 #include "../editor/qt_menu_theme.hpp"
 #include <QButtonGroup>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -152,42 +154,34 @@ QLabel* makeLabel(QString text, QString const& id = {}, QWidget* owner=nullptr)
     return l;
 }
 
-struct RenderCapabilityRow {
-    char const* label;
-    std::uint64_t bit;
-    bool published_api;
-};
-constexpr RenderCapabilityRow renderCapabilities[]{
-    {"Geometry triangles",NS_RENDER_FEATURE_COLORED_GEOMETRY,true},
-    {"PBR textured materials",NS_RENDER_FEATURE_TEXTURED_MATERIALS,true},
-    {"Material Graph v2",NS_RENDER_FEATURE_MATERIAL_GRAPH,true},
-    {"GPU skinning",NS_RENDER_FEATURE_GPU_SKINNING,true},
-    {"World surfaces / textures",NS_RENDER_FEATURE_WORLD_SURFACES,true},
-    {"Character meshes",NS_RENDER_FEATURE_CHARACTER,true},
-    {"Dynamic lights API",NS_RENDER_FEATURE_DYNAMIC_LIGHTS,true},
-    {"G-buffer",NS_RENDER_FEATURE_GBUFFER,false},
-    {"Deferred shading",NS_RENDER_FEATURE_DEFERRED,false},
-    {"Cascaded shadows",NS_RENDER_FEATURE_CSM,false},
-    {"PCSS",NS_RENDER_FEATURE_PCSS,false},
-    {"SSAO",NS_RENDER_FEATURE_SSAO,false},
-    {"HDR",NS_RENDER_FEATURE_HDR,false},
-    {"Bloom",NS_RENDER_FEATURE_BLOOM,false},
-    {"Auto exposure",NS_RENDER_FEATURE_EXPOSURE,false},
-    {"Tonemapping",NS_RENDER_FEATURE_TONEMAP,false},
-    {"FXAA",NS_RENDER_FEATURE_FXAA,false},
-    {"GPU timestamps API",NS_RENDER_FEATURE_GPU_TIMING,true},
-    {"Transient GPU aliasing",NS_RENDER_FEATURE_GPU_TRANSIENT_ALIASING,false}
-};
+using RenderCapabilityRow=northstarcpp::render::FeatureRequirement;
+inline constexpr auto& renderCapabilities=
+    northstarcpp::render::feature_requirements;
+
 QString renderCapabilityStatus(ns::ProviderChoice const& option,
                                RenderCapabilityRow const& row)
 {
-    if(row.published_api) {
+    if(row.requires_extension) {
         return option.verified_render_apis&row.bit?
             QString("ABI exposed"):QString("ABI unavailable");
     }
     if(!option.has_feature_manifest)return "Not reported";
     return option.advertised_render_features&row.bit?
         QString("Declared"):QString("Not implemented");
+}
+QStringList incompatibleRendererRequirements(
+    ns::ProviderChoice const& provider,
+    std::vector<std::string> const& requirements)
+{
+    auto missing=northstarcpp::render::missing_feature_requirements(
+        requirements,provider.verified_render_apis,
+        provider.advertised_render_features,provider.has_feature_manifest);
+    QStringList result;
+    for(auto const& id:missing) {
+        auto const* feature=northstarcpp::render::find_feature_requirement(id);
+        result<<QString::fromUtf8(feature?feature->label:id.c_str());
+    }
+    return result;
 }
 bool lacksMaterialApis(ns::ProviderChoice const& option)
 {
@@ -206,7 +200,7 @@ QString rendererCompatibilityWarning(ns::ProviderChoice const& option)
         missing<<"post-processing metadata (unknown)";
     else {
         for(auto const& row:renderCapabilities) {
-            if(row.published_api)continue;
+            if(row.requires_extension)continue;
             if(!(option.advertised_render_features&row.bit))
                 missing<<row.label;
         }
@@ -343,8 +337,20 @@ public:
                 if(option.capability!="engine.render")continue;
                 if(!option.has_feature_manifest)return 45;
                 if(option.id=="vulkan") {
-                    if(option.verified_render_apis&NS_RENDER_FEATURE_MATERIAL_GRAPH)
-                        return 46;
+                    if(!(option.verified_render_apis&
+                         NS_RENDER_FEATURE_TEXTURED_MATERIALS))
+                        return 54; // New Vulkan PBR texture extension is mandatory.
+                    if(!(option.verified_render_apis&
+                         NS_RENDER_FEATURE_DYNAMIC_LIGHTS))
+                        return 55; // Vulkan native lighting extension.
+                    if(!(option.verified_render_apis&
+                         NS_RENDER_FEATURE_GPU_SKINNING))
+                        return 56; // Original eight native GPU influences.
+                    if(!(option.verified_render_apis&
+                         NS_RENDER_FEATURE_WORLD_SURFACES))
+                        return 57; // BC1/BC5 original compressed world textures.
+                    if(!(option.verified_render_apis&NS_RENDER_FEATURE_MATERIAL_GRAPH))
+                        return 46; // GPU v2 now required of Vulkan.
                     if(option.advertised_render_features&NS_RENDER_FEATURE_HDR)
                         return 47;
                     if(!(option.verified_render_apis&NS_RENDER_FEATURE_GPU_TIMING))
@@ -909,6 +915,11 @@ private:
                             " Material Graph: GPU verified.":
                             " Material Graph: GPU verification failed.";
                     else text+=" Material Graph: unsupported.";
+                    if(details.value("lights_api_available").toBool()) {
+                        text+=details.value("light_gpu_readback").toBool()?
+                            " Dynamic light: GPU verified.":
+                            " Dynamic light API exposed; GPU light probe not completed.";
+                    }else text+=" Dynamic light API: unavailable.";
                     if(details.value("gpu_timestamp_valid").toBool()) {
                         text+=QString(" GPU timestamp: %1 ms.")
                             .arg(details.value("gpu_frame_ms").toDouble(),0,'f',3);
@@ -998,6 +1009,7 @@ private:
         rows->setContentsMargins(4,4,9,8);
         rows->setSpacing(12);
         std::vector<std::pair<std::string,QComboBox*>> inputs;
+        auto requiredFeatures=project->required_renderer_features;
         for(auto const& [capability,items]:groups) {
             auto const saved=project->provider_choices.find(capability);
             if(items.size()<=1&&saved==project->provider_choices.end())continue;
@@ -1103,6 +1115,75 @@ private:
             empty->setWordWrap(true);
             rows->addWidget(empty);
         }
+        // Mandatory requirements belong to the project, not the backend:
+        // choosing Vulkan must never silently disable explicitly required HDR
+        // or authored material effects. Stage changes until Save is pressed.
+        auto* requirementsCard=new QFrame(panel);
+        requirementsCard->setObjectName("providerSettingCard");
+        auto* requirementsLayout=new QVBoxLayout(requirementsCard);
+        auto* requirementsTitle=makeLabel("Required Rendering Features","eyebrow",
+                                          requirementsCard);
+        requirementsLayout->addWidget(requirementsTitle);
+        auto* requirementsInfo=makeLabel("", "muted",requirementsCard);
+        requirementsInfo->setObjectName("requiredRendererFeaturesSummary");
+        requirementsInfo->setWordWrap(true);
+        auto updateRequirementLabel=[requirementsInfo,&requiredFeatures] {
+            requirementsInfo->setText(requiredFeatures.empty()?
+                "No strict project-specific requirements; incomplete backends "
+                "may be selected for testing.":
+                QString("%1 mandatory features. An incompatible renderer will "
+                        "be blocked when opening the project.")
+                    .arg(requiredFeatures.size()));
+        };
+        updateRequirementLabel();
+        requirementsLayout->addWidget(requirementsInfo);
+        auto* configureFeatures=actionButton("Choose Mandatory Features",
+                                            0xf0ae,requirementsCard);
+        configureFeatures->setObjectName("configureRequiredRendererFeatures");
+        requirementsLayout->addWidget(configureFeatures);
+        connect(configureFeatures,&QPushButton::clicked,&dialog,
+            [&dialog,&requiredFeatures,updateRequirementLabel] {
+                QDialog select(&dialog);
+                select.setWindowTitle("Required Renderer Features");
+                select.resize(660,580);
+                auto* body=new QVBoxLayout(&select);
+                auto* note=makeLabel(
+                    "Mark features this project cannot function without. "
+                    "Unavailable or unreported functions will block launching "
+                    "an incompatible renderer.",{},&select);
+                note->setWordWrap(true);body->addWidget(note);
+                auto* scroll=new QScrollArea(&select);
+                scroll->setWidgetResizable(true);
+                auto* content=new QWidget(scroll);
+                auto* grid=new QGridLayout(content);
+                std::vector<std::pair<std::string,QCheckBox*>> controls;
+                int row=0;
+                for(auto const& feature:
+                    northstarcpp::render::feature_requirements) {
+                    auto* check=new QCheckBox(QString::fromUtf8(feature.label),content);
+                    check->setObjectName("requiredFeature_"+QString::fromUtf8(feature.key));
+                    check->setChecked(std::find(requiredFeatures.begin(),
+                        requiredFeatures.end(),feature.key)!=requiredFeatures.end());
+                    grid->addWidget(check,row/2,row%2);
+                    controls.push_back({feature.key,check});
+                    ++row;
+                }
+                scroll->setWidget(content);
+                body->addWidget(scroll);
+                auto* buttons=new QDialogButtonBox(
+                    QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&select);
+                connect(buttons,&QDialogButtonBox::accepted,
+                    &select,&QDialog::accept);
+                connect(buttons,&QDialogButtonBox::rejected,
+                    &select,&QDialog::reject);
+                body->addWidget(buttons);
+                if(select.exec()!=QDialog::Accepted)return;
+                requiredFeatures.clear();
+                for(auto const& [id,check]:controls)
+                    if(check->isChecked())requiredFeatures.push_back(id);
+                updateRequirementLabel();
+            });
+        rows->addWidget(requirementsCard);
         rows->addStretch();
         scroll->setWidget(panel);
         layout->addWidget(scroll,1);
@@ -1121,6 +1202,8 @@ private:
 
         if(dialog.exec()!=QDialog::Accepted)return;
         try {
+            if(requiredFeatures!=project->required_renderer_features)
+                catalog_.set_renderer_requirements(path,requiredFeatures);
             for(auto const& [capability,combo]:inputs) {
                 auto const selected=combo->currentData().toString().toUtf8().toStdString();
                 auto const previous=project->provider_choices.find(capability);
@@ -1284,6 +1367,52 @@ private:
             }
             if(!chooseUnconfiguredProviders(current))return;
             auto const configured=catalog_.inspect(path);
+            std::string requirementResolvedRenderer;
+            if(!configured.required_renderer_features.empty()) {
+                auto compatible=[&](ns::ProviderChoice const& option) {
+                    return option.capability=="engine.render" &&
+                        incompatibleRendererRequirements(
+                            option,configured.required_renderer_features).isEmpty();
+                };
+                auto explicitRenderer=configured.provider_choices.find("engine.render");
+                if(explicitRenderer!=configured.provider_choices.end()) {
+                    auto found=std::find_if(providerChoices_.begin(),providerChoices_.end(),
+                        [&](auto const& option) {
+                            return option.capability=="engine.render" &&
+                                   option.id==explicitRenderer->second;
+                        });
+                    if(found==providerChoices_.end() || !compatible(*found)) {
+                        auto missing=found==providerChoices_.end()?
+                            QStringList{"Selected renderer is missing"}:
+                            incompatibleRendererRequirements(
+                                *found,configured.required_renderer_features);
+                        QMessageBox::warning(this,"Renderer requirements unmet",
+                            "Selected provider '"+qs(explicitRenderer->second)+
+                            "' cannot satisfy mandatory rendering features:\n"+
+                            missing.join(", ")+
+                            "\n\nChoose a compatible renderer or revise project requirements.");
+                        return;
+                    }
+                }else {
+                    // Automatic selects only a candidate with ALL declared
+                    // requirements. Do not rely on viewport's fallback from
+                    // an incompatible backend after scene initialization.
+                    auto best=std::find_if(providerChoices_.begin(),providerChoices_.end(),
+                        [&](auto const& option) {
+                            return option.id=="d3d12"&&compatible(option);
+                        });
+                    if(best==providerChoices_.end())
+                        best=std::find_if(providerChoices_.begin(),providerChoices_.end(),
+                            compatible);
+                    if(best==providerChoices_.end()) {
+                        QMessageBox::warning(this,"No compatible renderer",
+                            "No installed provider exposes every mandatory "
+                            "rendering feature required by this project.");
+                        return;
+                    }
+                    requirementResolvedRenderer=best->id;
+                }
+            }
             if(!smoke_) {
                 auto it=configured.provider_choices.find("engine.render");
                 if(it!=configured.provider_choices.end()) {
@@ -1333,6 +1462,17 @@ private:
                 environment.remove(qs(ns::provider_environment_key(capability)));
             for(auto const& [capability,provider]:configured.provider_choices)
                 environment.insert(qs(ns::provider_environment_key(capability)),qs(provider));
+            if(!requirementResolvedRenderer.empty())
+                environment.insert("NORTHSTARCPP_RENDER_PROVIDER",
+                    qs(requirementResolvedRenderer));
+            environment.remove("NORTHSTARCPP_RENDER_REQUIRED_FEATURES");
+            if(!configured.required_renderer_features.empty()) {
+                QStringList features;
+                for(auto const& id:configured.required_renderer_features)
+                    features<<qs(id);
+                environment.insert("NORTHSTARCPP_RENDER_REQUIRED_FEATURES",
+                    features.join(","));
+            }
             child.setProcessEnvironment(environment);
             if(!child.startDetached())
                 throw std::runtime_error("Failed to launch NorthStarCpp editor");

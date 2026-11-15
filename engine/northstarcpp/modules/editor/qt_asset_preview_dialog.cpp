@@ -37,6 +37,8 @@
 #include <QSplitter>
 #include <QTextEdit>
 #include <QThread>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -468,10 +470,196 @@ private:
     bool dragging_=false,wireframe_=false,dirty_=true;
 };
 
+// Read-only NEF8 rig and clip inspector. Shares the authoritative engine
+// skeleton parser and YCD clip table validation, not a second Qt decoder.
+struct NativeRigInspection {
+    std::optional<Skeleton> skeleton;
+    std::vector<shared_assets::AnimationClipInfo> clips;
+    QString failure;
+};
+NativeRigInspection inspectRig(fs::path const& root,
+                              std::string const& reference,AssetKind kind) {
+    NativeRigInspection result;
+    try {
+        auto const separator=reference.find('@');
+        auto const relative=reference.substr(0,separator);
+        auto const selected=separator==std::string::npos?
+            std::string{}:reference.substr(separator+1);
+        if(!safe_virtual_path(relative) ||
+           (separator!=std::string::npos &&
+           (selected.empty()||selected.size()>256||
+            selected.find_first_of("@/\\:")!=std::string::npos)))
+            throw std::runtime_error("Unsafe YMT/YCD asset reference");
+        std::error_code ec;
+        auto const canonical_root=fs::weakly_canonical(root,ec);
+        if(ec)throw std::runtime_error("Invalid Content root");
+        auto const physical=root/fs::u8path(relative);
+        auto const canonical=fs::weakly_canonical(physical,ec);
+        if(ec || !fs::is_regular_file(canonical))
+            throw std::runtime_error("YMT/YCD asset is missing");
+        auto part=canonical.begin();
+        for(auto root_part=canonical_root.begin();root_part!=canonical_root.end();
+            ++root_part,++part) {
+            if(part==canonical.end() || *part!=*root_part)
+                throw std::runtime_error("Asset path escapes Content root");
+        }
+        auto const size=fs::file_size(canonical,ec);
+        if(ec || size<32 || size>64u*1024u*1024u)
+            throw std::runtime_error("Invalid or oversized NEF8 file");
+        std::ifstream input(canonical,std::ios::binary);
+        if(!input)throw std::runtime_error("Cannot open NEF8 file");
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+        if(!input.read(reinterpret_cast<char*>(bytes.data()),
+                       static_cast<std::streamsize>(bytes.size())))
+            throw std::runtime_error("Incomplete NEF8 payload");
+        if(kind==AssetKind::skeleton) {
+            result.skeleton=load_skeleton_from_bytes(bytes);
+            if(!selected.empty()) {
+                const auto& joints=result.skeleton->joints;
+                if(std::none_of(joints.begin(),joints.end(),
+                    [&](SkeletonJoint const& joint){return joint.name==selected;}))
+                    throw std::runtime_error("YMT joint not found");
+            }
+        }else {
+            result.clips=shared_assets::inspect_animation_clip_dictionary(bytes);
+            if(!selected.empty() &&
+               std::none_of(result.clips.begin(),result.clips.end(),
+                    [&](auto const& clip){return clip.name==selected;}))
+                throw std::runtime_error("YCD clip not found");
+        }
+    }catch(std::exception const& e) {
+        result.failure=QString::fromUtf8(e.what());
+    }
+    return result;
+}
+int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
+                           std::string const& reference,AssetKind kind) {
+    QDialog dialog(parent);
+    dialog.setObjectName("nativeRigClipPreviewDialog");
+    dialog.setWindowTitle(QString(kind==AssetKind::skeleton?
+        "NorthStar Skeleton Inspector — ":"NorthStar Animation Inspector — ")+
+        qt(reference));
+    dialog.resize(1040,680);
+    dialog.setStyleSheet(
+        "QDialog{background:#151d28;color:#dce9f5}"
+        "QTreeWidget{background:#1c2838;color:#e5ebf3;alternate-background-color:#233145;"
+        "border:1px solid #3c5067;selection-background-color:#315c84}"
+        "QHeaderView::section{background:#26384b;color:#cedded;padding:7px;"
+        "border:1px solid #39516a}"
+        "QLabel{color:#b7cce2}"
+        "QPushButton{padding:7px 15px;background:#314a60;color:#fff;border-radius:5px}");
+    auto* layout=new QVBoxLayout(&dialog);
+    auto* title=new QLabel(qt(reference),&dialog);
+    title->setWordWrap(true);
+    title->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    QFont heading=title->font();heading.setBold(true);heading.setPointSize(13);
+    title->setFont(heading);layout->addWidget(title);
+    auto* tree=new QTreeWidget(&dialog);
+    tree->setObjectName(kind==AssetKind::skeleton?
+        "skeletonHierarchyTree":"animationClipList");
+    tree->setAlternatingRowColors(true);
+    if(kind==AssetKind::skeleton)
+        tree->setHeaderLabels({"Joint hierarchy","Parent","Bind position","Index"});
+    else
+        tree->setHeaderLabels({"Clip","Frames","FPS","Tracks","Duration","Loop"});
+    tree->setSelectionMode(QAbstractItemView::SingleSelection);
+    layout->addWidget(tree,1);
+    auto* details=new QLabel("Loading native NEF8 data...",&dialog);
+    details->setObjectName("nativeRigClipDetails");
+    details->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    details->setWordWrap(true);
+    details->setMinimumHeight(64);
+    layout->addWidget(details);
+    auto* row=new QHBoxLayout;
+    auto* status=new QLabel("Read-only • Native engine codec",&dialog);
+    status->setStyleSheet("color:#86b3d0");
+    row->addWidget(status,1);
+    auto* copy=new QPushButton("Copy reference",&dialog);
+    row->addWidget(copy);
+    QObject::connect(copy,&QPushButton::clicked,&dialog,
+        [reference]{QApplication::clipboard()->setText(qt(reference));});
+    auto* close=new QPushButton("Close",&dialog);
+    row->addWidget(close);
+    QObject::connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);
+    layout->addLayout(row);
+    auto* watcher=new QFutureWatcher<NativeRigInspection>(&dialog);
+    QObject::connect(watcher,&QFutureWatcher<NativeRigInspection>::finished,
+        &dialog,[watcher,tree,details,status,kind,reference] {
+            auto data=watcher->result();
+            if(!data.failure.isEmpty()) {
+                details->setText("Cannot decode native asset: "+data.failure);
+                status->setText("Invalid or unsupported NEF8 resource");
+                watcher->deleteLater();
+                return;
+            }
+            auto const separator=reference.find('@');
+            auto const selected=separator==std::string::npos?
+                std::string{}:reference.substr(separator+1);
+            if(kind==AssetKind::skeleton && data.skeleton) {
+                auto const& rig=*data.skeleton;
+                std::vector<QTreeWidgetItem*> items;
+                items.reserve(rig.joints.size());
+                for(std::size_t i=0;i<rig.joints.size();++i) {
+                    auto const& joint=rig.joints[i];
+                    QString const position=QString("%1, %2, %3")
+                        .arg(joint.bind.position.x,0,'f',3)
+                        .arg(joint.bind.position.y,0,'f',3)
+                        .arg(joint.bind.position.z,0,'f',3);
+                    auto* item=new QTreeWidgetItem(QStringList{
+                        qt(joint.name),
+                        joint.parent>=0?qt(rig.joints[static_cast<std::size_t>(
+                            joint.parent)].name):QString("Root"),
+                        position,QString::number(i)});
+                    if(joint.parent>=0)
+                        items[static_cast<std::size_t>(joint.parent)]->addChild(item);
+                    else tree->addTopLevelItem(item);
+                    items.push_back(item);
+                    if(joint.name==selected)tree->setCurrentItem(item);
+                }
+                tree->expandToDepth(1);
+                if(!selected.empty()&&tree->currentItem())
+                    tree->scrollToItem(tree->currentItem());
+                details->setText(QString(
+                    "Skeleton: %1 joints   •   Eye height: %2 m   •   "
+                    "Inverse bind matrices: %3\n"
+                    "Mirrored helper pairs: %4   •   Secondary constraints: %5")
+                    .arg(rig.joints.size())
+                    .arg(rig.eye_height,0,'f',2)
+                    .arg(rig.inverse_bind.size())
+                    .arg(rig.mirrored_helpers.size())
+                    .arg(rig.secondary_palette_constraints.size()));
+                status->setText("YMT / Native skeleton decoded");
+            }else if(kind==AssetKind::animation) {
+                for(auto const& clip:data.clips) {
+                    auto* item=new QTreeWidgetItem(tree,{
+                        qt(clip.name),QString::number(clip.frames),
+                        QString::number(clip.sample_rate,'f',2),
+                        QString::number(clip.tracks),
+                        QString::number(clip.duration,'f',2)+" s",
+                        clip.loop?"Loop":"Once"});
+                    if(clip.name==selected)tree->setCurrentItem(item);
+                }
+                tree->resizeColumnToContents(0);
+                details->setText(QString(
+                    "Native YCD dictionary: %1 clips\n"
+                    "Decoded clip table; animation playback requires a compatible YMT skeleton.")
+                    .arg(data.clips.size()));
+                status->setText("YCD / Native animation metadata decoded");
+            }
+            watcher->deleteLater();
+        });
+    watcher->setFuture(QtConcurrent::run(
+        [root=content_root,reference,kind] {
+            return inspectRig(root,reference,kind);
+        }));
+    return dialog.exec();
+}
 } // namespace
 
 int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                           std::string const& asset_reference,AssetKind kind) {
+    if(kind==AssetKind::skeleton || kind==AssetKind::animation)
+        return openNativeRigInspector(parent,content_root,asset_reference,kind);
     if(kind==AssetKind::material_function)
         return openMaterialFunctionEditor(parent,content_root,asset_reference);
     if(kind==AssetKind::material) {

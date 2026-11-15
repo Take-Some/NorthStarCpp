@@ -1,4 +1,13 @@
 #include "qt_editor_window.hpp"
+#include "qt_native_ui_preview.hpp"
+#include "qt_play_surface.hpp"
+#include "qt_inspector_scroll.hpp"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
 #include "qt_camera_studio.hpp"
@@ -69,16 +78,28 @@
 #include <QVariantList>
 #include <QSignalBlocker>
 #include <QStatusBar>
+#include <QStyle>
+#include <QFont>
+#include <QPainter>
+#include <QPainterPath>
+#include <QMouseEvent>
+#include <QShortcut>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTabWidget>
 #include <QSplitter>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSizePolicy>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QVector3D>
 #include <algorithm>
+#include <vector>
+#include <iostream>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <unordered_map>
@@ -89,13 +110,85 @@
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
 namespace {
+// Vector-painted, editor-owned glyphs: no bright Windows file icons.
+QIcon outlinerGlyph(int kind) {
+    QPixmap canvas(18,18);
+    canvas.fill(Qt::transparent);
+    QPainter p(&canvas);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(QColor("#8ea9c7"),1.4,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+    if(kind==0) { // Actor layer
+        p.setBrush(QColor("#52677d"));
+        p.drawRoundedRect(QRectF(1.6,5.2,14.8,10),1.8,1.8);
+        p.drawRoundedRect(QRectF(1.7,3.7,7.6,4.2),1.1,1.1);
+    } else if(kind==1) { // Player
+        p.setBrush(QColor("#7197bf"));
+        p.drawEllipse(QRectF(6.2,2.2,5.4,5.4));
+        p.drawRoundedRect(QRectF(3.5,10.1,11.0,5.7),2.4,2.4);
+    } else if(kind==2 || kind==4) { // Procedural / primitive
+        p.setBrush(QColor("#36546e"));
+        QPolygonF top({{9,2.5},{15,6},{9,9.1},{3,6}});
+        p.drawPolygon(top);
+        p.drawLine(QPointF(3,6),QPointF(3,12.5));
+        p.drawLine(QPointF(3,12.5),QPointF(9,16));
+        p.drawLine(QPointF(9,16),QPointF(15,12.5));
+        p.drawLine(QPointF(15,12.5),QPointF(15,6));
+        p.drawLine(QPointF(9,9.1),QPointF(9,16));
+    } else { // Mesh / imported asset
+        p.setBrush(QColor("#355c75"));
+        p.drawRoundedRect(QRectF(3.1,2.7,11.8,12.7),1.5,1.5);
+        p.setPen(QPen(QColor("#a0c9dc"),1.2));
+        p.drawLine(QPointF(5,12),QPointF(8,7.4));
+        p.drawLine(QPointF(8,7.4),QPointF(10,10.6));
+        p.drawLine(QPointF(10,10.6),QPointF(13,6.5));
+    }
+    return QIcon(canvas);
+}
+QIcon outlinerEyeGlyph(bool visible) {
+    QPixmap canvas(18,18);
+    canvas.fill(Qt::transparent);
+    QPainter p(&canvas);
+    p.setRenderHint(QPainter::Antialiasing);
+    auto const color=visible?QColor("#9aafc4"):QColor("#627184");
+    p.setPen(QPen(color,1.5,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+    QPainterPath eye;
+    eye.moveTo(1.4,9);
+    eye.cubicTo(5.2,3.4,12.8,3.4,16.6,9);
+    eye.cubicTo(12.8,14.6,5.2,14.6,1.4,9);
+    p.drawPath(eye);
+    p.setBrush(color);
+    p.drawEllipse(QPointF(9,9),2,2);
+    if(!visible) {
+        p.setPen(QPen(QColor("#d0948b"),2.0,Qt::SolidLine,Qt::RoundCap));
+        p.drawLine(QPointF(3,15),QPointF(15,3));
+    }
+    return QIcon(canvas);
+}
 // Drag/drop changes the authoring document, NOT the transient QTreeWidget
 // layout. Rebuild the tree from stable NSCN IDs after a validated edit.
 class ActorTreeWidget final : public QTreeWidget {
 public:
     explicit ActorTreeWidget(QWidget* parent):QTreeWidget(parent) {}
     std::function<void(int,int,QString)> moveActor;
+    std::function<void(int)> toggleVisibility;
 protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        // The UE-style eye control toggles visibility without changing selection.
+        if(event->button()==Qt::LeftButton &&
+           columnAt(int(event->position().x()))==1 && toggleVisibility) {
+            auto* item=itemAt(event->position().toPoint());
+            if(item) {
+                auto const index=item->data(0,Qt::UserRole).toInt();
+                if(index>=0) {
+                    auto callback=toggleVisibility;
+                    QTimer::singleShot(0,this,[callback,index]{callback(index);});
+                    event->accept();
+                    return;
+                }
+            }
+        }
+        QTreeWidget::mousePressEvent(event);
+    }
     void dropEvent(QDropEvent* event) override {
         if(event->source()!=this || !moveActor) {
             event->ignore();
@@ -178,7 +271,12 @@ fs::path sharedMaterialRoot() {
 bool availableMaterial(fs::path const& root,QString const& reference) {
     if(root.empty() || !material_authoring::is_material(reference))return false;
     try {
-        (void)material_authoring::resolve_existing(root,reference);
+        // Scene actors carry YMAT@entry identity. The filesystem contains
+        // only YMAT; @name is resolved by the asset codec, never treated as
+        // a literal filename.
+        auto const at=reference.indexOf('@');
+        auto const physical=at<0?reference:reference.left(at);
+        (void)material_authoring::resolve_existing(root,physical);
         return true;
     }catch(...) {return false;}
 }
@@ -191,7 +289,7 @@ bool validateMaterialComponent(void*,std::uint32_t version,
 }
 bool isMesh(QString const& path) {
     auto ext=QFileInfo(path).suffix().toLower();
-    return QStringList{"ydd","obj","mesh","fbx","gltf","glb"}.contains(ext);
+    return QStringList{"ydd","ydr","obj"}.contains(ext);
 }
 QDoubleSpinBox* scalar(QWidget* parent,double lo,double hi,int decimals=3) {
     auto* box=new QDoubleSpinBox(parent);
@@ -224,6 +322,9 @@ QtEditorWindow::QtEditorWindow(QWidget* parent):QMainWindow(parent) {
                    QMainWindow::AnimatedDocks |
                    QMainWindow::GroupedDragging);
     scene_=make_startup_scene();
+    // Smooth, per-pixel gizmo interaction by default. Snapping remains
+    // explicitly available in the authoring toolbar.
+    gizmoOptions_.snap=false;
     editor_tools::promote_to_v3(scene_);
     register_geometry_primitive_component();
     (void)register_scene_component_type({
@@ -257,6 +358,84 @@ QPushButton:hover,QToolButton:hover {background:#386180;}
 QStatusBar {background:#1d2a3a;color:#e1ebf4;}
 QToolBar {background:#202c3d;border:0;spacing:6px;}
 QCheckBox {color:#dce7f5;}
+/* Details is a scrollable dock, not a platform-default white QScrollArea. */
+QDockWidget#inspectorDock {background:#151c26;color:#dce7f5;}
+QScrollArea#inspectorScrollArea {
+ background:#151c26;color:#d6e4f2;border:0;
+}
+QWidget#inspectorViewport,QWidget#inspectorFormContent {
+ background:#151c26;color:#d6e4f2;
+}
+QWidget#inspectorFormContent QLabel {color:#afc2d5;}
+QWidget#inspectorFormContent QCheckBox {color:#dce7f5;}
+QGroupBox#sceneComponentsGroup {
+ background:#1d2937;color:#dce7f5;
+ border:1px solid #34485d;border-radius:5px;
+ margin-top:13px;padding-top:6px;
+}
+QGroupBox#sceneComponentsGroup::title {
+ subcontrol-origin:margin;subcontrol-position:top left;
+ left:9px;padding:0 5px;background:#151c26;color:#dce7f5;
+}
+QTreeWidget#sceneComponentsTree {
+ background:#192331;alternate-background-color:#192331;
+ border:1px solid #36495e;color:#e1ecf7;
+}
+QTreeWidget#sceneComponentsTree::item:selected {
+ background:#31597b;color:#ffffff;
+}
+QScrollArea#inspectorScrollArea QScrollBar:vertical {
+ background:#151c26;width:11px;margin:0;border:0;
+}
+QScrollArea#inspectorScrollArea QScrollBar::handle:vertical {
+ background:#415971;border-radius:4px;min-height:26px;margin:2px;
+}
+QScrollArea#inspectorScrollArea QScrollBar::handle:vertical:hover {
+ background:#597996;
+}
+QScrollArea#inspectorScrollArea QScrollBar::add-line:vertical,
+QScrollArea#inspectorScrollArea QScrollBar::sub-line:vertical {
+ height:0;background:none;border:0;
+}
+QScrollArea#inspectorScrollArea QScrollBar::add-page:vertical,
+QScrollArea#inspectorScrollArea QScrollBar::sub-page:vertical {
+ background:none;
+}
+QWidget#worldOutlinerPanel {background:#191f29;}
+QWidget#outlinerToolbar {background:#212b38;border-bottom:1px solid #334356;}
+QLineEdit#outlinerSearch {
+ background:#151e2b;border:1px solid #3c4d60;border-radius:5px;
+ padding:4px 8px;color:#e4eaf3;selection-background-color:#2a719b;
+}
+QLineEdit#outlinerSearch:focus {border-color:#4387b5;}
+QToolButton#outlinerExpand,QToolButton#outlinerCollapse,
+QToolButton#outlinerAdd,QToolButton#outlinerSort {
+ background:#273545;border:1px solid #394a5e;border-radius:4px;
+ padding:0;color:#b7c9db;font-size:16px;font-weight:600;
+}
+QToolButton#outlinerExpand:hover,QToolButton#outlinerCollapse:hover,
+QToolButton#outlinerAdd:hover,QToolButton#outlinerSort:hover {
+ background:#35516a;border-color:#4c7292;color:white;
+}
+QToolButton#outlinerSort:checked {background:#31526a;color:#e4f1fb;}
+QTreeWidget#actorTree {
+ background:#191f29;alternate-background-color:#191f29;
+ border:0;border-radius:0;padding:0;color:#dce5ef;
+ outline:0;show-decoration-selected:1;
+}
+QTreeWidget#actorTree::item {
+ background:transparent;color:#dce5ef;border:0;
+ padding:3px 3px;min-height:25px;
+}
+QTreeWidget#actorTree::item:hover:!selected {background:#2a3747;color:#f1f6fd;}
+QTreeWidget#actorTree::item:selected {background:#31597b;color:white;}
+QTreeWidget#actorTree::item:selected:!active {background:#30475e;color:white;}
+QTreeWidget#actorTree::branch {background:transparent;}
+QTreeWidget#actorTree::branch:hover {background:#273545;}
+QLabel#outlinerCount {
+ background:#202b38;border-top:1px solid #344354;
+ padding:3px 10px;color:#91a8bf;font-size:11px;
+}
 )QSS");
     viewport_=new QtEditorViewport(this);
     setCentralWidget(viewport_);
@@ -266,6 +445,24 @@ QCheckBox {color:#dce7f5;}
     auto* fileMenu=menuBar()->addMenu("&File");
     auto* editMenu=menuBar()->addMenu("&Edit");
     auto* viewMenu=menuBar()->addMenu("&View");
+    viewMenu->addAction("Native UI Preview",this,[this] {
+        auto* dock=findChild<QDockWidget*>("nativeUiPreviewDock");
+        if(!dock) {
+            try {
+                dock=new QDockWidget("Native UI Preview",this);
+                dock->setObjectName("nativeUiPreviewDock");
+                dock->setWidget(new NativeUIPreview(dock));
+                addDockWidget(Qt::RightDockWidgetArea,dock);
+            } catch(const std::exception& exception) {
+                if(dock && !dock->widget())dock->deleteLater();
+                statusBar()->showMessage(
+                    QString("Native UI Preview: %1").arg(exception.what()),10000);
+                return;
+            }
+        }
+        dock->show();
+        dock->raise();
+    });
     auto* assetMenu=menuBar()->addMenu("&Assets");
     auto* gameMenu=menuBar()->addMenu("&Game");
     auto* newScene=fileMenu->addAction("&New Scene",QKeySequence::New,[this]{
@@ -448,7 +645,7 @@ QCheckBox {color:#dce7f5;}
         browser_->refresh();
         updateDependencies();
     });
-    playAction_=gameMenu->addAction("Play Game",QKeySequence(Qt::Key_F6),
+    playAction_=gameMenu->addAction("Play In Editor",QKeySequence(Qt::Key_F6),
                                     this,&QtEditorWindow::playGame);
     playAction_->setObjectName("playGameAction");
     stopAction_=gameMenu->addAction("Stop Game",
@@ -456,6 +653,9 @@ QCheckBox {color:#dce7f5;}
                                     this,&QtEditorWindow::stopGame);
     stopAction_->setObjectName("stopGameAction");
     stopAction_->setEnabled(false);
+    auto* standalone=gameMenu->addAction("Launch Standalone Player",
+                                        this,&QtEditorWindow::playGameStandalone);
+    standalone->setObjectName("launchStandalonePlayerAction");
     exploreModeAction_=gameMenu->addAction("First Person Exploration");
     exploreModeAction_->setCheckable(true);
     exploreModeAction_->setObjectName("exploreModeAction");
@@ -478,6 +678,8 @@ QCheckBox {color:#dce7f5;}
     connect(playerProcess_,&QProcess::started,this,[this] {
         playAction_->setEnabled(false);
         stopAction_->setEnabled(true);
+        if(playSurface_)
+            playSurface_->setPlayerProcessId(quint64(playerProcess_->processId()));
         log("Game player started: "+playerProcess_->program());
     });
     connect(playerProcess_,&QProcess::readyReadStandardOutput,this,[this] {
@@ -494,6 +696,7 @@ QCheckBox {color:#dce7f5;}
         if(error==QProcess::FailedToStart) {
             playAction_->setEnabled(true);
             stopAction_->setEnabled(false);
+            endPlayOverlay();
         }
     });
     connect(playerProcess_,QOverload<int,QProcess::ExitStatus>::of(
@@ -501,6 +704,7 @@ QCheckBox {color:#dce7f5;}
             [this](int exitCode,QProcess::ExitStatus status) {
         playAction_->setEnabled(true);
         stopAction_->setEnabled(false);
+        endPlayOverlay();
         log(QString("Game player finished (%1, exit %2)")
             .arg(status==QProcess::NormalExit?"normal":"crashed")
             .arg(exitCode));
@@ -538,10 +742,12 @@ QCheckBox {color:#dce7f5;}
 
     auto* viewModes=new QComboBox(toolbar);
     viewModes->setObjectName("viewportDrawMode");
-    viewModes->addItems({"Shaded (Proxy)","Wireframe","Shaded + Wireframe",
-                         "Engine GPU (D3D11 / Windows)"});
+    viewModes->addItems({"Shaded (Proxy only)","Wireframe (Proxy)",
+                         "Shaded + Wireframe (Proxy)",
+                         "Engine GPU — Native Models & Materials"});
     viewModes->setToolTip(
-        "Qt proxy or native engine.render GPU surface; material parity not yet complete");
+        "Engine GPU uses the native YDD/YDR geometry, YMAT/YTD materials "
+        "and assigned actor material components. Proxy views show cubes.");
     toolbar->addWidget(new QLabel(" View: ",toolbar));
     toolbar->addWidget(viewModes);
     connect(viewModes,QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -631,7 +837,7 @@ QCheckBox {color:#dce7f5;}
     });
     toolbar->addSeparator();
     auto* snap=new QCheckBox("Snap",this);
-    snap->setChecked(true);
+    snap->setChecked(gizmoOptions_.snap);
     connect(snap,&QCheckBox::toggled,this,[this](bool checked){
         gizmoOptions_.snap=checked;
     });
@@ -644,15 +850,71 @@ QCheckBox {color:#dce7f5;}
     outlinerDock_->setObjectName("worldOutlinerDock");
     auto* left=new QWidget(outlinerDock_);
     auto* leftLayout=new QVBoxLayout(left);
-    leftLayout->setContentsMargins(5,5,5,5);
-    outlinerSearch_=new QLineEdit(left);
+    leftLayout->setContentsMargins(0,0,0,0);
+    leftLayout->setSpacing(0);
+    left->setObjectName("worldOutlinerPanel");
+    auto* searchBar=new QWidget(left);
+    searchBar->setObjectName("outlinerToolbar");
+    auto* searchLayout=new QHBoxLayout(searchBar);
+    searchLayout->setContentsMargins(9,8,9,7);
+    searchLayout->setSpacing(6);
+    outlinerSearch_=new QLineEdit(searchBar);
+    outlinerSearch_->setObjectName("outlinerSearch");
     outlinerSearch_->setPlaceholderText("Search actors...");
-    leftLayout->addWidget(outlinerSearch_);
+    outlinerSearch_->setToolTip(
+        "Search names, layers, assets, IDs. Filters: type:mesh, "
+        "type:player, type:geometry, is:hidden, is:visible.");
+    outlinerSearch_->setClearButtonEnabled(true);
+    outlinerSearch_->setMinimumHeight(30);
+    searchLayout->addWidget(outlinerSearch_,1);
+    auto* expandButton=new QToolButton(searchBar);
+    expandButton->setObjectName("outlinerExpand");
+    expandButton->setText("+");
+    expandButton->setToolTip("Expand all actors");
+    expandButton->setFixedSize(28,28);
+    searchLayout->addWidget(expandButton);
+    auto* collapseButton=new QToolButton(searchBar);
+    collapseButton->setObjectName("outlinerCollapse");
+    collapseButton->setText("-");
+    collapseButton->setToolTip("Collapse actor hierarchy");
+    collapseButton->setFixedSize(28,28);
+    searchLayout->addWidget(collapseButton);
+    auto* sortButton=new QToolButton(searchBar);
+    sortButton->setObjectName("outlinerSort");
+    sortButton->setText("A-Z");
+    sortButton->setToolTip("Sort actors by name");
+    sortButton->setCheckable(true);
+    sortButton->setChecked(true);
+    sortButton->setFixedSize(38,28);
+    searchLayout->addWidget(sortButton);
+    auto* addButton=new QToolButton(searchBar);
+    addButton->setObjectName("outlinerAdd");
+    addButton->setText("+");
+    addButton->setToolTip("Add actor to the scene");
+    addButton->setFixedSize(28,28);
+    auto* addMenu=new QMenu(addButton);
+    addMenu->addAction("Add Cube Actor",this,[this] {
+        createActor({},{0,0,0});
+    });
+    addButton->setMenu(addMenu);
+    addButton->setPopupMode(QToolButton::InstantPopup);
+    searchLayout->addWidget(addButton);
+    leftLayout->addWidget(searchBar);
     outliner_=new ActorTreeWidget(left);
     outliner_->setObjectName("actorTree");
-    outliner_->setHeaderLabels({"Actor","Type"});
-    outliner_->setAlternatingRowColors(true);
+    outliner_->setHeaderHidden(true);
+    outliner_->setColumnCount(2); // Actor label + narrow eye, never a Type column.
+    outliner_->setAlternatingRowColors(false);
+    outliner_->setMouseTracking(true);
+    outliner_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     outliner_->setSelectionMode(QAbstractItemView::SingleSelection);
+    outliner_->setRootIsDecorated(true);
+    outliner_->setIndentation(17);
+    outliner_->setIconSize(QSize(16,16));
+    outliner_->setAllColumnsShowFocus(false);
+    outliner_->setAutoScroll(true);
+    outliner_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    outliner_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     outliner_->setContextMenuPolicy(Qt::CustomContextMenu);
     outliner_->setUniformRowHeights(true);
     outliner_->setDragEnabled(true);
@@ -701,20 +963,44 @@ QCheckBox {color:#dce7f5;}
             scene.objects[std::size_t(actorIndex)].node.layer=newLayer;
         },actorIndex);
     };
+    static_cast<ActorTreeWidget*>(outliner_)->toggleVisibility=[this](int index) {
+        if(index<0 || std::size_t(index)>=scene_.objects.size())return;
+        auto const id=scene_.objects[std::size_t(index)].node.id;
+        editScene([index,id](Scene& scene) {
+            if(std::size_t(index)<scene.objects.size() &&
+               scene.objects[std::size_t(index)].node.id==id)
+                scene.objects[std::size_t(index)].node.visible=
+                    !scene.objects[std::size_t(index)].node.visible;
+        });
+    };
     outliner_->header()->setStretchLastSection(false);
     outliner_->header()->setSectionResizeMode(0,QHeaderView::Stretch);
-    outliner_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);
-    leftLayout->addWidget(outliner_);
+    outliner_->header()->setSectionResizeMode(1,QHeaderView::Fixed);
+    outliner_->header()->resizeSection(1,32);
+    connect(sortButton,&QToolButton::toggled,this,[this](bool) {
+        updateOutliner();
+    });
+    connect(expandButton,&QToolButton::clicked,outliner_,&QTreeWidget::expandAll);
+    connect(collapseButton,&QToolButton::clicked,outliner_,&QTreeWidget::collapseAll);
+    leftLayout->addWidget(outliner_,1);
+    auto* footer=new QLabel("0 actors",left);
+    footer->setObjectName("outlinerCount");
+    footer->setMinimumHeight(25);
+    footer->setAlignment(Qt::AlignVCenter|Qt::AlignLeft);
+    leftLayout->addWidget(footer);
     outlinerDock_->setWidget(left);
     addDockWidget(Qt::LeftDockWidgetArea,outlinerDock_);
 
     detailsDock_=new QDockWidget("Details | Properties",this);
     detailsDock_->setObjectName("inspectorDock");
-    auto* details=new QWidget(detailsDock_);
-    auto* form=new QFormLayout(details);
-    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
-    form->setContentsMargins(12,12,12,12);
-    form->setSpacing(8);
+    detailsDock_->setFeatures(QDockWidget::DockWidgetClosable|
+                              QDockWidget::DockWidgetMovable);
+    detailsDock_->setAllowedAreas(Qt::LeftDockWidgetArea|
+                                  Qt::RightDockWidgetArea);
+    auto const inspector=createInspectorScroll(detailsDock_);
+    auto* detailsScroll=inspector.scroll;
+    auto* details=inspector.content;
+    auto* form=inspector.form;
     objectName_=new QLineEdit(details);
     assetPath_=new QLineEdit(details);
     assetPath_->setPlaceholderText("Project-relative mesh reference");
@@ -779,6 +1065,7 @@ QCheckBox {color:#dce7f5;}
     form->addRow(visible_);
     form->addRow(collision_);
     auto* apply=new QPushButton("Apply Object Properties",details);
+    apply->setObjectName("applyObjectProperties");
     form->addRow(apply);
     auto* componentGroup=new QGroupBox("ECS Components",details);
     componentGroup->setObjectName("sceneComponentsGroup");
@@ -788,7 +1075,11 @@ QCheckBox {color:#dce7f5;}
     components_->setObjectName("sceneComponentsTree");
     components_->setHeaderLabels({"Component Type","Version","Bytes","Provider"});
     components_->setRootIsDecorated(false);
-    components_->setMinimumHeight(120);
+    // Fixed inner viewport: the OUTER inspector scrolls when space is
+    // limited, so this nested ECS tree cannot expand its parent dock.
+    components_->setMinimumHeight(0);
+    components_->setFixedHeight(144);
+    components_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     components_->setUniformRowHeights(true);
     components_->setSelectionMode(QAbstractItemView::SingleSelection);
     componentLayout->addWidget(components_);
@@ -818,16 +1109,42 @@ QCheckBox {color:#dce7f5;}
         "Ctrl+1/2/3 changes gizmo mode, F focuses selection. "
         "F6 launches the saved scene in Game Player.",details);
     hint->setWordWrap(true);
+    hint->setObjectName("inspectorHelpText");
     form->addRow(hint);
-    detailsDock_->setWidget(details);
+    detailsScroll->setWidget(details);
+    detailsDock_->setWidget(detailsScroll);
     addDockWidget(Qt::RightDockWidgetArea,detailsDock_);
 
     contentDock_=new QDockWidget("Content Browser",this);
     contentDock_->setObjectName("contentDock");
+    // A native engine editor panel: move between docking regions and tabs,
+    // but never turn into a second top-level Asset Browser window.
+    contentDock_->setFeatures(QDockWidget::DockWidgetClosable|
+                              QDockWidget::DockWidgetMovable);
+    contentDock_->setAllowedAreas(Qt::BottomDockWidgetArea|
+                                  Qt::LeftDockWidgetArea|
+                                  Qt::RightDockWidgetArea);
     browser_=new QtContentBrowser(contentDock_);
+    browser_->setEditorDockMode(true);
+    // Resolve the engine's common VFS mount from the same location as
+    // materials/models in Player; don't mirror sharedAssets per project.
+    browser_->setSharedContentRoot(qpath(sharedMaterialRoot()));
     contentDock_->setWidget(browser_);
     addDockWidget(Qt::BottomDockWidgetArea,contentDock_);
     contentDock_->setMinimumHeight(220);
+    auto* showContent=assetMenu->addAction("Show Content Browser");
+    showContent->setObjectName("showContentBrowserAction");
+    showContent->setShortcut(QKeySequence(Qt::CTRL|Qt::SHIFT|Qt::Key_B));
+    connect(showContent,&QAction::triggered,this,
+            [this]{showContentBrowser();});
+    auto* findSelected=assetMenu->addAction("Find Selected Actor Asset");
+    findSelected->setObjectName("findSelectedActorAssetAction");
+    connect(findSelected,&QAction::triggered,this,[this] {
+        if(selection_<0 || std::size_t(selection_)>=scene_.objects.size())
+            return;
+        auto const& asset=scene_.objects[std::size_t(selection_)].node.asset;
+        if(!asset.empty())showContentBrowser(from8(asset));
+    });
 
     dependencyDock_=new QDockWidget("Asset References",this);
     dependencyDock_->setObjectName("dependencyDock");
@@ -996,8 +1313,7 @@ QCheckBox {color:#dce7f5;}
     connect(outliner_,&QWidget::customContextMenuRequested,this,
             [this](QPoint pos) {
         auto* item=outliner_->itemAt(pos);
-        if(!item)return;
-        auto index=item->data(0,Qt::UserRole).toInt();
+        auto index=item?item->data(0,Qt::UserRole).toInt():-1;
         QMenu menu(this);
         if(index>=0 && std::size_t(index)<scene_.objects.size()) {
             chooseObject(index);
@@ -1009,6 +1325,14 @@ QCheckBox {color:#dce7f5;}
                            &QtEditorWindow::duplicateSelected);
             menu.addAction("Delete Actor  (Delete)",this,
                            &QtEditorWindow::deleteSelected);
+            auto const hidden=!scene_.objects[std::size_t(index)].node.visible;
+            menu.addAction(hidden?"Show Actor":"Hide Actor",this,[this,index] {
+                if(std::size_t(index)>=scene_.objects.size())return;
+                editScene([index](Scene& scene) {
+                    scene.objects[std::size_t(index)].node.visible=
+                        !scene.objects[std::size_t(index)].node.visible;
+                });
+            });
             menu.addSeparator();
             auto* parentMenu=menu.addMenu("Attach To");
             parentMenu->addAction("Detach / Move To Root",[this]{
@@ -1046,6 +1370,10 @@ QCheckBox {color:#dce7f5;}
                 ++added;
             }
         } else {
+            menu.addAction("Add Cube Actor",[this] {
+                createActor({},{0,0,0});
+            });
+            menu.addSeparator();
             menu.addAction("Expand All",[this]{outliner_->expandAll();});
             menu.addAction("Collapse All",[this]{outliner_->collapseAll();});
         }
@@ -1055,6 +1383,38 @@ QCheckBox {color:#dce7f5;}
             [this](QTreeWidgetItem* item,QTreeWidgetItem*) {
         if(!uiSync_)chooseObject(item?item->data(0,Qt::UserRole).toInt():-1);
     });
+    connect(outliner_,&QTreeWidget::itemDoubleClicked,this,
+            [this](QTreeWidgetItem* item,int column) {
+        if(column==1 || !item)return;
+        auto const index=item->data(0,Qt::UserRole).toInt();
+        if(index>=0) {
+            chooseObject(index);
+            viewport_->frameSelected();
+        }
+    });
+    connect(outliner_,&QTreeWidget::itemChanged,this,
+            [this](QTreeWidgetItem* item,int column) {
+        if(uiSync_ || column!=0 || !item)return;
+        auto const index=item->data(0,Qt::UserRole).toInt();
+        if(index<0 || std::size_t(index)>=scene_.objects.size())return;
+        auto const id=item->data(0,Qt::UserRole+1).toULongLong();
+        auto const name=item->text(0).trimmed();
+        // Deferred commit avoids deleting the inline editor while Qt handles
+        // its editingFinished signal. All edits go through Undo and validation.
+        QTimer::singleShot(0,this,[this,index,id,name] {
+            if(std::size_t(index)>=scene_.objects.size() ||
+               scene_.objects[std::size_t(index)].node.id!=id)return;
+            if(name.isEmpty() || name.size()>120) {
+                updateOutliner();
+                return;
+            }
+            if(from8(scene_.objects[std::size_t(index)].name)==name)return;
+            editScene([index,id,name](Scene& scene) {
+                if(scene.objects[std::size_t(index)].node.id==id)
+                    scene.objects[std::size_t(index)].name=utf8(name);
+            },index);
+        });
+    });
     connect(viewport_,&QtEditorViewport::selectionChanged,this,
             &QtEditorWindow::chooseObject);
     connect(viewport_,&QtEditorViewport::assetDropped,this,
@@ -1062,38 +1422,72 @@ QCheckBox {color:#dce7f5;}
     connect(viewport_,&QtEditorViewport::gizmoDragStarted,this,[this] {
         gizmoBefore_.reset();
         gizmoChanged_=false;
+        gizmoRawTotal_=0.f;
+        gizmoAppliedTotal_=0.f;
+        gizmoInspectorTimer_.start();
     });
     connect(viewport_,&QtEditorViewport::gizmoDelta,this,
             [this](int mode,int axis,float amount) {
-        if(selection_<0 || std::size_t(selection_)>=scene_.objects.size())
+        if(selection_<0 || std::size_t(selection_)>=scene_.objects.size() ||
+           !std::isfinite(amount))
             return;
         try {
-            // Take one checkpoint for the entire drag, not one full
-            // 16K-actor scene snapshot per mouse move.
+            // Accumulate raw pointer travel before snapping. The previous
+            // per-event round(amount/step) lost almost all small drags.
+            gizmoRawTotal_+=amount;
+            auto const options=gizmoOptions_;
+            float const step=mode==0?options.translation_step:
+                mode==1?options.rotation_step:options.scale_step;
+            float const target=options.snap?
+                std::round(gizmoRawTotal_/step)*step:gizmoRawTotal_;
+            float const delta=target-gizmoAppliedTotal_;
+            if(std::abs(delta)<1.e-6f)return;
+            // One snapshot per gesture; render each incremental transform
+            // immediately, including through the native GPU viewport.
             if(!gizmoBefore_)gizmoBefore_=scene_;
+            auto incremental=options;
+            incremental.snap=false;
             editor_tools::apply_gizmo(scene_,std::size_t(selection_),
                 static_cast<editor_tools::GizmoMode>(mode),
-                static_cast<editor_tools::GizmoAxis>(axis),amount,
-                gizmoOptions_);
+                static_cast<editor_tools::GizmoAxis>(axis),delta,
+                incremental,false);
+            gizmoAppliedTotal_=target;
             gizmoChanged_=true;
-            viewport_->update();
-            updateInspector();
+            viewport_->setScene(&scene_);
+            // The Details tree can be costly for a complex ECS scene.
+            // Keep GPU/proxy visuals at pointer rate and update widgets at
+            // ~30 FPS; the final drag release always synchronizes details.
+            if(!gizmoInspectorTimer_.isValid() ||
+                gizmoInspectorTimer_.elapsed()>=32) {
+                updateInspector();
+                gizmoInspectorTimer_.restart();
+            }
         } catch(std::exception const& e) {
             if(gizmoBefore_)scene_=std::move(*gizmoBefore_);
             gizmoBefore_.reset();
             gizmoChanged_=false;
+            gizmoRawTotal_=gizmoAppliedTotal_=0.f;
             log("Gizmo rejected: "+from8(e.what()));
             updateAll();
         }
     });
     connect(viewport_,&QtEditorViewport::gizmoDragFinished,this,[this] {
         if(gizmoBefore_ && gizmoChanged_) {
-            history_.record(std::move(*gizmoBefore_),
-                            selection_<0?0:std::size_t(selection_));
-            dirty_=true;
+            try {
+                // Full ECS/scene validation once on release, not on every
+                // mouse pixel; preserve atomic rollback and a single Undo.
+                validate_scene(scene_);
+                history_.record(std::move(*gizmoBefore_),
+                                selection_<0?0:std::size_t(selection_));
+                dirty_=true;
+            }catch(std::exception const& e) {
+                scene_=std::move(*gizmoBefore_);
+                log("Gizmo transform reverted: "+from8(e.what()));
+            }
         }
         gizmoBefore_.reset();
         gizmoChanged_=false;
+        gizmoRawTotal_=gizmoAppliedTotal_=0.f;
         updateAll();
     });
     connect(browser_,&QtContentBrowser::assetActivated,this,
@@ -1177,32 +1571,71 @@ void QtEditorWindow::log(QString const& line) {
 void QtEditorWindow::updateOutliner() {
     QSignalBlocker block(outliner_);
     uiSync_=true;
-    // Preserve the user's collapsed actor branches across property changes.
-    // The model is rebuilt only after actual scene edits/search changes.
-    std::unordered_set<std::uint64_t> collapsed;
-    if(outlinerSearch_->text().trimmed().isEmpty()) {
-        QTreeWidgetItemIterator iter(outliner_);
-        while(*iter) {
-            auto* node=*iter;
-            if(node->data(0,Qt::UserRole).toInt()>=0 && !node->isExpanded())
-                collapsed.insert(node->data(0,Qt::UserRole+1).toULongLong());
-            ++iter;
+    // Capture open/closed branches only from the unfiltered tree. While
+    // searching, expand ancestors but do NOT destroy saved expansion state.
+    auto const wasFiltered=outliner_->property("outlinerFiltered").toBool();
+    QSet<QString> collapsed;
+    for(auto const& key:outliner_->property("outlinerCollapsedKeys").toStringList())
+        collapsed.insert(key);
+    if(!wasFiltered) {
+        collapsed.clear();
+        QTreeWidgetItemIterator previous(outliner_);
+        while(*previous) {
+            auto* item=*previous;
+            if(item->childCount()>0 && !item->isExpanded()) {
+                auto const id=item->data(0,Qt::UserRole).toInt();
+                collapsed.insert(id>=0?
+                    QString("actor:%1").arg(item->data(0,Qt::UserRole+1).toULongLong()):
+                    QString("layer:%1").arg(item->text(0)));
+            }
+            ++previous;
         }
     }
+    QStringList saved;
+    for(auto const& key:collapsed)saved.append(key);
+    outliner_->setProperty("outlinerCollapsedKeys",saved);
+    outliner_->setProperty("outlinerFiltered",!outlinerSearch_->text().trimmed().isEmpty());
+    outliner_->setSortingEnabled(false);
     outliner_->clear();
     QString const filter=outlinerSearch_->text().trimmed();
     std::unordered_map<std::uint64_t,std::size_t> byId;
     byId.reserve(scene_.objects.size());
     for(std::size_t i=0;i<scene_.objects.size();++i)
         byId.emplace(scene_.objects[i].node.id,i);
+    std::unordered_set<std::uint64_t> geometryIds;
+    geometryIds.reserve(scene_.components.size());
+    for(auto const& component:scene_.components)
+        if(component.type==geometry_primitive_component)
+            geometryIds.insert(component.entity_id);
 
+    // Search by name, layer, asset, entity ID and useful UE-style qualifiers:
+    // "type:mesh", "type:player", "type:geometry", "is:hidden".
+    auto terms=filter.split(QRegularExpression(R"(\s+)"),Qt::SkipEmptyParts);
+    auto matches=[&](SceneObject const& actor) {
+        auto const procedural=geometryIds.count(actor.node.id)!=0;
+        QString const kind=actor.player?"player":procedural?"geometry":
+            actor.node.asset.empty()?"primitive":"mesh";
+        for(auto const& term:terms) {
+            if(term.startsWith("type:",Qt::CaseInsensitive)) {
+                auto const type=term.mid(5);
+                if(!kind.contains(type,Qt::CaseInsensitive))return false;
+            } else if(term.compare("is:hidden",Qt::CaseInsensitive)==0) {
+                if(actor.node.visible)return false;
+            } else if(term.compare("is:visible",Qt::CaseInsensitive)==0) {
+                if(!actor.node.visible)return false;
+            } else if(!from8(actor.name).contains(term,Qt::CaseInsensitive) &&
+                      !from8(actor.node.layer).contains(term,Qt::CaseInsensitive) &&
+                      !from8(actor.node.asset).contains(term,Qt::CaseInsensitive) &&
+                      !QString::number(actor.node.id).contains(term) &&
+                      !kind.contains(term,Qt::CaseInsensitive))return false;
+        }
+        return true;
+    };
     std::vector<bool> visible(scene_.objects.size(),filter.isEmpty());
     if(!filter.isEmpty()) {
         for(std::size_t i=0;i<scene_.objects.size();++i) {
             auto const& object=scene_.objects[i];
-            if(!from8(object.name).contains(filter,Qt::CaseInsensitive) &&
-               !from8(object.node.layer).contains(filter,Qt::CaseInsensitive) &&
-               !QString::number(object.node.id).contains(filter))continue;
+            if(!matches(object))continue;
             visible[i]=true;
             // A match in a child must also show its ancestor chain.
             auto parent=object.node.parent;
@@ -1222,21 +1655,23 @@ void QtEditorWindow::updateOutliner() {
     for(std::size_t i=0;i<scene_.objects.size();++i) {
         if(!visible[i])continue;
         auto const& object=scene_.objects[i];
-        bool const procedural=std::any_of(scene_.components.begin(),
-            scene_.components.end(),[&](SceneComponentBlob const& component) {
-                return component.entity_id==object.node.id &&
-                       component.type==geometry_primitive_component;
-            });
-        auto* item=new QTreeWidgetItem({
-            from8(object.name),
-            object.player?"Player":procedural?"Geometry":
-            object.node.asset.empty()?"Primitive":"Asset"});
+        bool const procedural=geometryIds.count(object.node.id)!=0;
+        auto* item=new QTreeWidgetItem({from8(object.name)});
         item->setData(0,Qt::UserRole,int(i));
         item->setData(0,Qt::UserRole+1,qulonglong(object.node.id));
-        item->setToolTip(0,QString("Entity ID: %1 | Layer: %2")
-                              .arg(object.node.id).arg(from8(object.node.layer)));
+        item->setFlags(item->flags()|Qt::ItemIsEditable);
+        auto const kind=object.player?"Player":procedural?"Geometry":
+            object.node.asset.empty()?"Primitive":"Static Mesh";
+        item->setToolTip(0,QString("%1  |  ID %2\nLayer: %3")
+                              .arg(kind).arg(object.node.id)
+                              .arg(from8(object.node.layer)));
+        item->setToolTip(1,object.node.visible?"Hide in Editor":"Show in Editor");
+        item->setIcon(0,outlinerGlyph(object.player?1:procedural?2:
+            object.node.asset.empty()?4:3));
+        item->setIcon(1,outlinerEyeGlyph(object.node.visible));
+        item->setTextAlignment(1,Qt::AlignCenter);
         if(!object.node.visible)
-            item->setForeground(0,QColor("#77889a"));
+            item->setForeground(0,QBrush(QColor("#8393a6")));
         entries[i]=item;
         if(int(i)==selection_)active=item;
     }
@@ -1256,32 +1691,49 @@ void QtEditorWindow::updateOutliner() {
                 std::string("Default"):object.node.layer;
             auto it=layers.find(layer);
             if(it==layers.end()) {
-                auto* folder=new QTreeWidgetItem(outliner_,{
-                    from8(layer),"Layer"});
+                auto* folder=new QTreeWidgetItem(outliner_,{from8(layer)});
                 folder->setData(0,Qt::UserRole,-1);
+                folder->setIcon(0,outlinerGlyph(0));
+                folder->setToolTip(0,"Actor layer: "+from8(layer));
+                folder->setForeground(0,QBrush(QColor("#b6c6d9")));
+                QFont layerFont=folder->font(0);
+                layerFont.setWeight(QFont::DemiBold);
+                folder->setFont(0,layerFont);
                 folder->setExpanded(true);
                 it=layers.emplace(layer,folder).first;
             }
             it->second->addChild(entries[i]);
         }
     }
+    if(auto* sorter=outlinerDock_->findChild<QToolButton*>("outlinerSort");
+       sorter && sorter->isChecked())
+        outliner_->sortItems(0,Qt::AscendingOrder);
     if(!filter.isEmpty())
         outliner_->expandAll();
     else {
         QTreeWidgetItemIterator iter(outliner_);
         while(*iter) {
             auto* item=*iter;
-            if(item->data(0,Qt::UserRole).toInt()>=0)
-                item->setExpanded(collapsed.find(item->data(0,Qt::UserRole+1).toULongLong())==
-                    collapsed.end());
+            if(item->childCount()>0) {
+                auto const index=item->data(0,Qt::UserRole).toInt();
+                auto const key=index>=0?
+                    QString("actor:%1").arg(item->data(0,Qt::UserRole+1).toULongLong()):
+                    QString("layer:%1").arg(item->text(0));
+                item->setExpanded(!collapsed.contains(key));
+            }
             ++iter;
         }
     }
-    if(active) {
-        outliner_->setCurrentItem(active);
-        auto* parent=active->parent();
-        while(parent) {parent->setExpanded(true);parent=parent->parent();}
+    if(auto* count=outlinerDock_->findChild<QLabel*>("outlinerCount")) {
+        auto const shown=std::count(visible.begin(),visible.end(),true);
+        count->setText(filter.isEmpty()
+            ?QString("%1 actors  |  %2 layers")
+                .arg(scene_.objects.size()).arg(layers.size())
+            :QString("%1 of %2 actors")
+                .arg(shown).arg(scene_.objects.size()));
     }
+    if(active)
+        outliner_->setCurrentItem(active);
     uiSync_=false;
 }
 void QtEditorWindow::refreshProviderInspector() {
@@ -1522,7 +1974,9 @@ void QtEditorWindow::updateDependencies() {
         auto const& object=scene_.objects[i];
         if(!object.node.asset.empty()) {
             auto const ref=from8(object.node.asset);
-            auto const found=QFileInfo::exists(root.filePath(ref));
+            auto const physical=ref.section('@',0,0);
+            auto const found=QFileInfo::exists(root.filePath(physical)) ||
+                QFileInfo::exists(QDir(qpath(shared)).filePath(physical));
             auto* row=new QTreeWidgetItem(dependencies_,{
                 ref,found?"Available":"Missing"});
             row->setForeground(1,QBrush(QColor(found?"#8bc98b":"#ed8a8a")));
@@ -1555,19 +2009,52 @@ void QtEditorWindow::chooseObject(int index) {
     if(index<0 || std::size_t(index)>=scene_.objects.size())index=-1;
     selection_=index;
     viewport_->setSelected(index);
-    updateOutliner();
+    // Never destroy the tree as a result of a selection signal: this used to
+    // invalidate rows during mouse events and reset scrolling unnecessarily.
+    auto locate=[this,index]() -> QTreeWidgetItem* {
+        QTreeWidgetItemIterator it(outliner_);
+        while(*it) {
+            if((*it)->data(0,Qt::UserRole).toInt()==index && index>=0)
+                return *it;
+            ++it;
+        }
+        return nullptr;
+    };
+    auto* selected=locate();
+    if(!selected && index>=0 && !outlinerSearch_->text().isEmpty()) {
+        outlinerSearch_->clear(); // Expose a viewport-selected filtered-out actor.
+        selected=locate();
+    }
+    {
+        QSignalBlocker block(outliner_);
+        if(selected) {
+            for(auto* parent=selected->parent();parent;parent=parent->parent())
+                parent->setExpanded(true);
+            outliner_->setCurrentItem(selected);
+            outliner_->scrollToItem(selected,QAbstractItemView::EnsureVisible);
+        } else
+            outliner_->setCurrentItem(nullptr);
+    }
     updateInspector();
 }
 void QtEditorWindow::renameSelected() {
     if(selection_<0 || std::size_t(selection_)>=scene_.objects.size())return;
-    bool ok=false;
-    auto name=QInputDialog::getText(this,"Rename Actor","Actor name:",
-        QLineEdit::Normal,from8(scene_.objects[std::size_t(selection_)].name),
-        &ok).trimmed();
-    if(ok && !name.isEmpty()) {
-        editScene([this,name](Scene& scene) {
-            scene.objects[std::size_t(selection_)].name=utf8(name);
-        });
+    QTreeWidgetItemIterator it(outliner_);
+    while(*it) {
+        auto* item=*it;
+        if(item->data(0,Qt::UserRole).toInt()==selection_) {
+            for(auto* parent=item->parent();parent;parent=parent->parent())
+                parent->setExpanded(true);
+            outliner_->setCurrentItem(item);
+            outliner_->scrollToItem(item,QAbstractItemView::EnsureVisible);
+            outliner_->editItem(item,0); // F2 = immediate in-place edit as in UE.
+            return;
+        }
+        ++it;
+    }
+    if(!outlinerSearch_->text().isEmpty()) {
+        outlinerSearch_->clear();
+        renameSelected();
     }
 }
 void QtEditorWindow::duplicateSelected() {
@@ -1632,15 +2119,22 @@ void QtEditorWindow::createActor(QString const& asset,QVector3D point) {
             log("Rejected unsafe asset reference: "+asset);return;
         }
         if(!isMesh(asset)) {
-            log("Only mesh resources can be placed. Select an OBJ/YDD/GLTF drawable.");
+            log("Only native YDD/YDR or optional OBJ geometry may be placed.");
             return;
         }
         if(file_.empty()) {
             log("Save or open a project scene before placing file-based assets.");
             return;
         }
-        if(!QFileInfo::exists(QDir(folderRoot(file_)).filePath(asset))) {
-            log("Asset missing in project Content: "+asset);return;
+        // Engine VFS resolves project-local models before sharedAssets.
+        // A pistol YDD may be shared; its real file need not be copied into
+        // every project's Content folder.
+        auto const fileRef=asset.section('@',0,0);
+        auto const local=QDir(folderRoot(file_)).filePath(fileRef);
+        auto const shared=QDir(qpath(sharedMaterialRoot())).filePath(fileRef);
+        if(!QFileInfo::exists(local) && !QFileInfo::exists(shared)) {
+            log("Model absent from project assets and sharedAssets: "+asset);
+            return;
         }
     }
     int after=-1;
@@ -2195,7 +2689,7 @@ bool QtEditorWindow::openScene(QString const& file) {
         scene_=std::move(next);
         file_=fs::absolute(path);
         history_.clear();dirty_=false;selection_=-1;
-        browser_->setContentRoot(folderRoot(file_));
+        browser_->setProjectScene(qpath(file_));
         viewport_->setAssetSources(file_.parent_path());
         // Project manifests own the default runtime mode; editor authoring
         // should not silently launch an FPS scene as an ordinary static view.
@@ -2245,7 +2739,7 @@ bool QtEditorWindow::saveScene(QString path) {
         file_=target;
         dirty_=false;
         if(changed) {
-            browser_->setContentRoot(folderRoot(file_));
+            browser_->setProjectScene(qpath(file_));
             viewport_->setAssetSources(file_.parent_path());
         }
         updateAll();
@@ -2318,7 +2812,9 @@ void QtEditorWindow::choosePlayerExecutable() {
         "Game/PlayerExecutable",configuredPlayerPath_);
     log("Configured Game Player: "+configuredPlayerPath_);
 }
-void QtEditorWindow::playGame() {
+void QtEditorWindow::playGame() {launchGame(true);}
+void QtEditorWindow::playGameStandalone() {launchGame(false);}
+void QtEditorWindow::launchGame(bool embedded) {
     if(!playerProcess_ || playerProcess_->state()!=QProcess::NotRunning) {
         log("Game player is already running");return;
     }
@@ -2369,6 +2865,19 @@ void QtEditorWindow::playGame() {
         args<<"--explore";
     else if(fpsModeAction_ && fpsModeAction_->isChecked())
         args<<"--fps";
+    if(embedded) {
+#ifdef _WIN32
+        auto* surface=beginPlayOverlay();
+        if(!surface)return;
+        args<<"--embed-parent" <<
+            ("0x"+QString::number(qulonglong(surface->nativeParentHandle()),16));
+#else
+        QMessageBox::warning(this,"Play In Editor",
+            "Native in-editor game windows currently require Windows.");
+        return;
+#endif
+    }
+    embeddedPlay_=embedded;
     playerProcess_->setProgram(executable);
     playerProcess_->setArguments(args);
     playerProcess_->setWorkingDirectory(QFileInfo(executable).absolutePath());
@@ -2378,8 +2887,14 @@ void QtEditorWindow::playGame() {
     playerProcess_->start(QIODevice::ReadOnly);
 }
 void QtEditorWindow::stopGame() {
-    if(!playerProcess_ || playerProcess_->state()==QProcess::NotRunning)return;
-    playerProcess_->terminate();
+    if(!playerProcess_ || playerProcess_->state()==QProcess::NotRunning) {
+        endPlayOverlay();
+        return;
+    }
+    if(playSurface_)
+        playSurface_->requestPlayerClose();
+    else
+        playerProcess_->terminate();
     QPointer<QProcess> process(playerProcess_);
     QTimer::singleShot(2500,this,[process] {
         if(process && process->state()!=QProcess::NotRunning)
@@ -2415,12 +2930,340 @@ bool QtEditorWindow::runPlayerCheckSmoke(QString const& root) {
     }
     return true;
 }
+QtPlaySurface* QtEditorWindow::beginPlayOverlay() {
+    if(playSurface_)return playSurface_;
+    // UE-style immersive play: store the entire current dock/toolbar layout,
+    // then hide editor chrome. Merely raising a QWidget is not enough for
+    // Qt6 native HWND dock/viewport siblings: they could remain above the
+    // game's child swapchain and obscure the image.
+    playWorkspaceBefore_=saveState(1);
+    playMenuWasVisible_=menuBar() && menuBar()->isVisible();
+    playStatusWasVisible_=statusBar() && statusBar()->isVisible();
+    for(auto* dock:findChildren<QDockWidget*>(
+            QString(),Qt::FindDirectChildrenOnly))
+        dock->hide();
+    for(auto* toolbar:findChildren<QToolBar*>(
+            QString(),Qt::FindDirectChildrenOnly))
+        toolbar->hide();
+    if(menuBar())menuBar()->hide();
+    if(statusBar())statusBar()->hide();
+
+    // The native game surface is parented to the Editor, never to the
+    // central Scene Viewport. It covers ALL editor client pixels.
+    auto* overlay=new QtPlaySurface(this);
+    overlay->setGeometry(rect());
+    connect(overlay,&QtPlaySurface::exitRequested,this,[this] {
+        stopGame(); // Escape is a single return to authoring, not a pause.
+    });
+    connect(overlay,&QtPlaySurface::playerAttachedChanged,this,
+            [this](bool ready) {
+        if(ready)log("Play In Editor: native game window attached to full editor");
+    });
+    playSurface_=overlay;
+    overlay->show();
+    overlay->raiseAboveEditorChrome();
+    overlay->setFocus();
+    log("Play In Editor: immersive Editor client active");
+    return overlay;
+}
+void QtEditorWindow::endPlayOverlay() {
+    embeddedPlay_=false;
+    if(!playSurface_)return;
+    auto* overlay=playSurface_;
+    playSurface_=nullptr;
+    overlay->setPlayerProcessId(0);
+    overlay->hide();
+    overlay->deleteLater();
+
+    // Restore exact dock positions, tab groups, visibility and toolbar
+    // placement. Do not leave the Editor with hidden panels after Escape,
+    // failed Player startup or a renderer crash.
+    if(!playWorkspaceBefore_.isEmpty()) {
+        if(!restoreState(playWorkspaceBefore_,1))
+            log("Play In Editor: workspace state restoration failed");
+        playWorkspaceBefore_.clear();
+    }
+    if(menuBar())menuBar()->setVisible(playMenuWasVisible_);
+    if(statusBar())statusBar()->setVisible(playStatusWasVisible_);
+    if(viewport_)viewport_->setFocus();
+    log("Play In Editor: returned to authoring workspace");
+}
+void QtEditorWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    if(playSurface_) {
+        playSurface_->setGeometry(rect());
+        playSurface_->raiseAboveEditorChrome();
+    }
+}
+
+bool QtEditorWindow::runEmbeddedRenderSmoke(QString const& executable,
+                                            QString const& scene) {
+#ifdef _WIN32
+    if(!playerProcess_ || !QFileInfo(executable).isFile() ||
+       !QFileInfo(scene).isFile() ||
+       playerProcess_->state()!=QProcess::NotRunning)
+        return false;
+    auto* overlay=beginPlayOverlay();
+    QPointer<QtPlaySurface> guarded=overlay;
+    bool attached=false,escaped=false;
+    connect(overlay,&QtPlaySurface::playerAttachedChanged,this,
+            [&](bool ready){if(ready)attached=true;});
+    connect(overlay,&QtPlaySurface::exitRequested,this,
+            [&]{escaped=true;});
+    QStringList arguments{"--scene",scene,"--warp","--embed-parent",
+        "0x"+QString::number(qulonglong(overlay->nativeParentHandle()),16)};
+    playerProcess_->setProgram(executable);
+    playerProcess_->setArguments(arguments);
+    playerProcess_->setWorkingDirectory(QFileInfo(executable).absolutePath());
+    playerProcess_->start(QIODevice::ReadOnly);
+    QElapsedTimer elapsed;elapsed.start();
+    qint64 attachedAt=-1;
+    bool sentEscape=false;
+    while(elapsed.elapsed()<17500) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+        if(guarded && guarded->playerAttached() && attachedAt<0)
+            attachedAt=elapsed.elapsed();
+        if(attachedAt>=0 && !sentEscape &&
+           elapsed.elapsed()-attachedAt>=1400 &&
+           playerProcess_->state()==QProcess::Running && guarded) {
+            // The real renderer's surface has existed long enough to
+            // receive frames; exercise Escape with focus inside Player.
+            auto const player=reinterpret_cast<HWND>(
+                guarded->nativePlayerHandle());
+            if(player && IsWindow(player)) {
+                PostMessageW(player,WM_KEYDOWN,VK_ESCAPE,1);
+                sentEscape=true;
+            }
+        }
+        if(playerProcess_->state()==QProcess::NotRunning &&
+           (!guarded || !guarded->isVisible()))
+            break;
+        QThread::msleep(12);
+    }
+    bool const cleanExit=playerProcess_->state()==QProcess::NotRunning;
+    if(!cleanExit) {
+        playerProcess_->kill();
+        playerProcess_->waitForFinished(1200);
+        endPlayOverlay();
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+    bool const restored=!playSurface_ && viewport_->isVisible() &&
+                        playerProcess_->state()==QProcess::NotRunning;
+    log(QString("PIE native render: attached=%1 escapeSent=%2 "
+                "notified=%3 exited=%4 restored=%5")
+        .arg(attached).arg(sentEscape).arg(escaped)
+        .arg(cleanExit).arg(restored));
+    return attached && sentEscape && escaped && cleanExit && restored;
+#else
+    Q_UNUSED(executable);Q_UNUSED(scene);
+    return false;
+#endif
+}
+bool QtEditorWindow::runEmbeddedPlaySmoke(QString const& executable) {
+#ifdef _WIN32
+    if(!QFileInfo(executable).isFile() || !playerProcess_ ||
+       playerProcess_->state()!=QProcess::NotRunning)
+        return false;
+    auto const originalLayout=saveState(1);
+    auto const menuBefore=menuBar() && menuBar()->isVisible();
+    auto const statusBefore=statusBar() && statusBar()->isVisible();
+    auto const docksBefore=findChildren<QDockWidget*>(
+        QString(),Qt::FindDirectChildrenOnly);
+    auto const toolbarsBefore=findChildren<QToolBar*>(
+        QString(),Qt::FindDirectChildrenOnly);
+    struct DockBefore {
+        QDockWidget* dock;
+        bool visible;
+        Qt::DockWidgetArea area;
+        QStringList tabs;
+    };
+    struct ToolbarBefore {
+        QToolBar* bar;
+        bool visible;
+        Qt::ToolBarArea area;
+    };
+    std::vector<DockBefore> expectedDocks;
+    std::vector<ToolbarBefore> expectedToolbars;
+    for(auto* dock:docksBefore) {
+        QStringList tabs;
+        for(auto* peer:tabifiedDockWidgets(dock))
+            tabs.push_back(peer->objectName());
+        tabs.sort();
+        expectedDocks.push_back({
+            dock,dock->isVisible(),dockWidgetArea(dock),tabs});
+    }
+    for(auto* bar:toolbarsBefore)
+        expectedToolbars.push_back({
+            bar,bar->isVisible(),toolBarArea(bar)});
+    auto* overlay=beginPlayOverlay();
+    if(!overlay)return false;
+    QPointer<QtPlaySurface> guarded=overlay;
+    auto const handle=reinterpret_cast<HWND>(overlay->nativeParentHandle());
+    bool const fullClient=IsWindow(handle) &&
+        overlay->geometry()==rect() && overlay->isVisible() &&
+        overlay->parentWidget()==this &&
+        !overlay->testAttribute(Qt::WA_DontCreateNativeAncestors);
+    auto allHidden=[](auto const& widgets) {
+        return std::all_of(widgets.begin(),widgets.end(),[](auto* widget) {
+            return !widget || !widget->isVisible();
+        });
+    };
+    bool const editorChromeHidden=menuBar() && !menuBar()->isVisible() &&
+        statusBar() && !statusBar()->isVisible() &&
+        allHidden(docksBefore) && allHidden(toolbarsBefore);
+    bool attached=false,escaped=false,unobstructed=false;
+    connect(overlay,&QtPlaySurface::playerAttachedChanged,this,
+            [&](bool present){
+                if(!present)return;
+                attached=true;
+                overlay->raiseAboveEditorChrome();
+                RECT bounds{};
+                if(!GetWindowRect(handle,&bounds))return;
+                // Native hit testing at positions formerly occupied by
+                // Scene Outliner, Inspector, ContentBrowser and menu. The
+                // entire editor client must hit Player/overlay, not panes.
+                std::array<POINT,5> const samples{{
+                    {bounds.left+(bounds.right-bounds.left)/10,
+                     bounds.top+(bounds.bottom-bounds.top)/10},
+                    {bounds.left+9*(bounds.right-bounds.left)/10,
+                     bounds.top+(bounds.bottom-bounds.top)/10},
+                    {bounds.left+(bounds.right-bounds.left)/10,
+                     bounds.top+9*(bounds.bottom-bounds.top)/10},
+                    {bounds.left+9*(bounds.right-bounds.left)/10,
+                     bounds.top+9*(bounds.bottom-bounds.top)/10},
+                    {bounds.left+(bounds.right-bounds.left)/2,
+                     bounds.top+(bounds.bottom-bounds.top)/2}
+                }};
+                auto const parent=GetParent(handle);
+                unobstructed=std::all_of(samples.begin(),samples.end(),
+                    [&](POINT sample) {
+                        auto point=sample;
+                        MapWindowPoints(nullptr,parent,&point,1);
+                        // Test the Editor's native child z-order, independent
+                        // of which unrelated desktop app has OS foreground.
+                        auto const hit=ChildWindowFromPointEx(parent,point,
+                            CWP_SKIPINVISIBLE|CWP_SKIPTRANSPARENT);
+                        if(hit==handle || IsChild(handle,hit))return true;
+                        wchar_t kind[120]{};
+                        GetClassNameW(hit,kind,120);
+                        std::cerr<<"PIE obscured sample parent="<<parent
+                                 <<" surface="<<handle<<" hit="<<hit
+                                 <<" class="<<QString::fromWCharArray(kind).toStdString()
+                                 <<" x="<<point.x<<" y="<<point.y<<std::endl;
+                        return false;
+                    });
+            });
+    connect(overlay,&QtPlaySurface::exitRequested,this,
+            [&]{escaped=true;});
+    playerProcess_->setProgram(executable);
+    playerProcess_->setArguments({"--embed-parent",
+        "0x"+QString::number(qulonglong(overlay->nativeParentHandle()),16),
+        "--embed-handshake-smoke"});
+    playerProcess_->setWorkingDirectory(QFileInfo(executable).absolutePath());
+    playerProcess_->start(QIODevice::ReadOnly);
+    QElapsedTimer elapsed;elapsed.start();
+    while(elapsed.elapsed()<6500) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+        if(playerProcess_->state()==QProcess::NotRunning &&
+           (!guarded || !guarded->isVisible()))
+            break;
+        QThread::msleep(10);
+    }
+    if(playerProcess_->state()!=QProcess::NotRunning) {
+        playerProcess_->kill();
+        playerProcess_->waitForFinished(1600);
+        endPlayOverlay();
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+    bool const docksRestored=std::all_of(
+        expectedDocks.begin(),expectedDocks.end(),
+        [this](DockBefore const& original) {
+            if(!original.dock ||
+               original.dock->isVisible()!=original.visible ||
+               dockWidgetArea(original.dock)!=original.area)
+                return false;
+            QStringList now;
+            for(auto* peer:tabifiedDockWidgets(original.dock))
+                now.push_back(peer->objectName());
+            now.sort();
+            return now==original.tabs;
+        });
+    bool const toolbarsRestored=std::all_of(
+        expectedToolbars.begin(),expectedToolbars.end(),
+        [this](ToolbarBefore const& original) {
+            return original.bar &&
+                original.bar->isVisible()==original.visible &&
+                toolBarArea(original.bar)==original.area;
+        });
+    bool const restored=!playSurface_ &&
+        playerProcess_->state()==QProcess::NotRunning &&
+        viewport_ && viewport_->isVisible() && !viewport_->isHidden() &&
+        (!menuBar() || menuBar()->isVisible()==menuBefore) &&
+        (!statusBar() || statusBar()->isVisible()==statusBefore) &&
+        docksRestored && toolbarsRestored;
+    if(!restored)
+        std::cerr<<"PIE restore details viewportVisible="
+                 <<(viewport_ && viewport_->isVisible())
+                 <<" menu="<<(menuBar() && menuBar()->isVisible())
+                 <<" menuBefore="<<menuBefore
+                 <<" status="<<(statusBar() && statusBar()->isVisible())
+                 <<" statusBefore="<<statusBefore
+                 <<" docksRestored="<<docksRestored
+                 <<" toolbarsRestored="<<toolbarsRestored
+                 <<" stateBytesIdentical="<<(saveState(1)==originalLayout)
+                 <<" playerState="<<int(playerProcess_->state())
+                 <<std::endl;
+    if(!restored)endPlayOverlay();
+    auto const diagnostic=QString(
+        "PIE IPC smoke: full_client=%1 chrome_hidden=%2 "
+        "attached=%3 unobstructed=%4 escape=%5 restored=%6 "
+        "player_exit=%7 player_error=%8")
+        .arg(fullClient).arg(editorChromeHidden).arg(attached)
+        .arg(unobstructed).arg(escaped).arg(restored)
+        .arg(playerProcess_->exitCode())
+        .arg(playerProcess_->errorString());
+    log(diagnostic);
+    std::cerr<<diagnostic.toStdString()<<std::endl;
+    return fullClient && editorChromeHidden && attached &&
+           unobstructed && escaped && restored;
+#else
+    Q_UNUSED(executable);
+    return false;
+#endif
+}
+void QtEditorWindow::showContentBrowser(QString const& virtualReference) {
+    if(!contentDock_ || !browser_)return;
+    if(dockWidgetArea(contentDock_)==Qt::NoDockWidgetArea)
+        addDockWidget(Qt::BottomDockWidgetArea,contentDock_);
+    // QMainWindow::restoreState can resurrect an old floating layout even
+    // when Floatable was removed from the current dock features.
+    if(contentDock_->isFloating())
+        contentDock_->setFloating(false);
+    contentDock_->show();
+    contentDock_->raise();
+    if(!virtualReference.isEmpty())
+        browser_->revealAsset(virtualReference);
+    else browser_->focusSearch();
+}
+
 void QtEditorWindow::restoreWorkspace() {
     QSettings settings("KaylasSystems","NorthStarQtEditor");
     auto geometry=settings.value("Workspace/Geometry").toByteArray();
     auto state=settings.value("Workspace/State").toByteArray();
     if(!geometry.isEmpty())restoreGeometry(geometry);
     if(!state.isEmpty())restoreState(state,1);
+    // Older workspaces may have a floating Content Browser. Re-dock it,
+    // preserving the user's explicit choice to hide the panel.
+    if(contentDock_ && contentDock_->isFloating()) {
+        addDockWidget(Qt::BottomDockWidgetArea,contentDock_);
+        contentDock_->setFloating(false);
+    }
+    // Older layouts may have floated the Inspector over the ContentBrowser.
+    // Keep it docked so only the inner form scrolls vertically.
+    if(detailsDock_ && detailsDock_->isFloating()) {
+        addDockWidget(Qt::RightDockWidgetArea,detailsDock_);
+        detailsDock_->setFloating(false);
+    }
     configuredPlayerPath_=settings.value("Game/PlayerExecutable").toString();
     if(exploreModeAction_)
         exploreModeAction_->setChecked(settings.value("Game/Explore",false).toBool());
@@ -2429,8 +3272,28 @@ void QtEditorWindow::restoreWorkspace() {
     if(viewport_) {
         viewport_->setFlySpeed(settings.value("Viewport/FlySpeed",12.).toFloat());
         viewport_->setShowGrid(settings.value("Viewport/Grid",true).toBool());
+        int const existing=std::clamp(
+            settings.value("Viewport/DrawMode",3).toInt(),0,3);
+#ifdef _WIN32
+        // One-time compatibility upgrade for earlier stored Shaded=0
+        // workspaces. Explicit wireframe modes (1/2) remain untouched.
+        // Shaded=0 was the implicit historical default, which rendered all
+        // prefabs and character assets as cubes even with a GPU available.
+        bool const upgraded=settings.value(
+            "Viewport/NativeAssetRenderingV2",false).toBool();
+        int const preferred=!upgraded && existing==0 ? 3 : existing;
+        settings.setValue("Viewport/NativeAssetRenderingV2",true);
+        QTimer::singleShot(0,viewport_,[this,preferred] {
+            if(!viewport_)return;
+            viewport_->setDrawMode(
+                static_cast<QtEditorViewport::DrawMode>(preferred));
+            if(auto* mode=findChild<QComboBox*>("viewportDrawMode"))
+                mode->setCurrentIndex(int(viewport_->drawMode()));
+        });
+#else
         viewport_->setDrawMode(static_cast<QtEditorViewport::DrawMode>(
-            std::clamp(settings.value("Viewport/DrawMode",0).toInt(),0,3)));
+            existing==3?0:existing));
+#endif
         applyCameraValues(viewport_,settings.value("Viewport/Camera"));
         if(auto* mode=findChild<QComboBox*>("viewportDrawMode"))
             mode->setCurrentIndex(int(viewport_->drawMode()));
@@ -2461,6 +3324,9 @@ void QtEditorWindow::closeEvent(QCloseEvent* e) {
     if(!confirmDiscard()){e->ignore();return;}
     if(playerProcess_ && playerProcess_->state()!=QProcess::NotRunning)
         stopGame();
+    // Persist the original Editor layout, never an immersive layout in
+    // which all dock panes were temporarily hidden.
+    if(playSurface_)endPlayOverlay();
     persistWorkspace();QMainWindow::closeEvent(e);
 }
 bool QtEditorWindow::runSmoke(QString const& base) {
@@ -2506,6 +3372,19 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         if(objectCount()!=before+1){log("smoke: createActor count mismatch");return false;}
         if(!saveScene() || !openScene(sceneFile)){log("smoke: roundtrip save/open failed");return false;}
         if(scene_.objects.back().node.asset!="Meshes/smoke.obj"){log("smoke: wrong asset reference");return false;}
+        // UE-inspired Outliner: primary label + a fixed-width visibility eye,
+        // no Type column or horizontal scrolling.
+        if(!outliner_->isHeaderHidden() || outliner_->columnCount()!=2 ||
+           outliner_->header()->sectionSize(1)!=32 ||
+           outliner_->horizontalScrollBarPolicy()!=Qt::ScrollBarAlwaysOff ||
+           !outlinerSearch_->isClearButtonEnabled() ||
+           !outlinerDock_->findChild<QLabel*>("outlinerCount") ||
+           !outlinerDock_->findChild<QToolButton*>("outlinerExpand") ||
+           !outlinerDock_->findChild<QToolButton*>("outlinerCollapse") ||
+           !outlinerDock_->findChild<QToolButton*>("outlinerSort") ||
+           !outlinerDock_->findChild<QToolButton*>("outlinerAdd")) {
+            log("smoke: World Outliner layout regression");return false;
+        }
         // Assert the actual NSCN parent relationship is represented as a
         // nested World Outliner branch, including ancestor-aware filtering.
         int const actor=int(scene_.objects.size()-1);
@@ -2533,14 +3412,81 @@ bool QtEditorWindow::runSmoke(QString const& base) {
            child->parent()->data(0,Qt::UserRole).toInt()!=0) {
             log("smoke: hierarchy search hid the matched actor parent");return false;
         }
+        // Search supports combined qualifiers, and selection does not
+        // recreate the item (important for inline edits and scroll position).
+        outlinerSearch_->setText("type:mesh HierarchyEditorSmoke");
+        if(!locate(actor)) {
+            log("smoke: Outliner type qualifier rejected a mesh");return false;
+        }
+        outlinerSearch_->setText("type:player HierarchyEditorSmoke");
+        if(locate(actor)) {
+            log("smoke: Outliner type qualifier returned non-player");return false;
+        }
         outlinerSearch_->clear();
-        // Gizmo drag must create a single Undo step.
+        auto* stable=locate(actor);
+        chooseObject(0);
+        chooseObject(actor);
+        if(locate(actor)!=stable) {
+            log("smoke: selection rebuilt the Outliner unexpectedly");return false;
+        }
+        if(!stable || stable->icon(1).isNull() ||
+           !(stable->flags()&Qt::ItemIsEditable)) {
+            log("smoke: eye or inline rename is missing");return false;
+        }
+        stable->setText(0,"InlineRenameSmoke");
+        QApplication::processEvents();
+        if(scene_.objects[std::size_t(actor)].name!="InlineRenameSmoke") {
+            log("smoke: inline rename failed to save");return false;
+        }
+        undo();
+        if(scene_.objects[std::size_t(actor)].name!="HierarchyEditorSmoke") {
+            log("smoke: inline rename is not undoable");return false;
+        }
+        chooseObject(0);
+        outliner_->expandAll();
+        auto* eyeItem=locate(actor);
+        if(!eyeItem) {
+            log("smoke: target actor disappeared before eye click");return false;
+        }
+        outliner_->scrollToItem(eyeItem);
+        auto const eyeRect=outliner_->visualItemRect(eyeItem);
+        QPoint eyePoint(outliner_->header()->sectionViewportPosition(1)+16,
+                        eyeRect.center().y());
+        if(eyeRect.isEmpty() || !outliner_->viewport()->rect().contains(eyePoint)) {
+            log("smoke: visibility eye is outside the tree viewport");return false;
+        }
+        auto const oldVisibility=scene_.objects[std::size_t(actor)].node.visible;
+        QMouseEvent eyeDown(QEvent::MouseButtonPress,
+                            QPointF(eyePoint),QPointF(eyePoint),
+                            QPointF(outliner_->viewport()->mapToGlobal(eyePoint)),
+                            Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+        QApplication::sendEvent(outliner_->viewport(),&eyeDown);
+        QApplication::processEvents();
+        if(scene_.objects[std::size_t(actor)].node.visible==oldVisibility ||
+           selection_!=0) {
+            log("smoke: visibility eye did not toggle without selection");return false;
+        }
+        outlinerSearch_->setText("is:hidden HierarchyEditorSmoke");
+        if(oldVisibility && !locate(actor)) {
+            log("smoke: hidden actor filter failed");return false;
+        }
+        outlinerSearch_->clear();
+        undo();
+        if(scene_.objects[std::size_t(actor)].node.visible!=oldVisibility) {
+            log("smoke: visibility toggle could not be undone");return false;
+        }
+        // Verify cumulative snap: two 1.2m pointer moves should reach
+        // 2.0m when 1m snapping is explicitly enabled. The normal UI
+        // defaults to smooth unsnapped authoring.
         auto const original=scene_.objects[std::size_t(actor)].position.x;
         chooseObject(actor);
+        auto const previousSnap=gizmoOptions_.snap;
+        gizmoOptions_.snap=true;
         viewport_->gizmoDragStarted();
         viewport_->gizmoDelta(0,0,1.2f);
         viewport_->gizmoDelta(0,0,1.2f);
         viewport_->gizmoDragFinished();
+        gizmoOptions_.snap=previousSnap;
         if(std::abs(scene_.objects[std::size_t(actor)].position.x-original-2.f)>.001f) {
             log("smoke: gizmo drag did not move actor");return false;
         }
@@ -2728,7 +3674,11 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         }
         auto const contentRoot=native(folderRoot(file_));
         auto descriptor=material_authoring::load_descriptor(contentRoot,createdMaterial);
-        if(descriptor.value("base_color_texture").toString()!="Textures/editor-smoke.png" ||
+        auto const importedTexture=descriptor.value("base_color_texture").toString();
+        if(!importedTexture.startsWith("Textures/") ||
+           !importedTexture.contains(".ytd@editor-smoke") ||
+           !QFileInfo::exists(QDir(folderRoot(file_)).filePath(
+               importedTexture.left(importedTexture.indexOf('@')))) ||
            !QFileInfo::exists(QDir(folderRoot(file_)).filePath(createdMaterial))) {
             log("smoke: texture was not bound to material Base Color");return false;
         }
@@ -2800,14 +3750,21 @@ bool QtEditorWindow::runSmoke(QString const& base) {
            availableMaterial(shared,"characters/abby/materials/abby.ymat")) {
             refreshMaterialChoices(true);
             updateInspector();
-            auto const index=materialPicker_->findData(
-                QString("characters/abby/materials/abby.ymat"));
-            if(index<1) {
-                log("smoke: shared YMAT missing from material picker");return false;
+            auto const library=QString("characters/abby/materials/abby.ymat");
+            auto const available=material_authoring::list_materials(shared);
+            QString selected;
+            for(auto const& candidate:available)
+                if(candidate==library || candidate.startsWith(library+"@")) {
+                    selected=candidate;break;
+                }
+            auto const index=materialPicker_->findData(selected);
+            if(selected.isEmpty() || index<1) {
+                log("smoke: shared YMAT entries missing from material picker");
+                return false;
             }
             materialPicker_->setCurrentIndex(index);
             if(editor_tools::actor_material(scene_,std::size_t(actor))!=
-               "characters/abby/materials/abby.ymat") {
+               utf8(selected)) {
                 log("smoke: shared YMAT selection did not persist");return false;
             }
             undo();
@@ -2912,6 +3869,12 @@ bool QtEditorWindow::runSmoke(QString const& base) {
 bool QtEditorWindow::runGpuSmoke(QString const& root) {
 #ifdef _WIN32
     if(!runSmoke(root))return false;
+    // Native visual acceptance: a real original YDD, its section YMAT
+    // references and decoded YTD textures must reach the GPU renderer.
+    bool const nativeFixture=fs::is_regular_file(
+        sharedMaterialRoot()/"models/skydome.ydd");
+    if(nativeFixture)
+        createActor("models/skydome.ydd@skydome_high",{7.f,1.f,7.f});
     viewport_->setDrawMode(QtEditorViewport::DrawMode::EngineGpu);
     QCoreApplication::processEvents();
     QFile diagnostic(QDir(QCoreApplication::applicationDirPath()).filePath(
@@ -2929,10 +3892,22 @@ bool QtEditorWindow::runGpuSmoke(QString const& root) {
         return false;
     }
     auto const rendered=viewport_->renderGpuNow();
+    auto const stats=viewport_->gpuAssetSummary();
     if(diagnosticsEnabled) {
         diagnostic.write(("Draw: "+QString::number(rendered)+"\nStatus: "+
-             statusBar()->currentMessage()+"\n").toUtf8());
+             statusBar()->currentMessage()+"\nAssets: "+stats+"\n").toUtf8());
         diagnostic.flush();
+    }
+    bool nativeDrawOk=true;
+    if(nativeFixture && rendered) {
+        auto const mesh=QRegularExpression(R"(Native meshes: ([0-9]+))").match(stats);
+        auto const batches=QRegularExpression(R"(Materials: ([0-9]+))").match(stats);
+        auto const textures=QRegularExpression(R"(Textured: ([0-9]+))").match(stats);
+        nativeDrawOk=mesh.hasMatch() && mesh.captured(1).toUInt()>0 &&
+            batches.hasMatch() && batches.captured(1).toUInt()>0 &&
+            textures.hasMatch() && textures.captured(1).toUInt()>0;
+        if(!nativeDrawOk)
+            log("smoke: YDD/YMAT/YTD did not reach GPU: "+stats);
     }
     viewport_->setDrawMode(QtEditorViewport::DrawMode::Shaded);
     if(!rendered) {
@@ -2940,7 +3915,7 @@ bool QtEditorWindow::runGpuSmoke(QString const& root) {
                    << statusBar()->currentMessage();
         log("smoke: native GPU draw failed");
     }
-    return rendered;
+    return rendered && nativeDrawOk;
 #else
     Q_UNUSED(root);
     log("GPU HWND provider is Windows-only; a portable GPU surface is pending.");

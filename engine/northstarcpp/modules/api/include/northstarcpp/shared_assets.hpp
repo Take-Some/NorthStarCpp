@@ -102,6 +102,17 @@ struct DictionaryEntry {
     std::string name;
     std::uintmax_t size=0; // Byte size when stored explicitly (YTD payload).
 };
+// Metadata-only YCD traversal. Runtime clip decoding still requires a YMT rig.
+struct AnimationClipInfo {
+    std::string name;
+    std::uint32_t tracks=0;
+    std::uint32_t frames=0;
+    float sample_rate=0.f;
+    bool loop=false;
+    float duration=0.f;
+};
+std::vector<AnimationClipInfo> inspect_animation_clip_dictionary(
+    std::vector<std::uint8_t> const& nef8);
 std::vector<DictionaryEntry> list_dictionary_entries(
     AssetStore const& assets, std::string const& path);
 std::vector<DictionaryEntry> list_dictionary_entries(

@@ -174,8 +174,10 @@ void compile_character(char const* entry,char const* profile,ID3DBlob** output)
 
 void compile_authored_material(const char* entry,const char* profile,ID3DBlob** result) {
     Microsoft::WRL::ComPtr<ID3DBlob> errors;
-    auto const status=D3DCompile(authored_material_shader,
-        sizeof(authored_material_shader)-1,"NorthStar Material PBR",
+    std::string const program=std::string("#define NS_D3D11_DYNAMIC_LIGHTS 1\n")+
+        authored_material_shader;
+    auto const status=D3DCompile(program.data(),
+        program.size(),"NorthStar Material PBR",
         nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS,0,
         result,errors.GetAddressOf());
     if(FAILED(status) && errors.Get())

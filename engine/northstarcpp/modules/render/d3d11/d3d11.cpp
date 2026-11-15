@@ -2,6 +2,7 @@
 #include "renderer_private.hpp"
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_device_api.h>
+#include <northstarcpp/render_lights_api.h>
 #include <wrl/client.h>
 namespace {
 using namespace northstarcpp::module_provider;
@@ -51,6 +52,17 @@ int set_authored_materials(void* renderer,
 }
 const NorthStarRenderMaterialsApi materials_api{
     NORTHSTARCPP_RENDER_MATERIALS_ABI,set_authored_materials};
+int set_render_dynamic_lights(void* renderer,
+                              const NorthStarRenderLight* sources,
+                              std::uint32_t count) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing D3D11 light renderer");
+        static_cast<Renderer*>(renderer)->set_dynamic_lights(sources,count);
+    });
+}
+const NorthStarRenderLightsApi lights_api{
+    NORTHSTARCPP_RENDER_LIGHTS_ABI,set_render_dynamic_lights};
+
 int set_authored_materials_v2(void* renderer,
     NorthStarMaterialBatchV2 const* batches,std::uint32_t count)
 {
@@ -116,6 +128,16 @@ int set_character_pose(void* renderer, NorthStarCharacterVertex const* data, std
 }
 const NorthStarRenderCharacterApi character_api{
     NORTHSTARCPP_RENDER_CHARACTER_ABI, set_character_model, set_character_pose};
+int set_editor_grid(void* renderer,
+                    NorthStarRenderEditorGridSettings const* settings) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing grid renderer");
+        static_cast<Renderer*>(renderer)->set_editor_grid(settings);
+    });
+}
+const NorthStarRenderEditorGridApi editor_grid_api{
+    NORTHSTARCPP_RENDER_EDITOR_GRID_ABI,sizeof(NorthStarRenderEditorGridApi),
+    set_editor_grid,3u};
 const NorthStarRenderApi api{create, destroy, draw, set_sky};
 int read_actual_gpu(void* renderer,NorthStarRenderDeviceInfo* result) {
     return guarded([&] {
@@ -150,10 +172,10 @@ const NorthStarRenderDeviceApi device_api{
     NORTHSTARCPP_RENDER_DEVICE_ABI,read_actual_gpu};
 const NorthStarRenderFeaturesApi features_api{
     NORTHSTARCPP_RENDER_FEATURES_ABI,sizeof(NorthStarRenderFeaturesApi),
-    NS_RENDER_FEATURE_COLORED_GEOMETRY |
+    NS_RENDER_FEATURE_DEPTH_TEST | NS_RENDER_FEATURE_COLORED_GEOMETRY |
     NS_RENDER_FEATURE_TEXTURED_MATERIALS | NS_RENDER_FEATURE_MATERIAL_GRAPH |
     NS_RENDER_FEATURE_GPU_SKINNING | NS_RENDER_FEATURE_WORLD_SURFACES |
-    NS_RENDER_FEATURE_CHARACTER};
+    NS_RENDER_FEATURE_CHARACTER | NS_RENDER_FEATURE_DYNAMIC_LIGHTS};
 const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
     NORTHSTARCPP_CAPABILITY_RENDER, "Direct3D 11", "5.0.0", NORTHSTARCPP_RENDER_ABI,
     sizeof(api), &api, last_error};
@@ -163,6 +185,14 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if(version==NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"Direct3D 11","5.6.0",
+            NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI,sizeof(editor_grid_api),
+            &editor_grid_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_FEATURES_MODULE_ABI) {
         static const NorthStarModule ext{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
@@ -172,6 +202,14 @@ extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
         return match(ext,host,capability,version);
     }
 
+    if(version==NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI) {
+        static const NorthStarModule ext{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "Direct3D 11","5.6.0",
+            NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI,sizeof(lights_api),
+            &lights_api,last_error};
+        return match(ext,host,capability,version);
+    }
     if (version == NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
@@ -257,9 +295,22 @@ NorthStarRenderMaterialsApiV2 const* northstar_render_get_materials_api_v2(
 }
 
 extern "C" NORTHSTARCPP_MODULE_EXPORT
+NorthStarRenderLightsApi const* northstar_render_get_lights_api(
+    uint32_t version)
+{
+    return version==NORTHSTARCPP_RENDER_LIGHTS_ABI?&lights_api:nullptr;
+}
+
+extern "C" NORTHSTARCPP_MODULE_EXPORT
 NorthStarRenderSkinnedMaterialsApi const* northstar_render_get_skinning_api(
     uint32_t version)
 {
     return version==NORTHSTARCPP_RENDER_SKINNED_MATERIALS_ABI?
         &skinned_materials_api:nullptr;
+}
+
+extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarRenderEditorGridApi*
+northstar_render_get_editor_grid_api(uint32_t requested_version) {
+    return requested_version==NORTHSTARCPP_RENDER_EDITOR_GRID_ABI?
+        &editor_grid_api:nullptr;
 }

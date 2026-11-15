@@ -39,6 +39,7 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
             commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             commands->DrawIndexedInstanced(sky_index_count,1,0,0,0);
         }
+        draw_editor_grid(context);
         commands->SetGraphicsRootSignature(signature.Get());
         commands->SetGraphicsRootConstantBufferView(0,constant_buffer->GetGPUVirtualAddress());
         commands->IASetVertexBuffers(0,1,&vertex_view);

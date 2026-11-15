@@ -120,3 +120,10 @@ if(BUILD_TESTING AND NORTHSTARCPP_HOST_SMOKE_EXE AND NORTHSTARCPP_HOST_ASSETS_DL
         ENVIRONMENT "NORTHSTARCPP_SCRIPTING_PLUGIN=$<TARGET_FILE:northstarcpp_scripting_v8>"
         TIMEOUT 35)
 endif()
+
+# Version every first-party provider binary, including separately built V8 DLLs.
+if(WIN32)
+    enable_language(RC)
+    include("@D@{NORTHSTARCPP_ENGINE_ROOT}/tools/cmake/NorthStarFileInfo.cmake")
+    northstarcpp_attach_fileinfo(northstarcpp_scripting_v8)
+endif()

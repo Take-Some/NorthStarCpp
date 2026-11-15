@@ -22,6 +22,7 @@ class QListView;
 class QMenu;
 class QSlider;
 class QSplitter;
+class QStandardItem;
 class QStandardItemModel;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -35,6 +36,21 @@ public:
     ~QtContentBrowser() override;
     void setContentRoot(QString const& path);
     void setProjectScene(QString const& scene);
+    // Both VFS sources are displayed as persistent top-level tree roots.
+    // Engine shared assets are previewable but not mutated by the browser.
+    void setSharedContentRoot(QString const& path);
+    QString sharedContentRoot() const {return engine_root_;}
+    bool viewingSharedAssets() const noexcept {return engine_selected_;}
+    void selectAssetSource(bool shared);
+    // Editor owns the mounted project root; content navigation must remain
+    // inside its dock rather than opening a second browser or an arbitrary tree.
+    void setEditorDockMode(bool enabled);
+    bool editorDockMode() const noexcept {return editor_dock_mode_;}
+    QString contentRoot() const {return project_root_;}
+    void focusSearch();
+    // Browse to and highlight a project asset; deferred until indexing
+    // completes when another scene has just been opened.
+    void revealAsset(QString const& virtualReference);
     void refresh();
     QString selectedAsset() const;
     int recordCount() const;
@@ -53,8 +69,16 @@ signals:
     // Double-click always requests the material editor, not a generic read-only card.
     void materialEditorRequested(QString materialReference);
 private:
-    AssetCatalog catalog_;
-    QString root_,folder_;
+    AssetCatalog project_catalog_,engine_catalog_;
+    AssetCatalog const& activeCatalog() const noexcept {
+        return engine_selected_?engine_catalog_:project_catalog_;
+    }
+    QString root_,project_root_,engine_root_,folder_;
+    bool engine_selected_=false;
+    quint64 thumbnail_generation_=0;
+    QString pending_reveal_;
+    bool editor_dock_mode_=false;
+    bool catalog_ready_=false;
     quint64 generation_=0;
     QTreeWidget* folders_{};
     QListView* grid_{};
@@ -78,6 +102,9 @@ private:
     QSplitter* splitter_{};
     QHash<QString,QIcon> icons_;
     QHash<QString,QImage> thumbs_;
+    // Current folder only. Avoid repeated O(visible rows) scans when a
+    // thumbnail finishes or is queued.
+    QHash<QString,QStandardItem*> visible_items_;
     QSet<QString> pending_;
     QThreadPool pool_;
     QStringList back_history_, forward_history_;
@@ -87,6 +114,7 @@ private:
     void changeFolder(QString const& folder);
     void scheduleThumbnails();
     void updateDetails();
+    void completeReveal();
     void showMenu(QPoint pos);
     void createFolder();
     void importFiles();
@@ -98,6 +126,9 @@ private:
     void updateBreadcrumb();
     QIcon iconFor(AssetKind kind) const;
     QIcon iconForDirectory(AssetRecord const& record) const;
+    // File entries in YMT/YCD NEF8 dictionaries use the file artwork,
+    // while their parent dictionaries retain specialized folder artwork.
+    QIcon iconForRecord(AssetRecord const& record) const;
     QString subtitleText(AssetRecord const& record) const;
     QColor accentColor(AssetRecord const& record) const;
     bool isSafeBasename(QString const& text) const;

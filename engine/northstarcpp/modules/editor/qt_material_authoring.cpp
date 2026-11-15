@@ -7,6 +7,7 @@
 #include <northstarcpp/material.hpp>
 #include <northstarcpp/shared_assets.hpp>
 #include <northstarcpp/material_ymat_authoring.hpp>
+#include <northstarcpp/texture_ytd_authoring.hpp>
 #include <QImageReader>
 #include <QColor>
 #include <northstarcpp/editor_asset_catalog.hpp>
@@ -137,7 +138,37 @@ bool is_texture(QString const& path) {
                        "webp","ktx","ktx2","tif","tiff"}.contains(suffix);
 }
 QStringList list_materials(fs::path const& content_root) {
-    return enumerate(content_root,true);
+    QStringList result;
+    auto const physical=enumerate(content_root,true);
+    for(auto const& reference:physical) {
+        if(!reference.endsWith(".ymat",Qt::CaseInsensitive)) {
+            result.append(reference);
+            continue;
+        }
+        // YMAT is a native library of named materials, not an opaque file.
+        // Preserve legacy single-entry references in scenes while exposing
+        // each member of a multi-entry library individually in the picker.
+        try {
+            QFile file(string(resolve_existing(content_root,reference)));
+            if(!file.open(QIODevice::ReadOnly) ||
+               file.size()>64*1024*1024)
+                continue;
+            auto data=file.readAll();
+            auto list=northstarcpp::shared_assets::load_materials_from_bytes(
+                std::vector<std::uint8_t>(data.begin(),data.end()),
+                bytes(reference));
+            if(list.size()==1)result.append(reference);
+            else for(auto const& material:list)
+                result.append(reference+"@"+
+                    QString::fromUtf8(material.name.c_str()));
+        }catch(std::exception const&) {
+            // A corrupt YMAT remains visible in Content Browser diagnostics
+            // but cannot be assigned to a scene until it decodes cleanly.
+        }
+    }
+    result.sort(Qt::CaseInsensitive);
+    result.removeDuplicates();
+    return result;
 }
 QStringList list_material_functions(fs::path const& root) {
     QStringList records;
@@ -262,8 +293,10 @@ void save_descriptor(fs::path const& root,QString const& reference,
 QString make_material_for_texture(fs::path const& root,QString const& texture) {
     if(!is_texture(texture))
         throw std::invalid_argument("Only texture assets create materials");
-    (void)resolve_existing(root,texture);
-    auto stem=QFileInfo(texture).completeBaseName();
+    auto const selector=texture.indexOf('@');
+    auto sourcePath=selector<0?texture:texture.left(selector);
+    auto sourceFile=resolve_existing(root,sourcePath);
+    auto stem=QFileInfo(sourcePath).completeBaseName();
     stem.replace(QRegularExpression("[^A-Za-z0-9_-]"),"_");
     if(stem.isEmpty())stem="Texture";
     stem=stem.left(72);
@@ -275,12 +308,74 @@ QString make_material_for_texture(fs::path const& root,QString const& texture) {
         ref.clear();
     }
     if(ref.isEmpty())throw std::runtime_error("Material filename slots exhausted");
+    QString nativeTexture=texture;
+    QString importedYtd;
+    if(sourcePath.endsWith(".ytd",Qt::CaseInsensitive)) {
+        if(selector<0) {
+            QFile source(string(sourceFile));
+            if(!source.open(QIODevice::ReadOnly)||source.size()>64*1024*1024)
+                throw std::invalid_argument("Invalid YTD source for material");
+            auto data=source.readAll();
+            auto textures=northstarcpp::shared_assets::load_textures_from_bytes(
+                std::vector<std::uint8_t>(data.begin(),data.end()),
+                bytes(sourcePath));
+            if(textures.size()!=1)
+                throw std::invalid_argument(
+                    "Select a texture inside the YTD dictionary, not the container");
+            nativeTexture=sourcePath+"@"+
+                QString::fromUtf8(textures.front().name.c_str());
+        }
+    }else {
+        // PNG/JPEG/TGA are editor imports. Runtime materials always reference
+        // native YTD resources and must not carry raw image file paths.
+        QImageReader reader(string(sourceFile));
+        reader.setAutoTransform(true);
+        auto size=reader.size();
+        if(!size.isValid() || size.width()>16384 || size.height()>16384)
+            throw std::invalid_argument("Unsupported imported image dimensions");
+        if(size.width()>3072 || size.height()>3072)
+            reader.setScaledSize(size.scaled(3072,3072,Qt::KeepAspectRatio));
+        auto image=reader.read().convertToFormat(QImage::Format_RGBA8888);
+        if(image.isNull()||image.width()<1||image.height()<1)
+            throw std::runtime_error("Image import failed");
+        auto const count=std::size_t(image.width())*image.height()*4;
+        std::vector<std::uint8_t> pixels(count);
+        for(int row=0;row<image.height();++row)
+            std::memcpy(pixels.data()+std::size_t(row)*image.width()*4,
+                image.constScanLine(row),std::size_t(image.width())*4);
+        auto name=stem.left(100);
+        importedYtd="Textures/"+QFileInfo(ref).completeBaseName()+
+                    "_Imported.ytd";
+        auto target=root/fs::u8path(bytes(importedYtd));
+        if(!symlink_free(root,fs::u8path(bytes(importedYtd))) ||
+           fs::exists(target))
+            throw std::runtime_error("Unsafe or occupied imported YTD destination");
+        auto packed=northstarcpp::shared_assets::encode_rgba8_ytd(
+            bytes(name),unsigned(image.width()),unsigned(image.height()),
+            pixels,true);
+        std::error_code ec;
+        fs::create_directories(target.parent_path(),ec);
+        if(ec)throw std::runtime_error("Cannot create YTD texture directory");
+        QSaveFile output(string(target));
+        if(!output.open(QIODevice::WriteOnly) ||
+           output.write(reinterpret_cast<char const*>(packed.data()),
+                        qsizetype(packed.size()))!=qsizetype(packed.size()) ||
+           !output.commit())
+            throw std::runtime_error("Cannot save imported YTD texture");
+        nativeTexture=importedYtd+"@"+name;
+    }
     QJsonObject descriptor{{"schema",1},{"name",QFileInfo(ref).completeBaseName()},
         {"shader","standard_lit"},{"base_color","#ffffff"},
         {"metallic",0.0},{"roughness",0.65},
-        {"base_color_texture",texture},{"normal_texture",""},
+        {"base_color_texture",nativeTexture},{"normal_texture",""},
         {"roughness_texture",""},{"metallic_texture",""},{"emissive_texture",""}};
-    save_descriptor(root,ref,descriptor);
+    try {
+        save_descriptor(root,ref,descriptor);
+    }catch(...) {
+        if(!importedYtd.isEmpty())
+            QFile::remove(string(root/fs::u8path(bytes(importedYtd))));
+        throw;
+    }
     return ref;
 }
 QImage neutral_sphere_preview(int dimension) {

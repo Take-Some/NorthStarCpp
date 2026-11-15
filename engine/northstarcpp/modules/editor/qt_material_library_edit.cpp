@@ -147,7 +147,26 @@ QJsonArray params(QJsonObject const& document) {
         }
         all.append(QJsonObject{{"name",name},{"type",type},{"value",values}});
     };
-    set("base_color","color",color_values(document.value("base_color").toString()));
+    // Preserve native linear RGB precision, the original alpha component,
+    // and the original declared type unless Base Color actually changed.
+    // An unrelated Roughness edit must not quantize an existing HDR-ish
+    // color through #RRGGBB or silently reset alpha to 1.
+    QJsonArray nativeColor=color_values(document.value("base_color").toString());
+    QString colorType="color";
+    for(auto const& raw:all) {
+        auto param=raw.toObject();
+        if(param.value("name").toString()!="base_color")continue;
+        auto original=param.value("value").toArray();
+        colorType=param.value("type").toString("color");
+        if(original.size()>=3 &&
+           color_hex(original).compare(document.value("base_color").toString(),
+                                      Qt::CaseInsensitive)==0)
+            nativeColor=original;
+        else if(original.size()>=4)
+            nativeColor[3]=original[3];
+        break;
+    }
+    set("base_color",colorType,nativeColor);
     set("metallic","float",QJsonArray{document.value("metallic").toDouble()});
     set("roughness","float",QJsonArray{document.value("roughness").toDouble()});
     return all;
@@ -190,65 +209,51 @@ QMap<QString,QJsonObject> index(QJsonArray const& entries,
     }
     return result;
 }
-QJsonObject patch_json_material(QJsonObject old,
-                                QJsonObject const& changed) {
-    old["shader"]=changed.value("shader");
-    old["blend"]=changed.value("blend_mode").toString()=="translucent"?
-        "alpha":changed.value("blend_mode");
-    old["two_sided"]=changed.value("two_sided").toBool();
-    old["alpha_cutoff"]=changed.value("alpha_cutoff").toDouble();
-    auto sourceParams=old.value("params").toArray();
-    auto editedParams=params(changed);
-    auto newParams=index(editedParams,"name");
-    QSet<QString> seen;
-    for(int i=0;i<sourceParams.size();++i) {
-        auto p=sourceParams[i].toObject();
-        auto name=p.value("name").toString();
-        auto it=newParams.find(name);
-        if(it==newParams.end())continue; // retained unless explicitly removed
-        p["type"]=it->value("type");
-        p["value"]=it->value("value");
-        sourceParams.replace(i,p);
-        seen.insert(name);
-    }
-    for(auto it=newParams.begin();it!=newParams.end();++it)
-        if(!seen.contains(it.key()))sourceParams.append(it.value());
-    if(changed.contains("parameters")) {
-        QJsonArray kept;
-        for(auto const& raw:sourceParams)
-            if(newParams.contains(raw.toObject().value("name").toString()))
-                kept.append(raw);
-        sourceParams=kept;
-    }
-    old["params"]=sourceParams;
-    auto originalTextures=old.value("textures").toArray();
-    auto editedTextures=textures(changed);
-    auto newTextures=index(editedTextures,"slot");
-    seen.clear();
-    QJsonArray finalTextures;
-    for(auto const& raw:originalTextures) {
-        auto t=raw.toObject();
-        auto name=t.value("slot").toString();
-        auto it=newTextures.find(name);
-        if(it!=newTextures.end()) {
-            t["ref"]=it->value("ref");
-            if(!t.value("ref").toString().isEmpty())
-                finalTextures.append(t);
-            seen.insert(name);
-        }else if(!changed.contains("textures"))finalTextures.append(t);
-    }
-    for(auto it=newTextures.begin();it!=newTextures.end();++it)
-        if(!seen.contains(it.key())&&!it->value("ref").toString().isEmpty())
-            finalTextures.append(it.value());
-    old["textures"]=finalTextures;
-    if(changed.value("graph").isObject())old["graph"]=changed.value("graph");
-    else old.remove("graph");
-    old["editor_source"]=QString::fromUtf8(
-        QJsonDocument(changed).toJson(QJsonDocument::Compact));
-    return old;
-}
 // Retain unrelated XML material nodes and every unknown element/attribute
 // while patching the explicitly selected Material element.
+void writeTypedXmlValue(QXmlStreamWriter& writer,QJsonValue const& value,
+                        QString const& name={},unsigned depth=0) {
+    if(depth>96)throw std::invalid_argument("Material Graph XML nesting limit");
+    writer.writeStartElement("Value");
+    if(!name.isEmpty())writer.writeAttribute("name",name);
+    switch(value.type()) {
+        case QJsonValue::Object: {
+            writer.writeAttribute("type","object");
+            auto object=value.toObject();
+            for(auto it=object.begin();it!=object.end();++it)
+                writeTypedXmlValue(writer,it.value(),it.key(),depth+1);
+            break;
+        }
+        case QJsonValue::Array: {
+            writer.writeAttribute("type","array");
+            for(auto const& item:value.toArray())
+                writeTypedXmlValue(writer,item,{},depth+1);
+            break;
+        }
+        case QJsonValue::String:
+            writer.writeAttribute("type","string");
+            writer.writeCharacters(value.toString());
+            break;
+        case QJsonValue::Double:
+            if(!std::isfinite(value.toDouble()))
+                throw std::invalid_argument("Nonfinite Material Graph XML number");
+            writer.writeAttribute("type","number");
+            writer.writeCharacters(QString::number(value.toDouble(),'g',17));
+            break;
+        case QJsonValue::Bool:
+            writer.writeAttribute("type","bool");
+            writer.writeCharacters(value.toBool()?"true":"false");
+            break;
+        default:writer.writeAttribute("type","null");break;
+    }
+    writer.writeEndElement();
+}
+void writeMaterialGraphXml(QXmlStreamWriter& writer,
+                           QJsonObject const& graph) {
+    writer.writeStartElement("Graph");
+    writeTypedXmlValue(writer,graph);
+    writer.writeEndElement();
+}
 QByteArray patch_xml(QString const& document,QString const& name,
                      QJsonObject const& edited) {
     QXmlStreamReader reader(document);
@@ -355,9 +360,8 @@ QByteArray patch_xml(QString const& document,QString const& name,
                 hasGraph=true;
                 reader.skipCurrentElement();
                 if(edited.value("graph").isObject())
-                    writer.writeTextElement("Graph",QString::fromUtf8(
-                        QJsonDocument(edited.value("graph").toObject())
-                            .toJson(QJsonDocument::Compact)));
+                    writeMaterialGraphXml(writer,
+                        edited.value("graph").toObject());
                 continue;
             }
             writer.writeStartElement(reader.qualifiedName().toString());
@@ -388,9 +392,8 @@ QByteArray patch_xml(QString const& document,QString const& name,
                     addUnseenTextures();writer.writeEndElement();
                 }
                 if(!hasGraph && edited.value("graph").isObject())
-                    writer.writeTextElement("Graph",QString::fromUtf8(
-                        QJsonDocument(edited.value("graph").toObject())
-                            .toJson(QJsonDocument::Compact)));
+                    writeMaterialGraphXml(writer,
+                        edited.value("graph").toObject());
                 active=false;
             }
             writer.writeEndElement();
@@ -468,29 +471,18 @@ void save(fs::path const& root,QString const& reference,
         return QString::fromUtf8(record.name.c_str())==selected;
     });
     if(found!=1)throw std::invalid_argument("Ambiguous YMAT selected material");
-    std::string replacement;
-    if(library.kind==30) {
-        auto decoded=QJsonDocument::fromJson(QByteArray::fromStdString(library.body));
-        if(!decoded.isObject())
-            throw std::invalid_argument("Invalid YMAT JSON library");
-        auto doc=decoded.object();
-        auto materials=doc.value("materials").toArray();
-        bool changed=false;
-        for(int i=0;i<materials.size();++i) {
-            auto entry=materials.at(i).toObject();
-            if(entry.value("name").toString()!=selected)continue;
-            materials.replace(i,patch_json_material(entry,document));
-            changed=true;break;
-        }
-        if(!changed)throw std::invalid_argument("Selected YMAT entry not found");
-        doc["materials"]=materials;
-        replacement=QJsonDocument(doc).toJson(QJsonDocument::Compact).toStdString();
-    }else if(library.kind==4) {
-        replacement=patch_xml(QString::fromUtf8(library.body.c_str(),
-                                int(library.body.size())),selected,document)
-                        .toStdString();
-    }else throw std::invalid_argument("Unsupported native YMAT library kind");
-    auto packed=shared_assets::replace_ymat_library_body(original,replacement);
+    // All edit paths converge on a single XML YMAT writer. Existing kind30
+    // libraries are read/imported and converted, never written back as JSON.
+    auto canonical=shared_assets::migrate_ymat_to_xml(original);
+    auto xmlLibrary=shared_assets::read_ymat_library(canonical);
+    if(xmlLibrary.kind!=4)
+        throw std::runtime_error("YMAT canonical migration failed");
+    auto replacement=patch_xml(
+        QString::fromUtf8(xmlLibrary.body.data(),int(xmlLibrary.body.size())),
+        selected,document).toStdString();
+    // Single writer for all imports and existing libraries:
+    // XML kind4 with no legacy JSON metadata, regardless of input format.
+    auto packed=shared_assets::encode_xml_ymat(replacement,before.size());
     auto after=shared_assets::load_materials_from_bytes(packed,bytes(ref.file));
     if(after.size()!=before.size())
         throw std::runtime_error("Edited YMAT dropped material records");

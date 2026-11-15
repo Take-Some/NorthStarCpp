@@ -44,6 +44,69 @@ RendererState::RendererState(HWND target, bool software) : window(target){
         check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
             nullptr, pixel_shader.put()), "Create pixel shader");
 
+        // No geometry is submitted for the editor grid: a fullscreen
+        // triangle reconstructs world-plane coordinates per pixel.
+        auto compile_grid=[&](char const* entry,char const* profile) {
+            Com<ID3DBlob> binary,errors;
+            auto const& source=northstarcpp::shaders::analytic_editor_grid_hlsl;
+            auto const hr=D3DCompile(source,sizeof(source)-1,
+                "NorthStar Editor Grid",nullptr,nullptr,entry,profile,
+                D3DCOMPILE_ENABLE_STRICTNESS,0,binary.put(),errors.put());
+            if(FAILED(hr) && errors.get())
+                throw std::runtime_error(
+                    static_cast<char const*>(errors->GetBufferPointer()));
+            check(hr,"Compile D3D11 analytic editor grid");
+            if(entry[5]=='v')
+                check(device->CreateVertexShader(binary->GetBufferPointer(),
+                    binary->GetBufferSize(),nullptr,grid_vs.put()),
+                    "Create D3D11 grid vertex shader");
+            else {
+                auto output=std::strcmp(entry,"grid_temporal_ps")==0?
+                    grid_temporal_ps.put():
+                    std::strcmp(entry,"grid_composite_ps")==0?
+                    grid_composite_ps.put():grid_ps.put();
+                check(device->CreatePixelShader(binary->GetBufferPointer(),
+                    binary->GetBufferSize(),nullptr,output),
+                    "Create D3D11 grid pixel shader");
+            }
+        };
+        compile_grid("grid_vs","vs_4_0");
+        compile_grid("grid_ps","ps_4_0");
+        compile_grid("grid_temporal_ps","ps_4_0");
+        compile_grid("grid_composite_ps","ps_4_0");
+        D3D11_BUFFER_DESC grid_buffer{};
+        grid_buffer.ByteWidth=sizeof(northstarcpp::render::EditorGridConstants);
+        grid_buffer.Usage=D3D11_USAGE_DEFAULT;
+        grid_buffer.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&grid_buffer,nullptr,grid_constants.put()),
+            "Create D3D11 grid constants");
+        check(device->CreateBuffer(&grid_buffer,nullptr,
+            grid_previous_buffer.put()),"Create D3D11 previous grid constants");
+        D3D11_SAMPLER_DESC grid_sampling{};
+        grid_sampling.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        grid_sampling.AddressU=grid_sampling.AddressV=
+            grid_sampling.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+        grid_sampling.MaxLOD=D3D11_FLOAT32_MAX;
+        check(device->CreateSamplerState(&grid_sampling,grid_sampler.put()),
+            "Create grid history sampler");
+        D3D11_BLEND_DESC grid_blend_desc{};
+        auto& grid_rt=grid_blend_desc.RenderTarget[0];
+        grid_rt.BlendEnable=TRUE;
+        grid_rt.SrcBlend=D3D11_BLEND_SRC_ALPHA;
+        grid_rt.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        grid_rt.BlendOp=D3D11_BLEND_OP_ADD;
+        grid_rt.SrcBlendAlpha=D3D11_BLEND_ONE;
+        grid_rt.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
+        grid_rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        grid_rt.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        check(device->CreateBlendState(&grid_blend_desc,grid_blend.put()),
+            "Create D3D11 grid alpha blend");
+        D3D11_DEPTH_STENCIL_DESC no_grid_depth{};
+        no_grid_depth.DepthEnable=FALSE;
+        no_grid_depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        check(device->CreateDepthStencilState(&no_grid_depth,
+            grid_no_depth.put()),"Create D3D11 grid depth state");
+
         compile_character("character_vs","vs_4_0",code.put());
         check(device->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),
             nullptr,character_vs.put()),"Create character vertex shader");
@@ -82,6 +145,7 @@ RendererState::RendererState(HWND target, bool software) : window(target){
         {
             std::string const shader_source=
                 std::string("#define NS_GPU_SKINNING 1\n")+
+                "#define NS_D3D11_DYNAMIC_LIGHTS 1\n"+
                 authored_material_shader;
             Com<ID3DBlob> errors;
             HRESULT const hr=D3DCompile(shader_source.data(),shader_source.size(),
@@ -136,6 +200,13 @@ RendererState::RendererState(HWND target, bool software) : window(target){
         camera_constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         check(device->CreateBuffer(&camera_constants,nullptr,authored_camera.put()),
               "Create authored material camera constants");
+        D3D11_BUFFER_DESC lighting{};
+        lighting.ByteWidth=16u+sizeof(NorthStarRenderLight)*
+            NORTHSTARCPP_RENDER_MAX_DYNAMIC_LIGHTS;
+        lighting.Usage=D3D11_USAGE_DEFAULT;
+        lighting.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&lighting,nullptr,dynamic_light_buffer.put()),
+              "Create shared ABI dynamic light constant buffer");
         D3D11_BLEND_DESC blend{};
         auto& rt=blend.RenderTarget[0];
         rt.BlendEnable=TRUE;rt.SrcBlend=D3D11_BLEND_SRC_ALPHA;

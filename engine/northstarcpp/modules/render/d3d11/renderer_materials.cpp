@@ -130,7 +130,8 @@ std::shared_ptr<MaterialPixelVariant> RendererState::material_shader_variant(
         }
     }
     if(material_shader_pending.size()>=8)return {};
-    std::string source=prefix+authored_material_shader;
+    std::string source="#define NS_D3D11_DYNAMIC_LIGHTS 1\n"+
+        prefix+authored_material_shader;
     std::string const diskKey="d3d11|material_ps|ps_4_0|"+source;
     material_shader_pending.emplace(prefix,std::async(std::launch::async,
         [source=std::move(source),diskKey]() {
@@ -294,6 +295,9 @@ void RendererState::draw_skinned_materials(){
         context->VSSetConstantBuffers(2,1,&palette_buffer);
         auto* material_buffer=authored_material.get();
         context->PSSetConstantBuffers(1,1,&material_buffer);
+        upload_dynamic_lights();
+        auto* light_constants=dynamic_light_buffer.get();
+        context->PSSetConstantBuffers(3,1,&light_constants);
         auto* sampler=sky_sampler.get();
         context->PSSetSamplers(0,1,&sampler);
         context->OMSetDepthStencilState(nullptr,0);
@@ -353,6 +357,9 @@ void RendererState::draw_authored_materials(){
         context->VSSetConstantBuffers(0,1,&eye_constants);
         context->PSSetConstantBuffers(0,1,&eye_constants);
         context->PSSetConstantBuffers(1,1,&constants);
+        upload_dynamic_lights();
+        auto* light_constants=dynamic_light_buffer.get();
+        context->PSSetConstantBuffers(3,1,&light_constants);
         auto* sampler=sky_sampler.get();
         context->PSSetSamplers(0,1,&sampler);
         for(unsigned pass=0;pass<2;++pass)

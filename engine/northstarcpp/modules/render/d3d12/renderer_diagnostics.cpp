@@ -42,13 +42,19 @@ void RendererState::verify_readback(ID3D12Resource* pixels,UINT pitch,UINT mode)
         D3D12_RANGE range{0,SIZE_T(pitch)*height};
         check(pixels->Map(0,&range,&data),"Map D3D12 GPU readback");
         UINT64 colored=0,sky_samples=0,sky_pixels=0;
+        bool overlay_center_ok=false;
         UINT64 material_red=0,material_green=0;
+        UINT64 grid_pixels=0;
         auto const* bytes=static_cast<const uint8_t*>(data);
         for(UINT y=0;y<height;++y) {
             auto const* row=bytes+SIZE_T(y)*pitch;
             for(UINT x=0;x<width;++x) {
                 auto const* pixel=row+4u*x;
                 if(pixel[0]>110||pixel[1]>110||pixel[2]>110)++colored;
+                if(mode==9u && x==width/2 && y==height/2)
+                    overlay_center_ok=pixel[0]>200 && pixel[1]<80 && pixel[2]<80;
+                if((mode==7u||mode==8u) &&
+                   pixel[1]>33 && pixel[2]>40)++grid_pixels;
                 if((mode==2u||mode==3u) && !(x%2) && !(y%2)) {
                     if(pixel[0]>130 && pixel[1]<90 && pixel[2]<90)
                         ++material_red;
@@ -71,7 +77,16 @@ void RendererState::verify_readback(ID3D12Resource* pixels,UINT pitch,UINT mode)
            (material_draws.empty()||material_green<100||material_red>25))
             throw std::runtime_error(
                 "D3D12 programmable Material Graph GPU tint was not applied");
-        if(colored<100)throw std::runtime_error(
+        if(mode==9u && (!ui_width||!ui_height||!overlay_center_ok))
+            throw std::runtime_error(
+                "D3D12 GPU engine.ui overlay pixel readback mismatch");
+        if(mode==7u && grid_pixels<180)
+            throw std::runtime_error(
+                "D3D12 analytic grid missing in GPU pixel readback");
+        if(mode==8u && grid_pixels>12)
+            throw std::runtime_error(
+                "D3D12 analytic grid visible after disable");
+        if(mode!=7u && mode!=8u && colored<100)throw std::runtime_error(
             "D3D12 back-buffer readback contains no visible scene geometry");
         if(sky_index_count&&(!sky_samples||sky_pixels*10<sky_samples))
             throw std::runtime_error("D3D12 skydome readback lacks sky coverage");

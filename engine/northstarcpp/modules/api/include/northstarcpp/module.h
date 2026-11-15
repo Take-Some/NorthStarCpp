@@ -22,6 +22,7 @@
 #define NORTHSTARCPP_CAPABILITY_ASSETS "engine.assets"
 #define NORTHSTARCPP_CAPABILITY_LOGGER "engine.logger"
 #define NORTHSTARCPP_CAPABILITY_PERLIN "engine.perlin"
+#define NORTHSTARCPP_CAPABILITY_UI "engine.ui"
 #define NORTHSTARCPP_CAPABILITY_GEOMETRY "engine.geometry"
 #define NORTHSTARCPP_CAPABILITY_COLLISION "engine.collision"
 #define NORTHSTARCPP_CAPABILITY_TIME "engine.time"

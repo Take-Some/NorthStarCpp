@@ -30,6 +30,19 @@ int main(int argc, char** argv)
         catalog.update_description(created.directory, L"Playable test level", L"Games");
         catalog.set_provider(created.directory,"engine.render","vulkan");
         catalog.set_provider(created.directory,"engine.physics","jolt");
+        catalog.set_renderer_requirements(created.directory,
+            {"depth","textured_materials","hdr","bloom"});
+        if(catalog.inspect(created.directory).required_renderer_features!=
+           std::vector<std::string>({"depth","textured_materials","hdr","bloom"}))
+            return 27;
+        bool invalid_requirement=false;
+        try {catalog.set_renderer_requirements(created.directory,{"hdr","hdr"});}
+        catch(std::invalid_argument const&){invalid_requirement=true;}
+        if(!invalid_requirement)return 28;
+        invalid_requirement=false;
+        try {catalog.set_renderer_requirements(created.directory,{"unregistered_gpu_option"});}
+        catch(std::invalid_argument const&){invalid_requirement=true;}
+        if(!invalid_requirement)return 29;
         auto choices=catalog.inspect(created.directory).provider_choices;
         if(choices.size()!=2 || choices.at("engine.render")!="vulkan" ||
            choices.at("engine.physics")!="jolt")return 23;
@@ -49,6 +62,11 @@ int main(int argc, char** argv)
         if(duplicate.provider_choices.at("engine.render")!="vulkan" ||
            duplicate.provider_choices.at("engine.physics")!="jolt")
             return 25;
+        if(duplicate.required_renderer_features.size()!=4 ||
+           duplicate.required_renderer_features[2]!="hdr")return 33;
+        catalog.set_renderer_requirements(created.directory,{});
+        if(!catalog.inspect(created.directory).required_renderer_features.empty())
+            return 34;
         catalog.set_provider(created.directory,"engine.render","");
         if(catalog.inspect(created.directory).provider_choices.count("engine.render")!=0 ||
            catalog.inspect(created.directory).provider_choices.at("engine.physics")!="jolt")

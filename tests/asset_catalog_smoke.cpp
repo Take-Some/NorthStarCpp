@@ -1,5 +1,7 @@
 #include <northstarcpp/editor_asset_catalog.hpp>
+#include <northstarcpp/shared_assets.hpp>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,6 +64,19 @@ int main(int argc,char** argv) {
         fs::copy_file(source/"models/skydome.ydd",
             root/"Assets/RealModels/skydome.ydd",
             fs::copy_options::overwrite_existing);
+        fs::create_directories(root/"Assets"/"NativeRig");
+        fs::copy_file(source/"models/weapon/pistol/common-pistol.ymt",
+            root/"Assets/NativeRig/common-pistol.ymt",
+            fs::copy_options::overwrite_existing);
+        fs::copy_file(source/"animations/weapon/pistol/military-pistol.ycd",
+            root/"Assets/NativeRig/military-pistol.ycd",
+            fs::copy_options::overwrite_existing);
+        std::ofstream(root/"Assets/NativeRig/broken.ymt",
+                      std::ios::binary).write("INVALID_NEf8",12);
+        check(kind_from_extension(fs::path("common-pistol.YMT"))==
+              AssetKind::skeleton,"YMT must classify as a skeleton");
+        check(kind_from_extension(fs::path("military-pistol.YCD"))==
+              AssetKind::animation,"YCD must classify as animation");
         catalog.scan(root/"Assets");
         auto const* character=catalog.find(
             "characters/abby/abby.character.json");
@@ -112,11 +127,85 @@ int main(int argc,char** argv) {
             check(fs::is_regular_file(catalog.backing_file(record.virtual_path)),
                   "Virtual child backing file not found");
         }
+        check(ytd->virtual_child_count==ytd_children &&
+              ydd->virtual_child_count==ydd_children &&
+              ymat->virtual_child_count==ymat_children,
+              "NEF8 child counts differ from actual dictionary entries");
         check(ytd_children==5,"All five skydome YTD entries must be visible");
         check(ydd_children==1,"Skydome YDD drawable must be visible");
         check(ymat_children==3,"All three skydome YMAT materials must be visible");
-        check(catalog.entries().size()==23,
-              "Catalog must include the character hierarchy and all virtual records");
+        auto const* rig=catalog.find("NativeRig/common-pistol.ymt");
+        auto const* animation=catalog.find("NativeRig/military-pistol.ycd");
+        check(rig && rig->directory && rig->is_list_file(),
+              "Native YMT is not a browsable joint hierarchy");
+        check(animation && animation->directory && animation->is_list_file(),
+              "Native YCD is not a browsable clip dictionary");
+        auto const* broken=catalog.find("NativeRig/broken.ymt");
+        check(broken && !broken->directory && broken->kind==AssetKind::skeleton,
+              "Damaged YMT should stay visible as an invalid file");
+        std::size_t joints=0,clips=0;
+        for(auto const& record:catalog.entries()) {
+            if(record.is_virtual_entry() &&
+               record.container_path=="NativeRig/common-pistol.ymt") {
+                ++joints;
+                check(record.kind==AssetKind::skeleton &&
+                      catalog.asset_reference(record.virtual_path)==
+                      record.container_path+"@"+record.entry_name,
+                      "YMT joint reference identity was lost");
+            }
+            if(record.is_virtual_entry() &&
+               record.container_path=="NativeRig/military-pistol.ycd") {
+                ++clips;
+                check(record.kind==AssetKind::animation &&
+                      catalog.asset_reference(record.virtual_path)==
+                      record.container_path+"@"+record.entry_name,
+                      "YCD clip reference identity was lost");
+            }
+        }
+        check(rig->virtual_child_count==joints &&
+              animation->virtual_child_count==clips,
+              "YMT/YCD child counts differ from decoded entries");
+        check(joints>0 && clips>0,"Native YMT/YCD entries were not indexed");
+        check(catalog.entries().size()==23+4+joints+clips,
+              "Existing catalog entries or new rig entries were omitted");
+        // A second scan must reuse decoded metadata for all valid NEF8
+        // sources while preserving the exact virtual hierarchy.
+        auto const cold_misses=catalog.dictionary_cache_misses();
+        catalog.scan(root/"Assets");
+        check(catalog.dictionary_cache_hits()>=5,
+              "Warm refresh unnecessarily decoded NEF8 dictionaries");
+        check(catalog.dictionary_cache_misses()==0,
+              "Warm refresh unexpectedly missed a stable dictionary");
+        check(catalog.entries().size()==23+4+joints+clips,
+              "Warm catalog refresh changed the virtual hierarchy");
+        std::cout<<"NEF8 warm scan: "<<catalog.dictionary_cache_hits()
+                 <<" reused, cold decoded "<<cold_misses<<"\n";
+        // Updating a compressed file invalidates its cached dictionary.
+        auto const rig_path=root/"Assets/NativeRig/common-pistol.ymt";
+        auto const previous_time=fs::last_write_time(rig_path);
+        {
+            std::fstream damaged(rig_path,std::ios::binary|
+                                        std::ios::in|std::ios::out);
+            damaged.write("FAIL",4);
+        }
+        fs::last_write_time(rig_path,previous_time+std::chrono::seconds(2));
+        catalog.scan(root/"Assets");
+        auto const* damaged=catalog.find("NativeRig/common-pistol.ymt");
+        check(damaged && !damaged->directory,
+              "Damaged YMT is still accepted from a stale cache entry");
+        check(catalog.dictionary_cache_hits()>=4,
+              "Unmodified dictionaries should remain reusable");
+        // The base fixture is restored so any following runs are repeatable.
+        fs::copy_file(source/"models/weapon/pistol/common-pistol.ymt",
+            rig_path,fs::copy_options::overwrite_existing);
+        fs::last_write_time(rig_path,previous_time+std::chrono::seconds(4));
+        catalog.scan(root/"Assets");
+        auto const* recovered=catalog.find("NativeRig/common-pistol.ymt");
+        check(recovered && recovered->directory &&
+              recovered->virtual_child_count==joints,
+              "Repaired NEF8 dictionary failed to invalidate/reindex");
+
+        std::cout<<"YMT joints="<<joints<<" YCD clips="<<clips<<"\n";
         std::cout<<"Cross-platform asset catalog: PASS\n";
         return 0;
     } catch(std::exception const& e) {

@@ -7,6 +7,10 @@ void RendererState::resize(unsigned new_width, unsigned new_height){
         context->OMSetRenderTargets(0, nullptr, nullptr);
         render_target.reset();
         depth.reset();
+        grid_history_valid=false;
+        for(auto& handle:grid_history_srvs)handle.reset();
+        for(auto& handle:grid_history_rtvs)handle.reset();
+        for(auto& handle:grid_history_textures)handle.reset();
         check(swap_chain->ResizeBuffers(0, new_width, new_height, DXGI_FORMAT_UNKNOWN, 0),
             "Resize viewport swap chain");
         Com<ID3D11Texture2D> back_buffer;
@@ -47,6 +51,8 @@ void RendererState::verify_frame(std::uint32_t mode){
         check(context->Map(copy.get(), 0, D3D11_MAP_READ, 0, &data), "Map viewport readback");
         unsigned colored = 0;
         unsigned material_red=0,material_green=0;
+        unsigned grid_pixels=0;
+        bool dynamic_light_center=false;
         unsigned sky_samples = 0, sky_pixels = 0;
         std::unordered_set<std::uint32_t> world_colors;
         bool const verify_surfaces=sky_index_count==0 &&
@@ -58,7 +64,14 @@ void RendererState::verify_frame(std::uint32_t mode){
                 auto const* pixel = row + x * 4;
                 if (pixel[0] > 110 || pixel[1] > 110 || pixel[2] > 110)
                     ++colored;
-                if((mode==2u||mode==3u) && !(x%2) && !(y%2)) {
+                if((mode==7u||mode==8u) &&
+                   pixel[1]>33 && pixel[2]>40)
+                    ++grid_pixels;
+                if(mode==5u && x==width/2 && y==height/2)
+                    dynamic_light_center=
+                        pixel[0]>110 || pixel[1]>110 || pixel[2]>110;
+                if((mode==2u||mode==3u||mode==6u) &&
+                   !(x%2) && !(y%2)) {
                     // Swapchain is R8G8B8A8_UNORM, *not* BGRA.
                     // Verify two independent UV texture colors were sampled.
                     if(pixel[0]>130 && pixel[1]<90 && pixel[2]<90)
@@ -111,6 +124,15 @@ void RendererState::verify_frame(std::uint32_t mode){
                 std::to_string(material_green)+" static="+
                 std::to_string(material_draws.size())+" skinned="+
                 std::to_string(skinned_draws.size()));
+        if(mode==6u &&
+           (skinned_draws.empty()||material_red>25||material_green>25))
+            throw std::runtime_error(
+                "D3D11 GPU bone matrix translation was not applied");
+        if(mode==5u &&
+           (dynamic_lights.empty()||material_draws.empty()||
+            !dynamic_light_center))
+            throw std::runtime_error(
+                "D3D11 dynamic light GPU readback has no lit PBR material");
         if(mode==3u &&
            (material_draws.empty()||material_green<100||material_red>25))
             throw std::runtime_error(
@@ -118,7 +140,16 @@ void RendererState::verify_frame(std::uint32_t mode){
                 std::to_string(material_green)+" red="+
                 std::to_string(material_red)+" draws="+
                 std::to_string(material_draws.size()));
-        if (!verify_surfaces && colored < 100)
+        if(mode==7u && grid_pixels<180)
+            throw std::runtime_error(
+                "D3D11 analytic grid is not visible in GPU readback: "+
+                std::to_string(grid_pixels));
+        if(mode==8u && grid_pixels>12)
+            throw std::runtime_error(
+                "D3D11 editor grid remained visible after disable: "+
+                std::to_string(grid_pixels));
+        if (!verify_surfaces && mode!=6u && mode!=7u &&
+           mode!=8u && colored < 100)
             throw std::runtime_error("Viewport readback did not contain a rendered object");
         if(verify_surfaces && world_colors.size()<32)
             throw std::runtime_error(

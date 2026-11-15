@@ -1,6 +1,7 @@
 // Direct native D3D12 ABI, skydome, HUD, readback and stress test.
 #include <northstarcpp/module.h>
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_timing_api.h>
 #ifndef NOMINMAX
@@ -112,6 +113,30 @@ int main(int argc,char** argv) {
                 throw std::runtime_error(std::string(stage)+": "+error());
         };
         draw_checked("Native geometry/HUD/readback");
+        // Optional UI GPU compositor: pixel readback validates the actual
+        // WARP/hardware shader pass, not CPU raster-only compatibility.
+        auto const* uiModule=query(NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,NORTHSTARCPP_RENDER_UI_MODULE_ABI);
+        require(uiModule && uiModule->api_size>=sizeof(NorthStarRenderUiApi),
+                "D3D12 UI GPU extension missing");
+        auto const* ui=static_cast<const NorthStarRenderUiApi*>(uiModule->api);
+        require(ui && ui->abi_version==NORTHSTARCPP_RENDER_UI_ABI &&
+                ui->set_rgba,"D3D12 UI GPU table incomplete");
+        std::array<uint8_t,4*4*4> overlay{};
+        for(size_t i=0;i<overlay.size();i+=4) {
+            overlay[i]=255;
+            overlay[i+1]=0;
+            overlay[i+2]=0;
+            overlay[i+3]=255;
+        }
+        require(ui->set_rgba(renderer,overlay.data(),4,4,16),
+                "D3D12 UI texture upload was rejected");
+        overlay.fill(0); // provider must own a copy, not borrowed bytes.
+        frame.verify_pixels=9;
+        draw_checked("D3D12 UI GPU texture / alpha compositing / readback");
+        require(ui->set_rgba(renderer,nullptr,0,0,0),
+                "Cannot disable D3D12 UI overlay");
+        frame.verify_pixels=1;
         NorthStarRenderTimingStats timing{};
         require(timing_api->read(renderer,&timing),"D3D12 timing readback failed");
         require(timing.valid && timing.gpu_timestamp_frequency_hz &&

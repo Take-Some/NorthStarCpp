@@ -4,6 +4,11 @@
 
 All first-party application and compatibility icons are stored in the top-level `engine/northstarcpp/resources/icons/` directory. Icon files are tracked as build inputs; released Windows executables embed the relevant resources and do not need adjacent loose ICO files.
 
+Asset Browser PNG folder/file artwork resides in
+`engine/northstarcpp/resources/icons/assetBrowser/`, including embedded
+`skelFile.png` (YMT children) and `animFile.png` (YCD children).
+Application .ico files remain in the parent icons/ directory.
+
 The canonical NorthStar Engine brand icon is `engine/northstarcpp/resources/icons/logoStar.ico` (64, 128, 256 pixel frames). Preserve the original brand asset without modification.
 
 ## Windows application icon mapping

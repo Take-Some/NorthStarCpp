@@ -217,6 +217,27 @@ int main(int argc, char** argv)
                     "World base color must be BC1 sRGB");
             }
         }
+        // Regression: the Editor's native YDD path must resolve the same
+        // relocated character YMAT/YTD references as the character runtime.
+        if(std::filesystem::is_regular_file(root/
+           "characters/abby/models/abby.ydd")) {
+            auto model=northstarcpp::load_native_model_resource(
+                manager,"characters/abby/models/abby.ydd");
+            require(!model.mesh.indices.empty() && !model.mesh.sections.empty(),
+                "Abby native YDD has no renderable geometry");
+            std::size_t resolved=0;
+            for(auto const& section:model.mesh.sections) {
+                if(section.material_reference.empty())continue;
+                require(section.material_reference.rfind(
+                    "characters/abby/materials/abby.ymat@",0)==0,
+                    "Editor native YDD bypassed canonical character YMAT namespace");
+                if(model.materials.count(section.material_reference))++resolved;
+            }
+            require(resolved>0,
+                "Editor native YDD failed to decode any character material");
+            std::cout<<"Abby editor model: "<<model.mesh.sections.size()
+                <<" mesh parts, "<<resolved<<" material sections\n";
+        }
         auto const info = northstarcpp::shared_assets::inspect_directory(root);
         require(info.materials >= 7 && info.drawables >= 1 && info.textures >= 5 &&
             info.scripts >= 7 && info.shaders >= 4 &&

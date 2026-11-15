@@ -31,6 +31,9 @@ struct Project {
     // Per-project explicit engine.<capability> -> provider ID.
     // Empty map preserves automatic/default provider selection.
     std::map<std::string,std::string> provider_choices;
+    // Optional strict rendering capabilities required by this project.
+    // Empty means no declared project-specific GPU feature requirements.
+    std::vector<std::string> required_renderer_features;
     bool favorite = false;
     bool external = false;
     enum class Status { ready, missing, invalid, missing_scene, incompatible } status = Status::invalid;
@@ -68,6 +71,8 @@ public:
     // Unknown providers are rejected by the Project Browser's live inventory.
     void set_provider(std::filesystem::path const& path,
                       std::string const& capability,std::string const& provider);
+    void set_renderer_requirements(std::filesystem::path const& path,
+                                   std::vector<std::string> const& requirements);
     void forget(std::filesystem::path const& path);
     std::filesystem::path const& projects_directory() const { return projects_directory_; }
 private:

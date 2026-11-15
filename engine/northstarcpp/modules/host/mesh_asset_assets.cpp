@@ -4,6 +4,7 @@
 #include <northstarcpp/native_model.hpp>
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/shared_assets.hpp>
+#include "../models/character_asset_namespace.hpp"
 #include <limits>
 #include <cmath>
 #include <algorithm>
@@ -73,9 +74,15 @@ MeshAsset load_scene_mesh(AssetStore const& store, std::string const& reference)
                 throw std::invalid_argument("Invalid native drawable mesh index");
             result.indices.push_back(base+index);
         }
-        if(!mesh.indices.empty())
-            result.sections.push_back({mesh.name,mesh.material,first_index,
+        if(!mesh.indices.empty()) {
+            // The imported drawable may retain its original pre-namespace
+            // YMAT reference. Resolve the same canonical character namespace
+            // as load_character_model(), without rewriting binary YDD data.
+            auto material=detail::rebase_embedded_character_material(
+                path,mesh.material);
+            result.sections.push_back({mesh.name,std::move(material),first_index,
                 result.indices.size()-first_index,mesh.material_required});
+        }
     }
     if(result.vertices.empty() || result.indices.empty())
         throw std::invalid_argument("Native model has no renderable triangles");

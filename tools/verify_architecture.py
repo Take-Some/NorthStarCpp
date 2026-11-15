@@ -39,7 +39,7 @@ NECESSARY = (
     "engine/northstarcpp/modules/host",
     "engine/northstarcpp/modules/editor",
     "engine/northstarcpp/resources/icons/logoStar.ico",
-    "engine/northstarcpp/resources/icons/folder.png",
+    "engine/northstarcpp/resources/icons/assetBrowser/folder.png",
     "tools/cmake/NorthStarModules.cmake",
 )
 FORBIDDEN = (

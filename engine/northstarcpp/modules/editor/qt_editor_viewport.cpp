@@ -1,4 +1,5 @@
 #include "qt_editor_viewport.hpp"
+#include "../viewport/editor_grid.hpp"
 #include "editor_tools.hpp"
 #include <northstarcpp/collision_service.hpp>
 #include <northstarcpp/geometry_service.hpp>
@@ -126,6 +127,19 @@ bool QtEditorViewport::renderGpuNow() {
     drawGpu();
     return gpuActive() && !gpu_dirty_;
 }
+QString QtEditorViewport::gpuAssetSummary() const {
+#ifdef _WIN32
+    if(gpuActive()) {
+        auto const stats=gpu_->renderer->asset_stats();
+        return QString("Native meshes: %1 | Materials: %2 | Textured: %3 | "
+                       "Cube primitives: %4 | Unresolved: %5")
+            .arg(stats.native_meshes).arg(stats.material_batches)
+            .arg(stats.textured_material_batches).arg(stats.cube_proxies)
+            .arg(stats.invalid_meshes);
+    }
+#endif
+    return gpu_error_.isEmpty()?"GPU renderer is not active":gpu_error_;
+}
 void QtEditorViewport::setAssetSources(std::filesystem::path root) {
     asset_root_=std::move(root);
 #ifdef _WIN32
@@ -167,12 +181,25 @@ void QtEditorViewport::drawGpu() {
         auto const& pose=camera_.pose;
         northstarcpp::ViewportGizmo gizmo;
         gizmo.mode=unsigned(gizmo_);
-        gizmo.active_axis=drag_axis_;
+        gizmo.show_grid=show_grid_;
+        gizmo.grid_width=std::max(1,width());
+        gizmo.grid_height=std::max(1,height());
+        gizmo.active_axis=drag_axis_>=0?drag_axis_:hovered_axis_;
+        if(selected_>=0 && std::size_t(selected_)<scene_->objects.size()) {
+            auto const& selected=scene_->objects[std::size_t(selected_)];
+            auto const geometry=gizmoGeometry();
+            if(geometry.visible)gizmo.length=geometry.world_length;
+            for(int axis=0;axis<3;++axis)
+                gizmo.axes[axis]=editor_tools::gizmo_axis(selected,
+                    static_cast<editor_tools::GizmoAxis>(axis),gizmo_local_);
+        }
         gpu_->renderer->draw(*scene_,selected_,false,nullptr,nullptr,false,
                              &pose,nullptr,false,false,&gizmo);
         gpu_dirty_=false;
+        gpu_error_.clear();
     } catch(std::exception const& e) {
         auto error=QString::fromUtf8(e.what());
+        gpu_error_=error;
         gpu_timer_->stop();
         // Engine renderer can be swapped/reloaded; safely release the
         // existing swapchain before returning to cross-platform proxy.
@@ -272,20 +299,40 @@ void QtEditorViewport::setOrbitAngles(float yaw,float pitch) {
     if(orbit_mode_)updateOrbitCamera();
 }
 void QtEditorViewport::setSelected(int index) {
-    selected_=index;gpu_dirty_=true;update();
+    selected_=index;hovered_axis_=-1;gpu_dirty_=true;update();
+}
+GizmoScreenGeometry QtEditorViewport::gizmoGeometry() const {
+    if(!scene_ || selected_<0 ||
+       std::size_t(selected_)>=scene_->objects.size())
+        return {};
+    return makeGizmoGeometry(camera_,scene_->objects[std::size_t(selected_)],
+                             size(),gizmo_,gizmo_local_);
+}
+void QtEditorViewport::setGizmoLocal(bool enabled) {
+    gizmo_local_=enabled;
+    hovered_axis_=-1;
+    gpu_dirty_=true;
+    update();
 }
 void QtEditorViewport::setGizmoMode(int index) {
-    gizmo_=std::clamp(index,0,2);gpu_dirty_=true;update();
+    gizmo_=std::clamp(index,0,2);
+    hovered_axis_=-1;
+    gpu_dirty_=true;
+    update();
 }
 void QtEditorViewport::setDrawMode(DrawMode mode) {
     if(int(mode)<0 || int(mode)>3)return;
     if(mode==DrawMode::EngineGpu) {
-        try {ensureGpu();}
+        try {
+            ensureGpu();
+            gpu_error_.clear();
+        }
         catch(std::exception const& e) {
+            gpu_error_=QString::fromUtf8(e.what());
             gpu_.reset();
             if(gpu_surface_)gpu_surface_->hide();
             mode=DrawMode::Shaded;
-            emit gpuUnavailable(QString::fromUtf8(e.what()));
+            emit gpuUnavailable(gpu_error_);
         }
     } else {
         if(gpu_timer_)gpu_timer_->stop();
@@ -296,7 +343,9 @@ void QtEditorViewport::setDrawMode(DrawMode mode) {
     gpu_dirty_=true;
     update();
 }
-void QtEditorViewport::setShowGrid(bool enabled) {show_grid_=enabled;update();}
+void QtEditorViewport::setShowGrid(bool enabled) {
+    show_grid_=enabled;gpu_dirty_=true;update();
+}
 void QtEditorViewport::setFlySpeed(float value) {
     if(!std::isfinite(value))return;
     auto const next=std::clamp(value,0.1f,2000.f);
@@ -407,17 +456,48 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(),bg);
     painter.save();
     painter.setClipRect(rect().adjusted(2,2,-2,-2));
-    // Basic editor grid. This is a cross-platform authoring fallback and
-    // does NOT pretend to render source materials or the game's Vulkan output.
-    if(show_grid_)for(int coordinate=-100;coordinate<=100;coordinate+=5) {
-        QColor grid=coordinate==0?QColor("#64819b"):QColor("#314259");
-        painter.setPen(QPen(grid,coordinate==0?1.5:0.8));
-        for(int pass=0;pass<2;++pass) {
-            Vector3 a=pass==0?Vector3{float(coordinate),0,-100}:Vector3{-100,0,float(coordinate)};
-            Vector3 b=pass==0?Vector3{float(coordinate),0,100}:Vector3{100,0,float(coordinate)};
-            auto pa=projected(a),pb=projected(b);
-            if(std::abs(pa.x())>50000 || std::abs(pb.x())>50000)continue;
-            painter.drawLine(pa,pb);
+    // Camera-relative infinite ground grid: adaptive 1/2/5 spacing with
+    // major divisions and highlighted world axes. Only a bounded visible
+    // neighbourhood is generated each frame, not fixed +/-100 metres.
+    if(show_grid_) {
+        auto const layout=editor_grid::build(camera_.pose,width(),height());
+        auto const forward=camera_.forward();
+        auto const eye=camera_.pose.position;
+        auto const nearClip=std::max(.01f,camera_.pose.near_plane*1.025f);
+        auto depth=[&](Vector3 p) {
+            return (p.x-eye.x)*forward.x+
+                   (p.y-eye.y)*forward.y+
+                   (p.z-eye.z)*forward.z;
+        };
+        for(auto const& line:layout.lines) {
+            Vector3 a=line.from,b=line.to;
+            auto da=depth(a),db=depth(b);
+            if(da<=nearClip && db<=nearClip)continue;
+            // Clamp line endpoints to the near plane to avoid broken
+            // polygons and enormous projected coordinates at the horizon.
+            if(da<nearClip) {
+                auto const t=(nearClip-da)/(db-da);
+                a={a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,
+                   a.z+(b.z-a.z)*t};
+            }else if(db<nearClip) {
+                auto const t=(nearClip-db)/(da-db);
+                b={b.x+(a.x-b.x)*t,b.y+(a.y-b.y)*t,
+                   b.z+(a.z-b.z)*t};
+            }
+            auto const pa=camera_.project(a,float(width()),float(height()));
+            auto const pb=camera_.project(b,float(width()),float(height()));
+            if(!pa || !pb)continue;
+            auto const begin=QPointF(pa->x,pa->y);
+            auto const finish=QPointF(pb->x,pb->y);
+            if(!std::isfinite(begin.x())||!std::isfinite(begin.y())||
+               !std::isfinite(finish.x())||!std::isfinite(finish.y()))
+                continue;
+            // Keep fine lines unobtrusive, with stronger major and world
+            // origin axes. Antialiasing is already enabled on QPainter.
+            painter.setPen(QPen(QColor::fromRgb(line.color),
+                line.origin?1.75:line.major?1.15:0.65,
+                Qt::SolidLine,Qt::FlatCap));
+            painter.drawLine(begin,finish);
         }
     }
     if(scene_) {
@@ -541,26 +621,37 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
                                  QString::fromUtf8(object.name.c_str()));
             }
         }
-        if(selected_>=0 && static_cast<std::size_t>(selected_)<scene_->objects.size()) {
-            auto const& selected=scene_->objects[static_cast<std::size_t>(selected_)];
-            QColor colors[3]={"#f56b76","#6edc90","#65acff"};
-            for(int axis=0;axis<3;++axis) {
-                auto v=editor_tools::gizmo_axis(selected,
-                    static_cast<editor_tools::GizmoAxis>(axis),false);
-                Vector3 end{selected.position.x+v.x*2.8f,
-                            selected.position.y+v.y*2.8f,
-                            selected.position.z+v.z*2.8f};
-                painter.setPen(QPen(colors[axis],drag_axis_==axis?5:3));
-                painter.drawLine(projected(selected.position),projected(end));
-                painter.drawEllipse(projected(end),4,4);
-            }
-        }
+        // Shared screen-space geometry ensures handles, hit targets and
+        // GPU world-space overlay use the same camera-relative scale.
+        paintGizmo(painter,gizmoGeometry(),gizmo_,drag_axis_,hovered_axis_);
     }
     painter.restore();
     painter.setPen(QColor("#c1d7ec"));
     painter.setFont(QFont("Segoe UI",9));
     painter.drawText(QRect(14,10,width()-28,26),Qt::AlignLeft|Qt::AlignVCenter,
         "PERSPECTIVE  |  PROXY VIEWPORT  |  HOLD RMB + WASD FLY  |  Q/E UP-DOWN  |  MMB PAN");
+    // A proxy view must never look like a real (but broken) asset renderer.
+    // Show the actual GPU failure persistently instead of only in a
+    // transient status bar message, which was easy to miss.
+    bool has_native_assets=false;
+    if(scene_)for(auto const& actor:scene_->objects)
+        if(!actor.node.asset.empty() || actor.player) {
+            has_native_assets=true;
+            break;
+        }
+    if(!gpu_error_.isEmpty() || has_native_assets) {
+        auto const message=!gpu_error_.isEmpty()?
+            QString("GPU VIEWPORT UNAVAILABLE — %1").arg(gpu_error_):
+            QString("PROXY VIEW — Models and materials are not rendered. "
+                    "Select 'Engine GPU - Native Models & Materials'.");
+        QRect banner(12,40,std::max(1,width()-24),58);
+        painter.setPen(QPen(QColor("#9b633f"),1));
+        painter.setBrush(QColor(42,34,32,238));
+        painter.drawRoundedRect(banner,5,5);
+        painter.setPen(QColor("#f4cba3"));
+        painter.drawText(banner.adjusted(11,5,-9,-5),
+                         Qt::TextWordWrap|Qt::AlignVCenter,message);
+    }
     painter.setPen(QColor("#8ea6c2"));
     painter.drawText(QRect(14,height()-31,width()-28,22),
         Qt::AlignLeft|Qt::AlignVCenter,
@@ -604,18 +695,17 @@ void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
         event->accept();return;
     }
     if(event->button()!=Qt::LeftButton || !scene_)return;
-    if(selected_>=0 && static_cast<std::size_t>(selected_)<scene_->objects.size()) {
-        auto const& o=scene_->objects[static_cast<std::size_t>(selected_)];
-        float best=18;
-        for(int axis=0;axis<3;++axis) {
-            auto v=editor_tools::gizmo_axis(o,
-                static_cast<editor_tools::GizmoAxis>(axis),false);
-            auto p=projected({o.position.x+v.x*2.8f,o.position.y+v.y*2.8f,
-                              o.position.z+v.z*2.8f});
-            auto dist=QLineF(p,event->position()).length();
-            if(dist<best){best=dist;drag_axis_=axis;}
-        }
-        if(drag_axis_>=0) {
+    if(selected_>=0 && std::size_t(selected_)<scene_->objects.size()) {
+        auto const geometry=gizmoGeometry();
+        auto const picked=pickGizmo(geometry,event->position(),gizmo_);
+        if(picked.axis>=0) {
+            drag_axis_=picked.axis;
+            hovered_axis_=picked.axis;
+            drag_handle_=picked;
+            drag_world_length_=geometry.world_length;
+            setCursor(Qt::SizeAllCursor);
+            gpu_dirty_=true;
+            update();
             emit gizmoDragStarted();
             event->accept();
             return;
@@ -662,9 +752,22 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
                      float(difference.y())*scale,0.f);
         gpu_dirty_=true;update();
     } else if(drag_axis_>=0 && event->buttons().testFlag(Qt::LeftButton)) {
-        float distance=float(difference.x()-difference.y())*0.035f;
-        if(std::abs(distance)>0.0001f)emit gizmoDelta(gizmo_,drag_axis_,distance);
+        float const amount=gizmoDragAmount(drag_handle_,
+            QPointF(difference),drag_world_length_,gizmo_);
+        if(std::isfinite(amount) && std::abs(amount)>1.e-6f)
+            emit gizmoDelta(gizmo_,drag_axis_,amount);
+        gpu_dirty_=true;
         update();
+    } else if(!rotating_ && !panning_ && drag_axis_<0 &&
+              event->buttons()==Qt::NoButton) {
+        auto const hovered=pickGizmo(gizmoGeometry(),event->position(),
+                                     gizmo_).axis;
+        if(hovered!=hovered_axis_) {
+            hovered_axis_=hovered;
+            setCursor(hovered_axis_>=0?Qt::SizeAllCursor:Qt::ArrowCursor);
+            gpu_dirty_=true;
+            update();
+        }
     }
 }
 void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
@@ -682,8 +785,17 @@ void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
     }
     if(event->button()==Qt::MiddleButton) {panning_=false;unsetCursor();}
     if(event->button()==Qt::LeftButton) {
-        if(drag_axis_>=0)emit gizmoDragFinished();
-        drag_axis_=-1;
+        if(drag_axis_>=0) {
+            emit gizmoDragFinished();
+            drag_axis_=-1;
+            drag_handle_={};
+            drag_world_length_=0.f;
+            hovered_axis_=pickGizmo(gizmoGeometry(),event->position(),gizmo_).axis;
+            setCursor(hovered_axis_>=0?Qt::SizeAllCursor:Qt::ArrowCursor);
+            gpu_dirty_=true;
+            update();
+            event->accept();
+        }
     }
 }
 void QtEditorViewport::wheelEvent(QWheelEvent* event) {
@@ -742,7 +854,8 @@ void QtEditorViewport::keyReleaseEvent(QKeyEvent* event) {
 }
 void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
     if(drag_axis_>=0)emit gizmoDragFinished();
-    rotating_=false;panning_=false;drag_axis_=-1;
+    rotating_=false;panning_=false;drag_axis_=-1;hovered_axis_=-1;
+    drag_handle_={};drag_world_length_=0.f;
     held_keys_.clear();
     camera_.reset_flight();
     if(fly_timer_)fly_timer_->stop();

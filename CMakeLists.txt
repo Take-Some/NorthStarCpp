@@ -282,6 +282,7 @@ if(WIN32)
                   "${PROJECT_SOURCE_DIR}/docs/ENGINE_MIGRATION_STATUS.md"
                   "${PROJECT_SOURCE_DIR}/docs/FLECS_ECS.md"
                   "${PROJECT_SOURCE_DIR}/docs/PERLIN_API.md"
+                  "${PROJECT_SOURCE_DIR}/docs/UI_API.md"
                   "${PROJECT_SOURCE_DIR}/docs/QT_CONTENT_BROWSER.md"
                   "${PROJECT_SOURCE_DIR}/docs/EDITOR_WORKSPACE.md"
                   "${PROJECT_SOURCE_DIR}/docs/PERLIN_INTEGRATION.md"
@@ -318,9 +319,30 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(northstarcpp_perlin_runtime PRIVATE ${CMAKE_DL_LIBS})
     northstarcpp_builtin_module(northstarcpp_perlin_runtime perlin improved
         "${_engine}/perlin/improved/improved.cpp")
+    northstarcpp_builtin_module(northstarcpp_perlin_runtime ui native
+        "${_engine}/ui/native/native.cpp")
     northstarcpp_builtin_registry(northstarcpp_perlin_runtime)
 
     if(BUILD_TESTING)
         northstarcpp_test_perlin_override(northstarcpp_perlin_runtime)
+    endif()
+endif()
+
+# Embed standard Windows FileInfo for all first-party EXE and DLL targets.
+# Third-party redistributables keep the vendor's copyright/version resources.
+if(WIN32)
+    include(tools/cmake/NorthStarFileInfo.cmake)
+    northstarcpp_attach_owned_fileinfo(
+        "${PROJECT_SOURCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/engine/northstarcpp")
+    if(BUILD_TESTING AND Python3_Interpreter_FOUND)
+        add_test(NAME northstarcpp_windows_fileinfo
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/check_windows_fileinfo.py"
+                --version "${PROJECT_VERSION}.0"
+                "$<TARGET_FILE:northstarcpp_portability_smoke>"
+                "$<TARGET_FILE:northstarcpp_assets_directory>")
+        set_tests_properties(northstarcpp_windows_fileinfo
+            PROPERTIES TIMEOUT 20)
     endif()
 endif()

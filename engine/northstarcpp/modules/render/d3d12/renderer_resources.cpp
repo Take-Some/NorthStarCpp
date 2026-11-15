@@ -8,6 +8,12 @@ RendererState::~RendererState(){
         if(sky_camera&&sky_camera_data)sky_camera->Unmap(0,nullptr);
         if(sky_tint&&sky_tint_data)sky_tint->Unmap(0,nullptr);
         if(hud_camera&&hud_camera_data)hud_camera->Unmap(0,nullptr);
+        if(grid_constant_buffer&&grid_constant_data)
+            grid_constant_buffer->Unmap(0,nullptr);
+        if(grid_previous_buffer&&grid_previous_data)
+            grid_previous_buffer->Unmap(0,nullptr);
+        if(grid_constant_buffer&&grid_constant_data)
+            grid_constant_buffer->Unmap(0,nullptr);
         if(material_vertex_gpu&&material_vertex_data)
             material_vertex_gpu->Unmap(0,nullptr);
         if(material_constant_gpu&&material_constant_data)
@@ -61,6 +67,9 @@ void RendererState::resize(UINT w,UINT h){
             texture_reuse_pool.recycle(device.Get(),exposure,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         for(auto& b:backs)b.Reset();depth.Reset();
+        for(auto& history:grid_history_textures)history.Reset();
+        grid_history_valid=false;
+        grid_history_index=0;
         for(auto& target:gbuffer)target.Reset();
         if(tile_index_buffer&&tile_index_bytes) {
             tile_index_buffer->Unmap(0,nullptr);

@@ -1,50 +1,58 @@
 {
-  "schema": "northstar.material-function.v1",
-  "name": "Multiply Color",
-  "inputs": [
-    {
-      "name": "color",
-      "type": "vector4"
-    },
-    {
-      "name": "tint",
-      "type": "vector4"
-    }
-  ],
-  "outputs": [
-    {
-      "name": "result",
-      "type": "vector4",
-      "node": "mul"
-    },
-    {
-      "name": "alpha",
-      "type": "scalar",
-      "node": "alpha"
-    }
-  ],
-  "nodes": [
-    {
-      "id": "color_in",
-      "op": "function_input",
-      "name": "color"
-    },
-    {
-      "id": "tint_in",
-      "op": "function_input",
-      "name": "tint"
-    },
-    {
-      "id": "mul",
-      "op": "multiply",
-      "a": "color_in",
-      "b": "tint_in"
-    },
-    {
-      "id": "alpha",
-      "op": "component",
-      "a": "mul",
-      "component": "w"
-    }
-  ]
+    "inputs": [
+        {
+            "name": "color",
+            "type": "vector4"
+        },
+        {
+            "name": "tint",
+            "type": "vector4"
+        }
+    ],
+    "name": "Multiply Color",
+    "nodes": [
+        {
+            "id": "color_in",
+            "name": "color",
+            "op": "function_input",
+            "x": -176,
+            "y": -89
+        },
+        {
+            "id": "tint_in",
+            "name": "tint",
+            "op": "function_input",
+            "x": -179,
+            "y": 7
+        },
+        {
+            "a": "color_in",
+            "b": "tint_in",
+            "id": "mul",
+            "op": "multiply",
+            "x": 112,
+            "y": -25
+        },
+        {
+            "a": "mul",
+            "component": "w",
+            "id": "alpha",
+            "op": "component",
+            "x": 377,
+            "y": 147
+        }
+    ],
+    "outputs": [
+        {
+            "name": "result",
+            "node": "mul",
+            "type": "vector4"
+        },
+        {
+            "name": "alpha",
+            "node": "alpha",
+            "type": "scalar"
+        }
+    ],
+    "schema": "northstar.material-function.v1"
 }

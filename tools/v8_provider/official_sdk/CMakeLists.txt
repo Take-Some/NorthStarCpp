@@ -93,3 +93,10 @@ if(BUILD_TESTING AND NORTHSTARCPP_HOST_SMOKE_EXE AND NORTHSTARCPP_HOST_ASSETS_DL
             "${NORTHSTARCPP_ENGINE_ROOT}/tests/fixtures")
     set_tests_properties(northstarcpp_official_v8_abi2 PROPERTIES TIMEOUT 60)
 endif()
+
+# Version every first-party provider binary, including separately built V8 DLLs.
+if(WIN32)
+    enable_language(RC)
+    include("@D@{NORTHSTARCPP_ENGINE_ROOT}/tools/cmake/NorthStarFileInfo.cmake")
+    northstarcpp_attach_fileinfo(northstarcpp_scripting_v8_native)
+endif()

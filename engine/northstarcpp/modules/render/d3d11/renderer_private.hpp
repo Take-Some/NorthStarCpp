@@ -6,11 +6,15 @@
 #include <northstarcpp/geometry.hpp>
 #include <northstarcpp/core/math_standalone.h>
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_editor_grid_api.h>
+#include "../shared/editor_grid_constants.hpp"
+#include "../shared/editor_grid_hlsl.hpp"
 #include <ui_quad.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_materials_api.h>
 #include <northstarcpp/render_skinning_api.h>
+#include <northstarcpp/render_lights_api.h>
 #include "../shared/material_hlsl.hpp"
 #include "../shared/material_variants.hpp"
 #include <northstarcpp/render_character_api.h>
@@ -165,6 +169,9 @@ struct RendererState {
     Com<ID3D11BlendState> material_alpha_blend;
     Com<ID3D11DepthStencilState> material_transparent_depth;
     Com<ID3D11Buffer> authored_material,authored_camera,material_gpu_vertices;
+    Com<ID3D11Buffer> dynamic_light_buffer;
+    std::vector<NorthStarRenderLight> dynamic_lights;
+    bool dynamic_lights_dirty=true;
     std::unordered_map<std::string,std::shared_ptr<MaterialPixelVariant>>
         material_shader_cache;
     std::unordered_map<std::string,std::future<std::vector<std::uint8_t>>>
@@ -181,6 +188,20 @@ struct RendererState {
     unsigned underutilized_frames=0;
     unsigned vertex_buffer_reallocations=0;
     Com<ID3D11Buffer> camera;
+    // Optional fullscreen editor overlay, never part of gameplay frames.
+    NorthStarRenderEditorGridSettings editor_grid{};
+    Com<ID3D11VertexShader> grid_vs;
+    Com<ID3D11PixelShader> grid_ps,grid_temporal_ps,grid_composite_ps;
+    Com<ID3D11Buffer> grid_constants,grid_previous_buffer;
+    Com<ID3D11SamplerState> grid_sampler;
+    std::array<Com<ID3D11Texture2D>,2> grid_history_textures;
+    std::array<Com<ID3D11RenderTargetView>,2> grid_history_rtvs;
+    std::array<Com<ID3D11ShaderResourceView>,2> grid_history_srvs;
+    northstarcpp::render::EditorGridConstants grid_previous_values{};
+    bool grid_history_valid=false;
+    unsigned grid_history_index=0,grid_frame_index=0;
+    Com<ID3D11BlendState> grid_blend;
+    Com<ID3D11DepthStencilState> grid_no_depth;
     Com<ID3D11RasterizerState> rasterizer;
     Com<ID3D11VertexShader> sky_vertex_shader;
     Com<ID3D11PixelShader> sky_pixel_shader;
@@ -201,6 +222,8 @@ struct RendererState {
     HRESULT create_device(D3D_DRIVER_TYPE driver);
     void resize(unsigned new_width, unsigned new_height);
     void verify_frame(std::uint32_t mode);
+    void set_editor_grid(NorthStarRenderEditorGridSettings const* value);
+    void draw_editor_grid(NorthStarRenderFrame const& frame);
     void draw_fps_overlay(NorthStarRenderFrame const& frame);
     void set_sky(NorthStarSky const* source);
     NorthStarRenderMemoryStats memory_stats() const;
@@ -213,6 +236,9 @@ struct RendererState {
     void draw_character();
     std::shared_ptr<CachedTexture> upload_material_texture(
         NorthStarMaterialTexture const& image,bool is_srgb);
+    void set_dynamic_lights(const NorthStarRenderLight* lights,
+                            std::uint32_t count);
+    void upload_dynamic_lights();
     void set_material_batches(NorthStarMaterialBatch const* batches,std::uint32_t count);
     void set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,
                                  std::uint32_t count);

@@ -2,6 +2,7 @@
 // Uses WARP and real CopyResource/Map readback (frame.verify_pixels == 2).
 #include <northstarcpp/module.h>
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_editor_grid_api.h>
 #include <northstarcpp/render_materials_api.h>
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_timing_api.h>
@@ -386,6 +387,76 @@ int main(int argc,char** argv) {
             frame.verify_pixels=1;
         }
 
+        // Native analytic editor-grid extension: verify plugin negotiation,
+        // strict settings validation, GPU-visible lines, and a clean disabled
+        // image with no fallback geometry or scene objects.
+        auto const get_grid=reinterpret_cast<NorthStarRenderGetEditorGridApi>(
+            GetProcAddress(library,"northstar_render_get_editor_grid_api"));
+        require(get_grid && get_grid(999u)==nullptr,
+                "Grid extension fails ABI version negotiation");
+        auto const* grid_api=get_grid(NORTHSTARCPP_RENDER_EDITOR_GRID_ABI);
+        require(grid_api && grid_api->set_grid &&
+                (grid_api->anti_aliasing_modes&3u)==3u,
+                "Provider lacks spatial and history-reprojected TAA grid modes");
+        auto const* grid_module=query(NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,
+            NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI);
+        require(grid_module &&
+                grid_module->api_size==sizeof(NorthStarRenderEditorGridApi),
+                "Editor grid extension unavailable through replaceable plugin ABI");
+        NorthStarRenderEditorGridSettings grid{};
+        grid.abi_version=NORTHSTARCPP_RENDER_EDITOR_GRID_ABI;
+        grid.enabled=1;grid.minor_step=2.f;grid.opacity=1.f;
+        grid.fade_start=20.f;grid.fade_end=180.f;
+        auto broken=grid;broken.fade_end=broken.fade_start;
+        require(!grid_api->set_grid(renderer,&broken),
+                "Renderer accepted invalid editor-grid fade range");
+        require(grid_api->set_grid(renderer,&grid),
+                module->last_error()?module->last_error():
+                "Cannot enable native analytic editor grid");
+        frame={};
+        frame.camera_override=1;
+        frame.camera_x=0.f;frame.camera_y=10.f;frame.camera_z=-10.f;
+        frame.camera_yaw=0.f;frame.camera_pitch=-.65f;
+        frame.camera_fov_y_degrees=65.f;
+        frame.camera_near_clip=.1f;frame.camera_far_clip=500.f;
+        frame.verify_pixels=7u;
+        require(api->draw(renderer,&frame),
+            module->last_error()?module->last_error():
+            "GPU analytic grid readback missing");
+        // History reprojects every following frame (not just the first).
+        // Small subpixel motions stress TAA and reprojection at oblique
+        // angles; a hard camera cut forces the explicit history reset.
+        for(unsigned step=0;step<18;++step) {
+            frame.camera_x+=.035f;
+            frame.camera_z+=.017f;
+            frame.camera_yaw+=.002f;
+            frame.camera_pitch-=.001f;
+            frame.verify_pixels=(step%6u)==0u?7u:0u;
+            require(grid_api->set_grid(renderer,&grid),
+                "Cannot update temporal grid settings");
+            require(api->draw(renderer,&frame),
+                module->last_error()?module->last_error():
+                "GPU temporally reprojected grid motion failed");
+        }
+        frame.camera_x=8000.f;frame.camera_z=-6600.f;
+        frame.camera_pitch=-.75f;
+        frame.verify_pixels=7u;
+        require(api->draw(renderer,&frame),
+            module->last_error()?module->last_error():
+            "GPU grid failed after camera cut/history invalidation");
+        SetWindowPos(window,nullptr,90,90,578,414,
+                     SWP_NOZORDER|SWP_NOACTIVATE);
+        require(api->draw(renderer,&frame),
+            module->last_error()?module->last_error():
+            "GPU grid history failed after window resize");
+        require(grid_api->set_grid(renderer,nullptr),
+            "Cannot disable analytic editor grid");
+        frame.verify_pixels=8u;
+        require(api->draw(renderer,&frame),
+            module->last_error()?module->last_error():
+            "GPU analytic grid remained after disable");
+        std::puts("Analytic GPU grid enable/disable readback and ABI PASS");
         std::puts(hardware?
             "Hardware native PBR/UV GPU texture readback PASS":
             "WARP native PBR/UV GPU texture readback PASS");

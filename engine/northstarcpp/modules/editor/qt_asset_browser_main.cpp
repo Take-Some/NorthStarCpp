@@ -1,5 +1,5 @@
 // NorthStar native Qt 6 Content Browser host.
-// Reusable QtContentBrowser can be docked in a future Qt editor QMainWindow.
+// QtContentBrowser is owned by Qt Editor; this executable is a QA/compatibility launcher.
 #include "qt_content_browser.hpp"
 #include "qt_menu_theme.hpp"
 #include "qt_asset_card_delegate.hpp"
@@ -18,6 +18,7 @@
 #include <QTreeWidget>
 #include <QAbstractItemModel>
 #include <QMainWindow>
+#include <QProcess>
 #include <QDialog>
 #include <QMetaObject>
 #include <QMenuBar>
@@ -55,6 +56,10 @@ int main(int argc,char** argv) {
         "Check complete UE-style asset cards, color bands, metadata and previews.");
     QCommandLineOption folderIconsSmoke("folder-icons-smoke",
         "Verify physical and virtual NEF8 folder artwork in grid, tree and details.");
+    QCommandLineOption categoryIconsSmoke("category-icons-smoke",
+        "Verify Other and Material Function PNG icons in grid, list and details.");
+    QCommandLineOption embeddedIconsSmoke("embedded-icons-smoke",
+        "Verify native YMT/YCD virtual children use skeleton/animation file icons.");
     QCommandLineOption previewModalSmoke("preview-modal-smoke",
         "Also exercise real double-click modal preview of NEF8 texture/model.");
     QCommandLineOption prefabCardsSmoke("prefab-cards-smoke",
@@ -68,14 +73,74 @@ int main(int argc,char** argv) {
     parser.addOption(smoke);
     parser.addOption(assetCardsSmoke);
     parser.addOption(folderIconsSmoke);
+    parser.addOption(categoryIconsSmoke);
+    parser.addOption(embeddedIconsSmoke);
     parser.addOption(previewModalSmoke);
     parser.addOption(prefabCardsSmoke);
     parser.addOption(multiPrefabSmoke);
     parser.addOption(screenshot);
     parser.process(app);
+    // Compatibility launcher only. Normal authoring uses the engine-owned
+    // Content Browser dock inside northstarcpp_editor_qt.exe. Keep this
+    // standalone process solely for explicit thumbnail/preview QA modes.
+    bool const qa=parser.isSet(smoke) || parser.isSet(assetCardsSmoke) ||
+        parser.isSet(folderIconsSmoke) || parser.isSet(categoryIconsSmoke) ||
+        parser.isSet(embeddedIconsSmoke) || parser.isSet(previewModalSmoke) ||
+        parser.isSet(prefabCardsSmoke) || parser.isSet(multiPrefabSmoke) ||
+        parser.isSet(screenshot);
+    if(!qa) {
+        auto const executable=QDir(QCoreApplication::applicationDirPath())
+            .filePath("northstarcpp_editor_qt.exe");
+        if(!QFileInfo::exists(executable)) {
+            std::cerr<<"NorthStar Qt Editor not installed: "
+                     <<executable.toStdString()<<std::endl;
+            return 2;
+        }
+        QStringList arguments{"--focus-content-browser"};
+        if(parser.isSet(scene)) {
+            arguments << "--scene" << parser.value(scene);
+        } else if(parser.isSet(content)) {
+            // --content was an old standalone-only argument. Derive a
+            // project scene when possible; never browse an arbitrary root
+            // outside an Editor project as a substitute.
+            QDir directory(parser.value(content));
+            if(directory.exists() && directory.dirName().compare(
+                    "assets",Qt::CaseInsensitive)==0 && directory.cdUp()) {
+                auto const scenes=directory.entryInfoList(
+                    {"*.nscn","*.nscene"},QDir::Files,QDir::Name);
+                if(!scenes.isEmpty())
+                    arguments << "--scene" << scenes.front().absoluteFilePath();
+            }
+        }
+        QProcess editor;
+        editor.setProgram(executable);
+        editor.setArguments(arguments);
+        editor.setWorkingDirectory(QFileInfo(executable).absolutePath());
+        if(!editor.startDetached()) {
+            std::cerr<<"Could not start NorthStar Qt Editor: "
+                     <<editor.errorString().toStdString()<<std::endl;
+            return 3;
+        }
+        return 0;
+    }
     auto browser=std::make_unique<northstarcpp::editor::QtContentBrowser>();
     std::unique_ptr<QTemporaryDir> sandbox;
-    if(parser.isSet(smoke) && !parser.isSet(scene) && !parser.isSet(content)) {
+    if(parser.isSet(categoryIconsSmoke) && !parser.isSet(scene) &&
+       !parser.isSet(content)) {
+        sandbox=std::make_unique<QTemporaryDir>();
+        if(!sandbox->isValid())return 3;
+        QFile materialFunction(sandbox->path()+"/sample.material-function.json");
+        QFile other(sandbox->path()+"/sample.unknown");
+        if(!materialFunction.open(QIODevice::WriteOnly) ||
+           !other.open(QIODevice::WriteOnly))return 4;
+        materialFunction.write("{\"schema\":\"northstar.material-function.v1\","
+                               "\"inputs\":[],\"outputs\":[],\"nodes\":[]}");
+        other.write("ordinary file");
+        materialFunction.close();
+        other.close();
+        browser->setContentRoot(sandbox->path());
+    } else if(parser.isSet(smoke) && !parser.isSet(scene) &&
+              !parser.isSet(content)) {
         sandbox=std::make_unique<QTemporaryDir>();
         if(!sandbox->isValid())return 3;
         QDir(sandbox->path()).mkpath("assets/Meshes");
@@ -129,6 +194,7 @@ int main(int argc,char** argv) {
     window.show();
 
     if(parser.isSet(smoke) || parser.isSet(folderIconsSmoke) ||
+       parser.isSet(categoryIconsSmoke) || parser.isSet(embeddedIconsSmoke) ||
        parser.isSet(assetCardsSmoke) || parser.isSet(prefabCardsSmoke) ||
        parser.isSet(multiPrefabSmoke) || parser.isSet(screenshot)) {
         QElapsedTimer elapsed;
@@ -424,6 +490,147 @@ int main(int argc,char** argv) {
                      <<" ("<<checked<<" painted category cards)\n";
             return okay?0:9;
         }
+        if(parser.isSet(embeddedIconsSmoke)) {
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            auto* details=view->findChild<QLabel*>("assetPreviewIcon");
+            bool okay=grid && grid->model() && details;
+            auto const sameIcon=[](QIcon const& rendered,QString const& path) {
+                QIcon expected(path);
+                return !expected.isNull() && !rendered.isNull() &&
+                    expected.pixmap(128,128).toImage() ==
+                    rendered.pixmap(128,128).toImage();
+            };
+            auto const artwork=[](char const* filename) {
+                return QString(":/northstar/icons/assetBrowser/")+filename;
+            };
+            struct Case {
+                QString container;
+                QString folderArt;
+                QString fileArt;
+            };
+            std::array<Case,2> cases{{
+                {"models/weapon/pistol/common-pistol.ymt",
+                 artwork("skeletalFolder.png"),artwork("skelFile.png")},
+                {"animations/weapon/pistol/military-pistol.ycd",
+                 artwork("animFolder.png"),artwork("animFile.png")}
+            }};
+            int verified=0;
+            for(auto const& tc:cases) {
+                if(!okay)break;
+                auto parent=tc.container.section('/',0,-2);
+                auto filename=tc.container.section('/',-1);
+                view->browseTo(parent);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                QModelIndex folder;
+                for(int row=0;row<grid->model()->rowCount();++row) {
+                    auto ix=grid->model()->index(row,0);
+                    if(ix.data(Qt::DisplayRole).toString()==filename) {
+                        folder=ix;break;
+                    }
+                }
+                okay=folder.isValid() && sameIcon(
+                    qvariant_cast<QIcon>(folder.data(Qt::DecorationRole)),
+                    tc.folderArt);
+                if(!okay)break;
+                view->browseTo(tc.container);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                okay=grid->model()->rowCount()>0;
+                for(int row=0;okay && row<grid->model()->rowCount();++row) {
+                    auto ix=grid->model()->index(row,0);
+                    okay=sameIcon(qvariant_cast<QIcon>(
+                        ix.data(Qt::DecorationRole)),tc.fileArt);
+                    if(!okay)break;
+                    grid->setCurrentIndex(ix);
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                    auto expected=QIcon(tc.fileArt).pixmap(130,130).toImage();
+                    okay=!details->pixmap(Qt::ReturnByValue).isNull() &&
+                         details->pixmap(Qt::ReturnByValue).toImage()==expected &&
+                         view->selectedAsset().startsWith(tc.container+"@");
+                }
+                if(!okay)break;
+                // List mode reuses the same per-entry QIcon decoration.
+                bool toggled=false;
+                for(auto* button:view->findChildren<QToolButton*>()) {
+                    if(button->toolTip()!="Toggle grid/list view")continue;
+                    button->click();
+                    toggled=true;
+                    okay=grid->viewMode()==QListView::ListMode;
+                    for(int row=0;okay && row<grid->model()->rowCount();++row)
+                        okay=sameIcon(qvariant_cast<QIcon>(
+                            grid->model()->index(row,0).data(
+                                Qt::DecorationRole)),tc.fileArt);
+                    button->click();
+                    okay=okay && grid->viewMode()==QListView::IconMode;
+                    break;
+                }
+                okay=okay&&toggled;
+                if(okay)++verified;
+            }
+            std::cout<<"YMT/YCD embedded skeleton/animation file icons: "
+                     <<(okay?"PASS":"FAIL")<<" ("<<verified<<"/2 dictionaries)\n";
+            return okay?0:12;
+        }
+        if(parser.isSet(categoryIconsSmoke)) {
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            auto* detail=view->findChild<QLabel*>("assetPreviewIcon");
+            bool okay=grid && grid->model() && detail &&
+                view->recordCount()==2;
+            auto const sameIcon=[](QIcon const& actual,QString const& resource) {
+                QIcon expected(resource);
+                return !actual.isNull() && !expected.isNull() &&
+                    actual.pixmap(128,128).toImage()==
+                    expected.pixmap(128,128).toImage();
+            };
+            struct Case {QString filename,art;};
+            std::array<Case,2> const cases{{
+                {"sample.unknown",":/northstar/icons/assetBrowser/otherFile.png"},
+                {"sample.material-function.json",":/northstar/icons/assetBrowser/materialFunc.png"}
+            }};
+            for(auto const& tc:cases) {
+                if(!okay)break;
+                QModelIndex selected;
+                auto* model=grid->model();
+                for(int i=0;i<model->rowCount();++i) {
+                    auto ix=model->index(i,0);
+                    if(ix.data(Qt::DisplayRole).toString()==tc.filename) {
+                        selected=ix;break;
+                    }
+                }
+                okay=selected.isValid() &&
+                    sameIcon(qvariant_cast<QIcon>(
+                        selected.data(Qt::DecorationRole)),tc.art);
+                if(!okay)break;
+                grid->setCurrentIndex(selected);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                QIcon expected(tc.art);
+                okay=!detail->pixmap(Qt::ReturnByValue).isNull() &&
+                     detail->pixmap(Qt::ReturnByValue).toImage()==
+                     expected.pixmap(130,130).toImage();
+            }
+            if(okay) {
+                for(auto* button:view->findChildren<QToolButton*>()) {
+                    if(button->toolTip()!="Toggle grid/list view")continue;
+                    button->click();
+                    okay=grid->viewMode()==QListView::ListMode;
+                    for(int i=0;okay && i<grid->model()->rowCount();++i) {
+                        auto ix=grid->model()->index(i,0);
+                        QString const file=ix.data(Qt::DisplayRole).toString();
+                        auto expected=file=="sample.unknown"?
+                            ":/northstar/icons/assetBrowser/otherFile.png":
+                            ":/northstar/icons/assetBrowser/materialFunc.png";
+                        okay=sameIcon(
+                            qvariant_cast<QIcon>(ix.data(Qt::DecorationRole)),
+                            expected);
+                    }
+                    button->click();
+                    okay=okay && grid->viewMode()==QListView::IconMode;
+                    break;
+                }
+            }
+            std::cout<<"Qt Other and Material Function PNG artwork: "
+                     <<(okay?"PASS":"FAIL")<<" (grid/list/details)\n";
+            return okay?0:11;
+        }
         if(parser.isSet(folderIconsSmoke)) {
             auto* grid=view->findChild<QListView*>("assetGrid");
             auto* tree=view->findChild<QTreeWidget*>("folderTree");
@@ -442,15 +649,15 @@ int main(int argc,char** argv) {
                 QString image;
             };
             auto const cases=std::array<FolderCase,6>{{
-                {"textures","","textures",":/northstar/icons/folder.png"},
-                {"models","","models",":/northstar/icons/folder.png"},
-                {"materials","","materials",":/northstar/icons/folder.png"},
+                {"textures","","textures",":/northstar/icons/assetBrowser/folder.png"},
+                {"models","","models",":/northstar/icons/assetBrowser/folder.png"},
+                {"materials","","materials",":/northstar/icons/assetBrowser/folder.png"},
                 {"textures/skydome.ytd","textures","skydome.ytd",
-                    ":/northstar/icons/texturesFolder.png"},
+                    ":/northstar/icons/assetBrowser/texturesFolder.png"},
                 {"models/skydome.ydd","models","skydome.ydd",
-                    ":/northstar/icons/modelsFolder.png"},
+                    ":/northstar/icons/assetBrowser/modelsFolder.png"},
                 {"materials/skydome.ymat","materials","skydome.ymat",
-                    ":/northstar/icons/materialsFolder.png"}
+                    ":/northstar/icons/assetBrowser/materialsFolder.png"}
             }};
             int checked=0;
             for(auto const& test:cases) {
@@ -488,10 +695,10 @@ int main(int argc,char** argv) {
                 if(okay)++checked;
             }
             if(okay) {
-                QIcon normal(":/northstar/icons/folder.png");
-                QIcon textures(":/northstar/icons/texturesFolder.png");
-                QIcon models(":/northstar/icons/modelsFolder.png");
-                QIcon materials(":/northstar/icons/materialsFolder.png");
+                QIcon normal(":/northstar/icons/assetBrowser/folder.png");
+                QIcon textures(":/northstar/icons/assetBrowser/texturesFolder.png");
+                QIcon models(":/northstar/icons/assetBrowser/modelsFolder.png");
+                QIcon materials(":/northstar/icons/assetBrowser/materialsFolder.png");
                 auto different=[](QIcon const& a,QIcon const& b) {
                     return a.pixmap(128,128).toImage()!=b.pixmap(128,128).toImage();
                 };

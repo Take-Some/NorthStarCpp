@@ -183,13 +183,19 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
             timestamp_valid_bits_=family_properties[family_].timestampValidBits;
         }
         create_vertex_buffer();
+        create_material_resources();
+        create_world_resources();
         create_swapchain();
         northstarcpp::render::RenderGraph graph;
         auto image=graph.add_resource("swapchain",true,
             northstarcpp::render::ResourceAccess::Present);
-        auto p0=graph.add_pass({"geometry",{}, {image},{},
+        auto depth=graph.add_resource("depth",false);
+        auto p0=graph.add_pass({"geometry",{}, {image,depth},{},
+            {{image,northstarcpp::render::ResourceAccess::ColorAttachment},
+             {depth,northstarcpp::render::ResourceAccess::DepthWrite}}});
+        auto pUI=graph.add_pass({"engine.ui overlay",{image},{image},{p0},
             {{image,northstarcpp::render::ResourceAccess::ColorAttachment}}});
-        auto p1=graph.add_pass({"GPU readback",{image},{image},{p0},
+        auto p1=graph.add_pass({"GPU readback",{image},{image},{pUI},
             {{image,northstarcpp::render::ResourceAccess::CopySource}}});
         graph.add_pass({"present",{image},{},{p1},
             {{image,northstarcpp::render::ResourceAccess::Present}}});
@@ -200,6 +206,27 @@ Renderer::~Renderer() noexcept {shutdown();}
 void Renderer::destroy_pipeline() noexcept {
     if(!device_)return;
     if(pipeline_)vkDestroyPipeline(device_,pipeline_,nullptr);
+    if(world_pipeline_)vkDestroyPipeline(device_,world_pipeline_,nullptr);
+    if(world_pipeline_layout_)
+        vkDestroyPipelineLayout(device_,world_pipeline_layout_,nullptr);
+    if(world_vs_)vkDestroyShaderModule(device_,world_vs_,nullptr);
+    if(world_fs_)vkDestroyShaderModule(device_,world_fs_,nullptr);
+    world_pipeline_=VK_NULL_HANDLE;world_pipeline_layout_=VK_NULL_HANDLE;
+    world_vs_=world_fs_=VK_NULL_HANDLE;
+    if(material_pipeline_)
+        vkDestroyPipeline(device_,material_pipeline_,nullptr);
+    for(auto& entry:material_variant_pipelines_)
+        if(entry.second)vkDestroyPipeline(device_,entry.second,nullptr);
+    material_variant_pipelines_.clear();
+    if(material_pipeline_layout_)
+        vkDestroyPipelineLayout(device_,material_pipeline_layout_,nullptr);
+    if(material_vertex_shader_)
+        vkDestroyShaderModule(device_,material_vertex_shader_,nullptr);
+    if(material_fragment_shader_)
+        vkDestroyShaderModule(device_,material_fragment_shader_,nullptr);
+    material_pipeline_=VK_NULL_HANDLE;
+    material_pipeline_layout_=VK_NULL_HANDLE;
+    material_vertex_shader_=material_fragment_shader_=VK_NULL_HANDLE;
     if(pipeline_layout_)vkDestroyPipelineLayout(device_,pipeline_layout_,nullptr);
     if(vertex_shader_)vkDestroyShaderModule(device_,vertex_shader_,nullptr);
     if(fragment_shader_)vkDestroyShaderModule(device_,fragment_shader_,nullptr);
@@ -213,6 +240,57 @@ void Renderer::destroy_readback() noexcept {
     readback_buffer_=VK_NULL_HANDLE;readback_memory_=VK_NULL_HANDLE;
     readback_capacity_=0;
 }
+void Renderer::destroy_depth() noexcept {
+    if(!device_)return;
+    if(depth_view_)vkDestroyImageView(device_,depth_view_,nullptr);
+    if(depth_image_)vkDestroyImage(device_,depth_image_,nullptr);
+    if(depth_memory_)vkFreeMemory(device_,depth_memory_,nullptr);
+    depth_view_=VK_NULL_HANDLE;depth_image_=VK_NULL_HANDLE;
+    depth_memory_=VK_NULL_HANDLE;depth_format_=VK_FORMAT_UNDEFINED;
+}
+void Renderer::create_depth() {
+    destroy_depth();
+    // Dynamic rendering requires a real depth attachment, not draw-order
+    // emulation; choose a depth format on the actual physical GPU.
+    for(auto candidate:{VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT}) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physical_,candidate,&properties);
+        if(properties.optimalTilingFeatures&
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            depth_format_=candidate;break;
+        }
+    }
+    if(depth_format_==VK_FORMAT_UNDEFINED)
+        throw std::runtime_error("No Vulkan depth attachment format");
+    VkImageCreateInfo desc{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    desc.imageType=VK_IMAGE_TYPE_2D;
+    desc.format=depth_format_;
+    desc.extent={extent_.width,extent_.height,1};
+    desc.mipLevels=1;desc.arrayLayers=1;
+    desc.samples=VK_SAMPLE_COUNT_1_BIT;
+    desc.tiling=VK_IMAGE_TILING_OPTIMAL;
+    desc.usage=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    desc.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
+    check(vkCreateImage(device_,&desc,nullptr,&depth_image_),
+          "vkCreateImage(depth)");
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(device_,depth_image_,&requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize=requirements.size;
+    allocation.memoryTypeIndex=find_memory_type(requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    check(vkAllocateMemory(device_,&allocation,nullptr,&depth_memory_),
+          "vkAllocateMemory(depth)");
+    check(vkBindImageMemory(device_,depth_image_,depth_memory_,0),
+          "vkBindImageMemory(depth)");
+    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view.image=depth_image_;
+    view.viewType=VK_IMAGE_VIEW_TYPE_2D;view.format=depth_format_;
+    view.subresourceRange.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+    view.subresourceRange.levelCount=1;view.subresourceRange.layerCount=1;
+    check(vkCreateImageView(device_,&view,nullptr,&depth_view_),
+          "vkCreateImageView(depth)");
+}
 void Renderer::destroy_vertex_buffer() noexcept {
     if(!device_)return;
     if(vertices_buffer_)vkDestroyBuffer(device_,vertices_buffer_,nullptr);
@@ -221,8 +299,10 @@ void Renderer::destroy_vertex_buffer() noexcept {
 }
 void Renderer::destroy_swapchain() noexcept {
     if(!device_)return;
+    destroy_ui_resources();
     destroy_pipeline();
     destroy_readback();
+    destroy_depth();
     for(auto view:image_views_)
         if(view)vkDestroyImageView(device_,view,nullptr);
     image_views_.clear();images_.clear();swapchain_seen_.clear();
@@ -232,6 +312,9 @@ void Renderer::destroy_swapchain() noexcept {
 void Renderer::shutdown() noexcept {
     if(device_)vkDeviceWaitIdle(device_);
     destroy_swapchain();
+    destroy_skin_resources();
+    destroy_world_resources();
+    destroy_material_resources();
     destroy_vertex_buffer();
     if(device_) {
         if(completed_)vkDestroyFence(device_,completed_,nullptr);
@@ -350,7 +433,10 @@ void Renderer::create_swapchain() {
               "vkCreateImageView(swapchain)");
     }
     create_readback();
+    create_depth();
     create_pipeline();
+    create_world_pipeline();
+    create_material_pipeline();
 }
 void Renderer::create_pipeline() {
     const auto shader=[&](const std::uint32_t* words,std::size_t n,
@@ -389,6 +475,10 @@ void Renderer::create_pipeline() {
     raster.lineWidth=1.f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depth.depthTestEnable=VK_TRUE;depth.depthWriteEnable=VK_TRUE;
+    depth.depthCompareOp=VK_COMPARE_OP_LESS;
     VkPipelineColorBlendAttachmentState attachment{};
     attachment.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
                                VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
@@ -399,12 +489,14 @@ void Renderer::create_pipeline() {
     dyn.dynamicStateCount=2;dyn.pDynamicStates=dynamics;
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount=1;rendering.pColorAttachmentFormats=&format_;
+    rendering.depthAttachmentFormat=depth_format_;
     VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pi.pNext=&rendering;
     pi.stageCount=2;pi.pStages=stages;
     pi.pVertexInputState=&vertex;pi.pInputAssemblyState=&assembly;
     pi.pViewportState=&viewport;pi.pRasterizationState=&raster;
-    pi.pMultisampleState=&ms;pi.pColorBlendState=&blend;pi.pDynamicState=&dyn;
+    pi.pMultisampleState=&ms;pi.pDepthStencilState=&depth;
+    pi.pColorBlendState=&blend;pi.pDynamicState=&dyn;
     pi.layout=pipeline_layout_;
     check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,&pipeline_),
           "vkCreateGraphicsPipelines");

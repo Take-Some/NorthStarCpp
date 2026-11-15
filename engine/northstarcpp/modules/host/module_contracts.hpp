@@ -6,16 +6,20 @@
 #include <northstarcpp/input_plugin.h>
 #include <northstarcpp/logger_plugin.h>
 #include <northstarcpp/perlin_plugin.h>
+#include <northstarcpp/ui_plugin.h>
 #include <northstarcpp/geometry_plugin.h>
 #include <northstarcpp/collision_plugin.h>
 #include <northstarcpp/time_plugin.h>
 #include <northstarcpp/physics_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
+#include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_materials_api.h>
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_features_api.h>
+#include <northstarcpp/render_editor_grid_api.h>
 #include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
@@ -50,9 +54,21 @@ inline bool valid_api(NorthStarPhysicsResidencyApi const& api)
         api.set_static_resident && api.is_static_resident;
 }
 
+inline bool valid_api(NorthStarRenderEditorGridApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_EDITOR_GRID_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderEditorGridApi) &&
+           api.set_grid && (api.anti_aliasing_modes&1u);
+}
+
 inline bool valid_api(NorthStarRenderApi const& api)
 {
     return api.create && api.destroy && api.draw && api.set_sky;
+}
+
+inline bool valid_api(NorthStarRenderUiApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_UI_ABI &&
+           api.struct_size>=sizeof(api) && api.set_rgba;
 }
 
 inline bool valid_api(NorthStarRenderTrianglesApi const& api)
@@ -82,6 +98,12 @@ inline bool valid_api(NorthStarRenderSkinnedMaterialsApi const& api)
            api.set_batches;
 }
 
+
+inline bool valid_api(NorthStarRenderFeaturesApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_FEATURES_ABI &&
+        api.struct_size>=sizeof(NorthStarRenderFeaturesApi);
+}
 
 // Optional GPU timestamp contract: reject incomplete function tables.
 inline bool valid_api(NorthStarRenderTimingApi const& api)
@@ -151,6 +173,26 @@ inline bool valid_api(NorthStarPerlinApi const& api)
 {
     return api.create && api.destroy && api.sample1 && api.sample2 && api.sample3 &&
         api.fractal1 && api.fractal2 && api.fractal3 && api.fill2;
+}
+
+inline bool valid_api(NorthStarUIApi const& api)
+{
+    return api.size >= sizeof(api) && api.create_context && api.destroy_context &&
+        api.create_element && api.destroy_element && api.set_property &&
+        api.get_property_json && api.set_event_callback && api.dispatch_event &&
+        api.pump_events && api.resize && api.render;
+}
+
+inline bool valid_api(NorthStarUIRasterApi const& api)
+{
+    return api.size >= sizeof(api) && api.flags == 0 &&
+           api.draw_rgba && api.get_rect && api.pointer;
+}
+
+inline bool valid_api(NorthStarUIInputApi const& api)
+{
+    return api.size >= sizeof(api) && api.flags == 0 &&
+           api.keyboard && api.composition && api.wheel && api.focused;
 }
 
 inline bool valid_api(NorthStarScriptingApi const& api)

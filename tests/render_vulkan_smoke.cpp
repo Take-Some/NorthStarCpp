@@ -1,6 +1,7 @@
 // Real Win32 Vulkan GPU provider smoke, ABI 5, GPU readback and resizing.
 #include <northstarcpp/module.h>
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_timing_api.h>
 #ifndef NOMINMAX
@@ -110,12 +111,44 @@ int main(int argc,char** argv) {
         cube.rotation[0]=cube.rotation[4]=cube.rotation[8]=1.f;
         frame.cubes=&cube;frame.count=1;
         REQUIRE(render->draw(backend,&frame));
+        // Occlusion test submits near/far overlapping geometry in BOTH
+        // orders. Without a real depth attachment, the second test would
+        // be red (far triangle drawn last), which must be rejected.
+        NorthStarRenderTriangleVertex depth_triangles[]{
+            {-2.f,-2.f,6.f,0xff0000u},{2.f,-2.f,6.f,0xff0000u},
+            {0.f,2.f,6.f,0xff0000u},
+            {-1.f,-1.f,3.f,0x00ff00u},{1.f,-1.f,3.f,0x00ff00u},
+            {0.f,1.f,3.f,0x00ff00u}};
+        frame.cubes=nullptr;frame.count=0;frame.verify_pixels=4;
+        REQUIRE(geometry->set_triangles(backend,depth_triangles,6));
+        REQUIRE(render->draw(backend,&frame)); // far then near
+        for(int i=0;i<3;++i)
+            std::swap(depth_triangles[i],depth_triangles[i+3]);
+        REQUIRE(geometry->set_triangles(backend,depth_triangles,6));
+        REQUIRE(render->draw(backend,&frame)); // near then far
+        REQUIRE(geometry->set_triangles(backend,v,3));
+        frame.cubes=&cube;frame.count=1;
         frame.verify_pixels=2;
         REQUIRE(!render->draw(backend,&frame)); // Explicitly unsupported UV QA.
         frame.verify_pixels=1;
         REQUIRE(render->set_sky(backend,nullptr));
         SetWindowPos(window,nullptr,100,100,460,320,SWP_NOZORDER|SWP_NOACTIVATE);
         REQUIRE(render->draw(backend,&frame)); // Resize + recreate swapchain.
+        auto* ui_module=query(NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,NORTHSTARCPP_RENDER_UI_MODULE_ABI);
+        REQUIRE(ui_module && ui_module->api_size>=sizeof(NorthStarRenderUiApi));
+        const auto* ui=static_cast<const NorthStarRenderUiApi*>(ui_module->api);
+        REQUIRE(ui && ui->abi_version==NORTHSTARCPP_RENDER_UI_ABI && ui->set_rgba);
+        std::vector<uint8_t> overlay(4*4*4);
+        for(size_t i=0;i<overlay.size();i+=4) {
+            overlay[i]=255;overlay[i+1]=0;overlay[i+2]=0;overlay[i+3]=255;
+        }
+        REQUIRE(ui->set_rgba(backend,overlay.data(),4,4,16));
+        std::fill(overlay.begin(),overlay.end(),0);
+        frame.verify_pixels=8;
+        REQUIRE(render->draw(backend,&frame));
+        REQUIRE(ui->set_rgba(backend,nullptr,0,0,0));
+        frame.verify_pixels=1;
         if(stress) {
             frame.verify_pixels=0;
             std::vector<double> samples;

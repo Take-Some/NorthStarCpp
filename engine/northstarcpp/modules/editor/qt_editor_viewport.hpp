@@ -1,11 +1,13 @@
-// Cross-platform Qt scene authoring viewport; no native window handle.
-// CPU wireframe proxy preview, to be replaced with RenderGraph-backed surface.
+// Native engine.render is the default Windows authoring view.
+// Qt CPU proxies remain explicit diagnostics or a provider fallback.
 #pragma once
 #include "editor_camera.hpp"
+#include "qt_editor_gizmo.hpp"
 #include <northstarcpp/scene.hpp>
 #include <QPoint>
 #include <northstarcpp/frame_clock.hpp>
 #include <QSet>
+#include <QString>
 #include <QVector3D>
 #include <QWidget>
 #include <filesystem>
@@ -28,15 +30,21 @@ public:
     ~QtEditorViewport() override;
     void setAssetSources(std::filesystem::path projectRoot);
     bool gpuActive() const noexcept;
+    QString gpuError() const {return gpu_error_;}
     bool renderGpuNow();
+    // Returns last native GPU frame's host-side submission summary.
+    QString gpuAssetSummary() const;
     void setScene(Scene const* value);
     void setSelected(int index);
     void setGizmoMode(int index);
+    void setGizmoLocal(bool enabled);
+    int hoveredGizmoAxis() const noexcept {return hovered_axis_;}
+    GizmoScreenGeometry gizmoGeometry() const;
     int selected() const noexcept {return selected_;}
     void frameSelected();
     void frameAll();
-    // Render modes are authoring proxy modes; Vulkan/PBR rendering is
-    // independent and will use a dedicated render-target integration.
+    // EngineGpu uses the same YDD/YDR+YMAT/YTD material path as Player.
+    // Shaded/Wireframe remain explicit low-cost proxy diagnostics.
     enum class DrawMode:int {
         Shaded=0, Wireframe=1, ShadedWireframe=2, EngineGpu=3
     };
@@ -82,14 +90,17 @@ protected:
 private:
     Scene const* scene_{};
     editor_tools::EditorCamera camera_;
-    int selected_=-1, gizmo_=0, drag_axis_=-1;
+    int selected_=-1, gizmo_=0, drag_axis_=-1, hovered_axis_=-1;
+    bool gizmo_local_=false;
+    GizmoHit drag_handle_{};
+    float drag_world_length_=0.f;
     bool rotating_=false;
     bool orbit_mode_=false;
     float orbit_distance_=4.2f;
     Vector3 orbit_target_{0.f,1.f,0.f};
     bool panning_=false;
     bool show_grid_=true;
-    DrawMode draw_mode_=DrawMode::Shaded;
+    DrawMode draw_mode_=DrawMode::Shaded; // activated after Qt window show
     float fly_speed_=12.f;
     QSet<int> held_keys_;
     northstarcpp::timing::FrameClock fly_clock_;
@@ -100,6 +111,7 @@ private:
     std::unique_ptr<GpuState> gpu_;
     std::filesystem::path asset_root_;
     bool gpu_dirty_=true;
+    QString gpu_error_;
     void updateOrbitCamera();
     void ensureGpu();
     void drawGpu();

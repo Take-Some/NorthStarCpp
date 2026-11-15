@@ -2,22 +2,101 @@
 // Reuses the validated envelope/decompression logic; never extracts files.
 #include <northstarcpp/shared_assets.hpp>
 #include <northstarcpp/assets.hpp>
+#include <northstarcpp/skeleton.hpp>
 #include "asset_list_file.hpp"
 #include <set>
+#include <cmath>
+#include <algorithm>
 #include <stdexcept>
 
 namespace northstarcpp::shared_assets {
+std::vector<AnimationClipInfo> inspect_animation_clip_dictionary(
+    std::vector<std::uint8_t> const& source) {
+    using namespace detail;
+    auto file=parse_list_file(source);
+    require(file.kind==11 && file.entries>0 && file.entries<=4096,
+            "Expected a native YCD animation dictionary");
+    Bytes const bytes(file.body);
+    auto const version=bytes.integer(0,4);
+    auto const count=bytes.integer(4,4);
+    auto const table=bytes.integer(8,8);
+    auto const strings=bytes.integer(16,8);
+    auto const payload=bytes.integer(32,8);
+    require((version==2 || version==3) && count==file.entries &&
+            table==48 && strings>=table &&
+            file.entries<=(strings-table)/64 &&
+            strings<=payload && payload<=bytes.size(),
+            "Invalid native YCD table offsets");
+    std::vector<AnimationClipInfo> clips;
+    clips.reserve(file.entries);
+    std::set<std::string> names;
+    for(std::size_t i=0;i<file.entries;++i) {
+        auto const record=table+64*i;
+        auto const offset=bytes.integer(record+8,4);
+        require(offset<payload-strings,"YCD name offset outside string table");
+        auto const* begin=bytes.at(strings+offset,1);
+        auto const remaining=std::min<std::uint64_t>(payload-strings-offset,257);
+        auto const* end=std::find(begin,bytes.at(strings+offset,remaining)+remaining,0);
+        require(end!=begin+remaining,"Unterminated YCD clip name");
+        std::string name(begin,end);
+        validate_name(name);
+        require(names.insert(name).second,"Duplicate YCD clip name");
+        AnimationClipInfo clip;
+        clip.name=std::move(name);
+        clip.tracks=static_cast<std::uint32_t>(bytes.integer(record+16,4));
+        clip.frames=static_cast<std::uint32_t>(bytes.integer(record+20,4));
+        clip.duration=bytes.real(record+24);
+        clip.sample_rate=bytes.real(record+28);
+        auto const looping=bytes.integer(record+32,4);
+        clip.loop=looping==1;
+        auto const start=bytes.integer(record+40,8);
+        auto const length=bytes.integer(record+48,8);
+        require(clip.tracks>0 && clip.tracks<=4096 &&
+                clip.frames>0 && clip.frames<=12000 &&
+                static_cast<std::uint64_t>(clip.frames)*clip.tracks<=1500000 &&
+                std::isfinite(clip.sample_rate) && clip.sample_rate>=1.f &&
+                clip.sample_rate<=240.f && std::isfinite(clip.duration) &&
+                looping<=1 &&
+                std::abs(clip.duration-
+                    ((clip.frames==1?1.f:(clip.frames-1.f))/
+                     clip.sample_rate))<.02f &&
+                start>=payload && start<=bytes.size() &&
+                length==static_cast<std::uint64_t>(clip.tracks)*
+                    (4ull+40ull*clip.frames) &&
+                length<=bytes.size()-start,
+                "Invalid YCD clip frame/track payload");
+        clips.push_back(std::move(clip));
+    }
+    return clips;
+}
 std::vector<DictionaryEntry> list_dictionary_entries(
     std::vector<std::uint8_t> const& source,std::string const& path) {
     using namespace detail;
     auto const ext=extension(path);
-    require(ext==".ytd" || ext==".ydd" || ext==".ydr" || ext==".ymat",
-            "Only NEF8 YTD/YDD/YMAT ListFiles are virtual dictionaries");
+    require(ext==".ytd" || ext==".ydd" || ext==".ydr" ||
+            ext==".ymat" || ext==".ymt" || ext==".ycd",
+            "Expected NEF8 YTD/YDD/YMAT/YMT/YCD dictionary");
     auto file=parse_list_file(source); // size, deflate and hash checks
     std::vector<DictionaryEntry> output;
     output.reserve(file.entries);
     std::set<std::string> unique;
-    if(ext==".ymat") {
+    if(ext==".ymt") {
+        auto skeleton=northstarcpp::load_skeleton_from_bytes(source);
+        require(!skeleton.joints.empty(),"Empty native YMT skeleton");
+        output.reserve(skeleton.joints.size());
+        for(auto const& joint:skeleton.joints) {
+            validate_name(joint.name);
+            require(unique.insert(joint.name).second,"Duplicate YMT joint");
+            output.push_back({joint.name,0});
+        }
+        return output; // YMT has one skeleton record, multiple joints.
+    } else if(ext==".ycd") {
+        auto clips=inspect_animation_clip_dictionary(source);
+        require(clips.size()==file.entries,"YCD clip count mismatch");
+        for(auto const& clip:clips)
+            output.push_back({clip.name,0});
+        return output;
+    } else if(ext==".ymat") {
         auto materials=detail::parse_materials(file,path);
         require(materials.size()==file.entries,"YMAT ListFile entry count mismatch");
         for(auto const& material:materials) {

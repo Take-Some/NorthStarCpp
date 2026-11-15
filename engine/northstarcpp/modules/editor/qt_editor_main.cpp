@@ -1,7 +1,18 @@
 #include "qt_editor_window.hpp"
+#include "qt_native_ui_preview.hpp"
 #include "../shared/startup_report.hpp"
 #include <northstarcpp/logger.hpp>
 #include "qt_editor_viewport.hpp"
+#include "qt_content_browser.hpp"
+#include <QDockWidget>
+#include <QTreeWidget>
+#include <QLabel>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QPushButton>
+#include <QGroupBox>
+#include <QAction>
+#include <QToolButton>
 #include "qt_camera_studio.hpp"
 #include <northstarcpp/camera.hpp>
 #include "qt_material_gpu_preview.hpp"
@@ -41,6 +52,7 @@
 #include <stdexcept>
 #include <QTimer>
 #include <iostream>
+#include <sstream>
 #include <cstdlib>
 #include <memory>
 int run_material_function_smoke();
@@ -58,6 +70,8 @@ static int run_editor(int argc,char** argv,
     parser.addHelpOption();
     QCommandLineOption scene({"s","scene"},"Scene file to open (.nscn/.nscene).","file");
     QCommandLineOption smoke("smoke","Run dock/scene/binary/asset-drop smoke.");
+    QCommandLineOption nativeUiSmoke("native-ui-smoke",
+        "Open engine.ui.native preview, render RGBA and dispatch a mouse click.");
     QCommandLineOption gpuSmoke("gpu-smoke",
         "Render one real engine.render GPU frame inside Qt native viewport.");
     QCommandLineOption mouseLookSmoke("mouse-look-smoke",
@@ -74,10 +88,21 @@ static int run_editor(int argc,char** argv,
         "Run Material Function typed GUI/VFS/GPU preview end-to-end regression.");
     QCommandLineOption cameraStudioSmoke("camera-studio-smoke",
         "Verify Camera Studio project VFS presets, UI preview and atomic saving.");
+    QCommandLineOption contentDockSmoke("content-dock-smoke",
+        "Verify the project-bound ContentBrowser embedded in the Qt Editor dock.");
+    QCommandLineOption inspectorLayoutSmoke("inspector-layout-smoke",
+        "Verify Details dock scrolls and never overlaps Content Browser at small sizes.");
+    QCommandLineOption embeddedGameSmoke("embedded-game-smoke",
+        "Test native Player HWND embedding, Escape IPC and Editor workspace restoration.");
+    QCommandLineOption embeddedRenderSmoke("embedded-render-smoke",
+        "Run a real WARP Player scene in the full Editor overlay and Escape back.");
+    QCommandLineOption focusContentBrowser("focus-content-browser",
+        "Show and focus the project Content Browser dock in Qt Editor.");
     QCommandLineOption playerCheck("player-check",
         "Verify installed Player can load a scene authored by this editor.");
     parser.addOption(scene);
     parser.addOption(smoke);
+    parser.addOption(nativeUiSmoke);
     parser.addOption(gpuSmoke);
     parser.addOption(mouseLookSmoke);
     parser.addOption(smokeOutput);
@@ -85,6 +110,11 @@ static int run_editor(int argc,char** argv,
     parser.addOption(materialGraphSmoke);
     parser.addOption(functionSmoke);
     parser.addOption(cameraStudioSmoke);
+    parser.addOption(contentDockSmoke);
+    parser.addOption(inspectorLayoutSmoke);
+    parser.addOption(embeddedGameSmoke);
+    parser.addOption(embeddedRenderSmoke);
+    parser.addOption(focusContentBrowser);
     parser.addOption(materialInstanceSmoke);
     parser.addOption(materialPreviewGpuSmoke);
     startup.measure("qt.arguments", [&] {parser.process(*app);});
@@ -104,6 +134,8 @@ static int run_editor(int argc,char** argv,
         }
     }
     startup.measure("qt.window_show", [&] {window->show();});
+    if(parser.isSet(focusContentBrowser))
+        window->showContentBrowser();
     if(parser.isSet(mouseLookSmoke)) {
         bool passed=false;
         try {
@@ -258,6 +290,240 @@ static int run_editor(int argc,char** argv,
     }
     if(parser.isSet(functionSmoke))
         return run_material_function_smoke();
+    if(parser.isSet(embeddedRenderSmoke)) {
+        QTemporaryDir temporary;
+        bool success=false;
+        if(temporary.isValid()) {
+            auto const content=temporary.path()+"/assets";
+            if(QDir().mkpath(content)) {
+                auto const name=temporary.path()+"/embedded-scene.nscn";
+                try {
+                    northstarcpp::save_scene(northstarcpp::make_startup_scene(),
+                        std::filesystem::u8path(name.toUtf8().toStdString()));
+                    auto const player=window->playerExecutable();
+                    success=!player.isEmpty() &&
+                        window->runEmbeddedRenderSmoke(player,name);
+                }catch(std::exception const& e) {
+                    std::cerr<<"Player scene fixture: "<<e.what()<<std::endl;
+                }
+            }
+        }
+        std::cout<<"Qt Play In Editor real WARP renderer/Escape: "
+                 <<(success?"PASS":"FAIL")<<std::endl;
+        return success?0:17;
+    }
+    if(parser.isSet(embeddedGameSmoke)) {
+        auto const player=window->playerExecutable();
+        bool const success=!player.isEmpty() &&
+            window->runEmbeddedPlaySmoke(player);
+        std::cout<<"Qt Play In Editor fullscreen/IPC/Escape: "
+                 <<(success?"PASS":"FAIL")<<std::endl;
+        return success?0:16;
+    }
+    if(parser.isSet(inspectorLayoutSmoke)) {
+        bool passed=false;
+        QString error;
+        auto* inspector=window->findChild<QDockWidget*>("inspectorDock");
+        auto* content=window->findChild<QDockWidget*>("contentDock");
+        auto* scroll=window->findChild<QScrollArea*>("inspectorScrollArea");
+        auto* form=window->findChild<QWidget*>("inspectorFormContent");
+        auto* apply=window->findChild<QPushButton*>("applyObjectProperties");
+        auto* components=window->findChild<QTreeWidget*>("sceneComponentsTree");
+        auto* help=window->findChild<QLabel*>("inspectorHelpText");
+        try {
+            if(!inspector || !content || !scroll || !form || !apply ||
+               !components || !help || inspector->widget()!=scroll ||
+               scroll->widget()!=form)
+                throw std::runtime_error("Inspector scroll widget hierarchy incomplete");
+            if(inspector->features().testFlag(QDockWidget::DockWidgetFloatable))
+                throw std::runtime_error("Inspector can float above another panel");
+            if(inspector->minimumHeight()>80 || scroll->minimumHeight()>80)
+                throw std::runtime_error("Inspector dock still enforces large minimum height");
+            // Keep both panels visible. Check real Qt layout at a normal
+            // desktop size and at a constrained laptop-height window.
+            for(auto const size:{QSize(1150,720),QSize(900,460)}) {
+                window->resize(size);
+                content->show();
+                inspector->show();
+                content->raise();
+                inspector->raise();
+                QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+                auto const rectFor=[](QWidget* widget) {
+                    return QRect(widget->mapToGlobal(QPoint(0,0)),widget->size());
+                };
+                QRect const detailsRect=rectFor(inspector);
+                QRect const contentRect=rectFor(content);
+                if(inspector->isFloating() || !inspector->isVisible() ||
+                   !content->isVisible() ||
+                   detailsRect.intersects(contentRect))
+                    throw std::runtime_error(
+                        "Inspector overlaps another dock instead of respecting Qt splitters");
+                if(scroll->viewport()->height()<=0 || scroll->height()<=0)
+                    throw std::runtime_error("Scrollable Inspector viewport collapsed");
+                if(scroll->verticalScrollBar()->maximum()<=0)
+                    throw std::runtime_error("Constrained Details panel has no vertical scrolling");
+                scroll->ensureWidgetVisible(help,0,8);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+                auto const hintTop=help->mapTo(scroll->viewport(),QPoint(0,0)).y();
+                if(hintTop>=scroll->viewport()->height() ||
+                   hintTop+help->height()<=0)
+                    throw std::runtime_error("End-of-form help cannot be scrolled into view");
+                scroll->ensureWidgetVisible(apply,0,8);
+                QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+                if(!apply->isVisible() || !components->isVisible())
+                    throw std::runtime_error(
+                        "Actor property action or ECS component list became inaccessible");
+            }
+            passed=true;
+        }catch(std::exception const& e) {error=QString::fromUtf8(e.what());}
+        std::cout<<"Qt Inspector dock scrolling/no-overlap: "
+                 <<(passed?"PASS":"FAIL");
+        if(!error.isEmpty())std::cout<<" "<<error.toStdString();
+        std::cout<<std::endl;
+        return passed?0:18;
+    }
+    if(parser.isSet(contentDockSmoke)) {
+        QTemporaryDir sandbox;
+        bool ok=sandbox.isValid();
+        QString diagnostic;
+        try {
+            if(!ok)throw std::runtime_error("Cannot create editor dock smoke project");
+            auto const alpha=sandbox.path()+"/Alpha";
+            auto const beta=sandbox.path()+"/Beta";
+            for(auto const& name:{alpha,beta})
+                if(!QDir().mkpath(name+"/assets/scripts"))
+                    throw std::runtime_error("Cannot create project content folders");
+            auto writeScript=[](QString const& file) {
+                QFile stream(file);
+                if(!stream.open(QIODevice::WriteOnly) ||
+                   stream.write("// NorthStar script\\n")<0)
+                    throw std::runtime_error("Cannot write script fixture");
+            };
+            writeScript(alpha+"/assets/scripts/alpha.js");
+            writeScript(beta+"/assets/scripts/beta.js");
+            // Model two independent VFS roots. The project may switch,
+            // but shared engine assets remain visible without copying.
+            auto const shared=sandbox.path()+"/EngineShared";
+            if(!QDir().mkpath(shared+"/models/weapon"))
+                throw std::runtime_error("Cannot create shared engine fixture");
+            writeScript(shared+"/models/weapon/pistol.ydd");
+            auto const alphaScene=alpha+"/main.nscn";
+            auto const betaScene=beta+"/main.nscn";
+            northstarcpp::save_scene(northstarcpp::make_startup_scene(),
+                std::filesystem::u8path(alphaScene.toUtf8().toStdString()));
+            northstarcpp::save_scene(northstarcpp::make_startup_scene(),
+                std::filesystem::u8path(betaScene.toUtf8().toStdString()));
+            auto* browser=window->contentBrowser();
+            auto* dock=window->findChild<QDockWidget*>("contentDock");
+            auto* show=window->findChild<QAction*>("showContentBrowserAction");
+            auto* findActor=window->findChild<QAction*>(
+                "findSelectedActorAssetAction");
+            auto* chooser=browser?browser->findChild<QToolButton*>(
+                "contentRootChooser"):nullptr;
+            if(!browser || !dock || dock->widget()!=browser ||
+               browser->parentWidget()!=dock || !show || !findActor ||
+               !chooser || !browser->editorDockMode())
+                throw std::runtime_error("Engine ContentBrowser was not docked");
+            browser->setSharedContentRoot(shared);
+            auto* roots=browser->findChild<QTreeWidget*>("folderTree");
+            auto* addAsset=browser->findChild<QToolButton*>("browserAddAsset");
+            auto* importAsset=browser->findChild<QToolButton*>("browserImportAsset");
+            if(!roots || roots->topLevelItemCount()!=2 ||
+               roots->topLevelItem(0)->text(0)!="Project Assets" ||
+               roots->topLevelItem(1)->text(0)!="Engine Shared Assets" ||
+               !addAsset || !importAsset)
+                throw std::runtime_error(
+                    "Project and Engine asset roots are not independent tree entries");
+            if(dock->features().testFlag(QDockWidget::DockWidgetFloatable) ||
+               dock->allowedAreas().testFlag(Qt::TopDockWidgetArea) ||
+               !chooser->isHidden())
+                throw std::runtime_error(
+                    "Editor Content Browser can float or choose an external root");
+            show->trigger();
+            QCoreApplication::processEvents();
+            if(dock->isFloating() || !dock->isVisible() ||
+               window->dockWidgetArea(dock)==Qt::NoDockWidgetArea) {
+                std::ostringstream detail;
+                detail<<"Content Browser not visible within Editor docking layout"
+                      <<" floating="<<dock->isFloating()
+                      <<" visible="<<dock->isVisible()
+                      <<" hidden="<<dock->isHidden()
+                      <<" area="<<int(window->dockWidgetArea(dock))
+                      <<" editorVisible="<<window->isVisible()
+                      <<" dockGeometry="<<dock->geometry().width()
+                      <<"x"<<dock->geometry().height();
+                throw std::runtime_error(detail.str());
+            }
+            if(!window->openScene(alphaScene))
+                throw std::runtime_error("Could not open Alpha project scene");
+            auto const waitAsset=[&](QString const& target) {
+                QElapsedTimer elapsed;elapsed.start();
+                while(elapsed.elapsed()<9000) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,25);
+                    if(browser->recordCount()>0) {
+                        browser->revealAsset(target);
+                        QCoreApplication::processEvents();
+                        if(browser->selectedAsset()==target)
+                            return true;
+                    }
+                    QThread::msleep(10);
+                }
+                return false;
+            };
+            if(browser->contentRoot()!=QDir::cleanPath(
+                alpha+"/assets") || !waitAsset("scripts/alpha.js"))
+                throw std::runtime_error(
+                    "Alpha project content did not appear in Editor dock");
+            browser->selectAssetSource(true);
+            if(!browser->viewingSharedAssets() ||
+               browser->sharedContentRoot()!=QDir::cleanPath(shared) ||
+               !waitAsset("models/weapon/pistol.ydd"))
+                throw std::runtime_error(
+                    "Shared engine assets were not visible in the separate root");
+            if(addAsset->isEnabled() || importAsset->isEnabled())
+                throw std::runtime_error(
+                    "Shared engine assets unexpectedly allow project mutations");
+            browser->selectAssetSource(false);
+            if(!waitAsset("scripts/alpha.js") || browser->viewingSharedAssets())
+                throw std::runtime_error(
+                    "Project assets were not restored after browsing engine assets");
+            if(!window->openScene(betaScene))
+                throw std::runtime_error("Could not switch to Beta project scene");
+            if(browser->contentRoot()!=QDir::cleanPath(beta+"/assets") ||
+               browser->recordCount()!=0)
+                throw std::runtime_error(
+                    "Content Browser did not invalidate the previous project index");
+            // Activation happens before the background catalog finishes:
+            // defer reveal until the new engine catalog is ready.
+            window->showContentBrowser("scripts/beta.js");
+            if(!waitAsset("scripts/beta.js") ||
+               browser->selectedAsset()=="scripts/alpha.js")
+                throw std::runtime_error(
+                    "Content Browser showed a stale project or lost deferred reveal");
+            browser->setProjectScene({});
+            QCoreApplication::processEvents();
+            if(!browser->contentRoot().isEmpty() ||
+               browser->recordCount()!=0 || !browser->selectedAsset().isEmpty())
+                throw std::runtime_error(
+                    "Empty scene incorrectly indexed the process working directory");
+            browser->selectAssetSource(true);
+            if(!waitAsset("models/weapon/pistol.ydd"))
+                throw std::runtime_error(
+                    "Closing the project also incorrectly unmounted shared engine assets");
+            for(auto* top:QApplication::topLevelWidgets())
+                if(top->objectName()=="northstarAssetBrowserWindow")
+                    throw std::runtime_error(
+                        "Separate Content Browser window launched from Qt Editor");
+            ok=true;
+        } catch(std::exception const& e) {
+            ok=false;diagnostic=QString::fromUtf8(e.what());
+        }
+        std::cout<<"Qt Editor Content Browser dock/project index/asset reveal: "
+                 <<(ok?"PASS":"FAIL");
+        if(!diagnostic.isEmpty())std::cout<<" "<<diagnostic.toStdString();
+        std::cout<<std::endl;
+        return ok?0:15;
+    }
     if(parser.isSet(cameraStudioSmoke)) {
         QTemporaryDir project;
         bool ok=project.isValid();
@@ -567,6 +833,49 @@ static int run_editor(int argc,char** argv,
         std::cout<<"Qt Material Graph / isolated preview smoke: "
                  <<(ok?"PASS":"FAIL")<<std::endl;
         return ok?0:9;
+    }
+    if(parser.isSet(nativeUiSmoke)) {
+        bool ok=false;
+        try {
+            QAction* action=nullptr;
+            for(auto* entry:window->findChildren<QAction*>()) {
+                if(entry->text()=="Native UI Preview") {action=entry;break;}
+            }
+            if(!action)throw std::runtime_error("Native UI Preview action unavailable");
+            action->trigger();
+            QCoreApplication::processEvents();
+            auto* preview=dynamic_cast<northstarcpp::editor::NativeUIPreview*>(
+                window->findChild<QWidget*>("nativeUiPreview"));
+            if(!preview || !preview->isVisible())
+                throw std::runtime_error("Native UI Preview not visible");
+            auto result=preview->grab().toImage();
+            if(result.isNull())
+                throw std::runtime_error("UI raster widget returned empty image");
+            bool nonempty=false;
+            for(int y=0;y<result.height() && !nonempty;y+=4)
+                for(int x=0;x<result.width();x+=4)
+                    if(result.pixelColor(x,y)!=QColor(16,21,30)) {
+                        nonempty=true;break;
+                    }
+            if(!nonempty)throw std::runtime_error("No rendered UI pixels");
+            const QPoint local(24,80);
+            QMouseEvent down(QEvent::MouseButtonPress,QPointF(local),
+                QPointF(preview->mapToGlobal(local)),
+                Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QCoreApplication::sendEvent(preview,&down);
+            QMouseEvent up(QEvent::MouseButtonRelease,QPointF(local),
+                QPointF(preview->mapToGlobal(local)),
+                Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QCoreApplication::sendEvent(preview,&up);
+            QCoreApplication::processEvents();
+            if(preview->clickCount()!=1)
+                throw std::runtime_error("Pointer click was not dispatched through engine.ui");
+            ok=true;
+        } catch(std::exception const& e) {
+            std::cerr<<"Native UI smoke: "<<e.what()<<std::endl;
+        }
+        std::cout<<"Qt engine.ui.native preview: "<<(ok?"PASS":"FAIL")<<std::endl;
+        return ok?0:19;
     }
     if(parser.isSet(smokeOutput)) {
         if(!parser.isSet(smoke)) {

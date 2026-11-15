@@ -116,6 +116,93 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         pso.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
         pso.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS;
         pso.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        // Analytic grid is a fullscreen triangle using SV_VertexID.
+        // Its own root signature isolates pixel constants from world PSOs.
+        D3D12_ROOT_PARAMETER grid_params[3]{};
+        grid_params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
+        grid_params[0].Descriptor.ShaderRegister=0;
+        grid_params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        grid_params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
+        grid_params[1].Descriptor.ShaderRegister=1;
+        grid_params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_DESCRIPTOR_RANGE history_range{};
+        history_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        history_range.NumDescriptors=1;
+        history_range.BaseShaderRegister=0;
+        grid_params[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        grid_params[2].DescriptorTable.NumDescriptorRanges=1;
+        grid_params[2].DescriptorTable.pDescriptorRanges=&history_range;
+        grid_params[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC history_sampler{};
+        history_sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        history_sampler.AddressU=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        history_sampler.AddressV=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        history_sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        history_sampler.MaxLOD=D3D12_FLOAT32_MAX;
+        history_sampler.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;
+        history_sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC grid_root{};
+        grid_root.NumParameters=3;
+        grid_root.pParameters=grid_params;
+        grid_root.NumStaticSamplers=1;
+        grid_root.pStaticSamplers=&history_sampler;
+        grid_root.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        binary.Reset();error.Reset();
+        check(D3D12SerializeRootSignature(&grid_root,D3D_ROOT_SIGNATURE_VERSION_1,
+            &binary,&error),"Serialize analytic grid root");
+        check(device->CreateRootSignature(0,binary->GetBufferPointer(),
+            binary->GetBufferSize(),IID_PPV_ARGS(&grid_signature)),
+            "Create analytic grid root");
+        auto grid_vs=compile_editor_grid("grid_vs","vs_5_0");
+        auto grid_ps=compile_editor_grid("grid_composite_ps","ps_5_0");
+        auto grid_temporal_ps=compile_editor_grid("grid_temporal_ps","ps_5_0");
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC grid_pso=pso;
+        grid_pso.pRootSignature=grid_signature.Get();
+        grid_pso.VS={grid_vs->GetBufferPointer(),grid_vs->GetBufferSize()};
+        grid_pso.PS={grid_ps->GetBufferPointer(),grid_ps->GetBufferSize()};
+        grid_pso.InputLayout={nullptr,0};
+        grid_pso.DepthStencilState.DepthEnable=FALSE;
+        grid_pso.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+        auto& grid_blend=grid_pso.BlendState.RenderTarget[0];
+        grid_blend.BlendEnable=TRUE;
+        grid_blend.SrcBlend=D3D12_BLEND_SRC_ALPHA;
+        grid_blend.DestBlend=D3D12_BLEND_INV_SRC_ALPHA;
+        grid_blend.BlendOp=D3D12_BLEND_OP_ADD;
+        grid_blend.SrcBlendAlpha=D3D12_BLEND_ONE;
+        grid_blend.DestBlendAlpha=D3D12_BLEND_INV_SRC_ALPHA;
+        grid_blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
+        check(device->CreateGraphicsPipelineState(&grid_pso,
+            IID_PPV_ARGS(&grid_pipeline)),"Create analytic D3D12 grid PSO");
+        if(hdr_enabled) {
+            grid_pso.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            check(device->CreateGraphicsPipelineState(&grid_pso,
+                IID_PPV_ARGS(&grid_hdr_pipeline)),"Create HDR analytic grid PSO");
+        }
+        // History writes full RGBA coverage without blending. Composition
+        // alone blends against the scene; no scene color enters TAA memory.
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC temporal_pso=grid_pso;
+        temporal_pso.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
+        temporal_pso.PS={grid_temporal_ps->GetBufferPointer(),
+                         grid_temporal_ps->GetBufferSize()};
+        temporal_pso.BlendState.RenderTarget[0].BlendEnable=FALSE;
+        check(device->CreateGraphicsPipelineState(&temporal_pso,
+            IID_PPV_ARGS(&grid_temporal_pipeline)),
+            "Create grid-only temporal accumulation PSO");
+        D3D12_DESCRIPTOR_HEAP_DESC grid_heaps{};
+        grid_heaps.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        grid_heaps.NumDescriptors=2;
+        check(device->CreateDescriptorHeap(&grid_heaps,
+            IID_PPV_ARGS(&grid_history_rtvs)),
+            "Create grid history RTV heap");
+        grid_rtv_stride=device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        grid_heaps.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        grid_heaps.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        check(device->CreateDescriptorHeap(&grid_heaps,
+            IID_PPV_ARGS(&grid_history_srvs)),
+            "Create grid history SRV heap");
+        grid_srv_stride=device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(&triangles)),
             "Create D3D12 triangles PSO");
         auto gbuffer_ps=compile("ps_gbuffer");
@@ -550,6 +637,8 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         make_constant(sky_camera,&sky_camera_data);
         make_constant(sky_tint,&sky_tint_data);
         make_constant(hud_camera,&hud_camera_data);
+        make_constant(grid_constant_buffer,&grid_constant_data);
+        make_constant(grid_previous_buffer,&grid_previous_data);
         // Deferred CSM constants now occupy >256 bytes (3 light matrices).
         // Shadow VS uses a distinct 256-byte aligned CBV per cascade.
         auto make_large_constant=[&](ComPtr<ID3D12Resource>& buffer,

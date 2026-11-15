@@ -2,6 +2,10 @@
 // NorthStarCpp - native D3D12 provider, stable engine.render ABI 5.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_ui_api.h>
+#include <northstarcpp/render_editor_grid_api.h>
+#include "../shared/editor_grid_constants.hpp"
+#include "../shared/editor_grid_hlsl.hpp"
 #include <ui_quad.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_materials_api.h>
@@ -54,6 +58,7 @@ using northstarcpp::render::d3d12::geometry::cube;
 using Microsoft::WRL::ComPtr;
 using northstarcpp::shaders::authored_material_shader;
 using northstarcpp::render::d3d12::shader_compiler::compile;
+using northstarcpp::render::d3d12::shader_compiler::compile_editor_grid;
 using northstarcpp::render::d3d12::shader_compiler::compile_sky;
 using northstarcpp::render::d3d12::shader_compiler::compile_authored_material;
 using northstarcpp::render::d3d12::shader_compiler::compile_material_variant;
@@ -136,6 +141,19 @@ struct RendererState {
     ComPtr<ID3D12DescriptorHeap> rtvs,dsvs;
     ComPtr<ID3D12Resource> backs[buffer_count],depth,vertex_buffer,constant_buffer;
     ComPtr<ID3D12RootSignature> signature;
+    NorthStarRenderEditorGridSettings editor_grid{};
+    ComPtr<ID3D12RootSignature> grid_signature;
+    ComPtr<ID3D12PipelineState> grid_pipeline,grid_hdr_pipeline;
+    ComPtr<ID3D12PipelineState> grid_temporal_pipeline;
+    ComPtr<ID3D12Resource> grid_constant_buffer,grid_previous_buffer;
+    unsigned char* grid_constant_data=nullptr;
+    unsigned char* grid_previous_data=nullptr;
+    ComPtr<ID3D12DescriptorHeap> grid_history_rtvs,grid_history_srvs;
+    std::array<ComPtr<ID3D12Resource>,2> grid_history_textures;
+    northstarcpp::render::EditorGridConstants grid_previous_values{};
+    unsigned grid_history_index=0,grid_frame_index=0;
+    bool grid_history_valid=false;
+    UINT grid_rtv_stride=0,grid_srv_stride=0;
     ComPtr<ID3D12PipelineState> triangles,lines,gbuffer_triangles,hdr_lines;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     unsigned char* vertex_data=nullptr;
@@ -209,6 +227,16 @@ struct RendererState {
     ComPtr<ID3D12DescriptorHeap> sky_srv_heap;
     ComPtr<ID3D12Resource> sky_vertex,sky_index,sky_texture;
     ComPtr<ID3D12Resource> sky_camera,sky_tint,hud_camera;
+    // Optional engine.render UI overlay (RGBA8 upload -> post-tone-map pass).
+    std::vector<std::uint8_t> ui_cpu_rgba;
+    UINT ui_width=0,ui_height=0,ui_gpu_width=0,ui_gpu_height=0;
+    ComPtr<ID3D12Resource> ui_texture,ui_upload;
+    ComPtr<ID3D12DescriptorHeap> ui_srv_heap;
+    ComPtr<ID3D12RootSignature> ui_signature;
+    ComPtr<ID3D12PipelineState> ui_pso;
+    D3D12_RESOURCE_STATES ui_texture_state=D3D12_RESOURCE_STATE_COPY_DEST;
+    void set_ui_rgba(const std::uint8_t* pixels,UINT w,UINT h,UINT stride);
+    void record_ui_pass(FramePassContext& context);
     D3D12_VERTEX_BUFFER_VIEW sky_vertex_view{};
     D3D12_INDEX_BUFFER_VIEW sky_index_view{};
     unsigned char* sky_camera_data=nullptr;
@@ -243,6 +271,8 @@ struct RendererState {
     NorthStarRenderTimingStats timing_stats();
     NorthStarRenderMemoryStats memory_stats() const;
     void verify_readback(ID3D12Resource* pixels,UINT pitch,UINT mode);
+    void set_editor_grid(NorthStarRenderEditorGridSettings const* settings);
+    void draw_editor_grid(FramePassContext& context);
     void draw_translucent_materials();
     void draw(const NorthStarRenderFrame& frame);
     void apply_graph_resource_states(

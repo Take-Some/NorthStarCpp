@@ -42,6 +42,8 @@ struct SkeletalClip {
     std::vector<std::uint32_t> joints;
     std::vector<JointTransform> samples;
 };
+// Read-only inspection and runtime share the exact same YMT validator.
+Skeleton load_skeleton_from_bytes(std::vector<std::uint8_t> const& nef8);
 Skeleton load_skeleton(AssetStore const&, std::string const& path);
 std::vector<SkeletalClip> load_skeletal_clips(AssetStore const&, std::string const& path,
     std::vector<std::string> const& names, Skeleton const&);

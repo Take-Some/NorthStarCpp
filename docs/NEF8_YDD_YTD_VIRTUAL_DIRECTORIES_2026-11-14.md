@@ -109,10 +109,10 @@ release blockers or entire engine integration QA.
 NorthStarCpp Qt Content Browser embeds four original project PNG images as
 resource northstar_folder_icons, without requiring loose icons at runtime.
 
-- Physical directories: icons/folder.png
-- Virtual YTD ListFile directories: icons/texturesFolder.png
-- Virtual YDD ListFile directories: icons/modelsFolder.png
-- Virtual YMAT ListFile directories: icons/materialsFolder.png
+- Physical directories: icons/assetBrowser/folder.png
+- Virtual YTD ListFile directories: icons/assetBrowser/texturesFolder.png
+- Virtual YDD ListFile directories: icons/assetBrowser/modelsFolder.png
+- Virtual YMAT ListFile directories: icons/assetBrowser/materialsFolder.png
 
 The icon selection depends on AssetRecord.is_list_file and the container
 extension, not directory names. Tree, grid, and Asset Details agree.

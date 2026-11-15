@@ -24,7 +24,7 @@ BEGIN
             VALUE "InternalName", "shader_generator\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 Kayla's Systems - Kayla Verner\0"
             VALUE "OriginalFilename", "shader_generator.exe\0"
-            VALUE "ProductName", "NorthStar Engine\0"
+            VALUE "ProductName", "NorthStarCpp Engine\0"
             VALUE "ProductVersion", "@PROJECT_VERSION@.0\0"
             VALUE "Comments", "Native shader compilation and generation tool.\0"
         END

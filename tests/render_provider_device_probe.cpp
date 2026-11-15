@@ -7,6 +7,8 @@
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_materials_api.h>
 #include <northstarcpp/render_lights_api.h>
+#include <northstarcpp/render_skinning_api.h>
+#include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_timing_api.h>
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_device_api.h>
@@ -67,6 +69,9 @@ struct Results {
     bool identity=false,software=false;
     bool created=false,geometry=false,texture=false,graph=false,timing=false;
     bool textures_supported=false,graph_supported=false,timing_supported=false;
+    bool lights_supported=false,light_gpu_verified=false;
+    bool skin_supported=false,skin_gpu_verified=false;
+    bool surfaces_supported=false,surfaces_gpu_verified=false;
     bool full=false;
     double gpu_ms=0;
     std::uint64_t advertised=0;
@@ -91,6 +96,12 @@ void print(Results const& data) {
         <<",\"texture_gpu_readback\":"<<b(data.texture)
         <<",\"graph_api_available\":"<<b(data.graph_supported)
         <<",\"graph_gpu_readback\":"<<b(data.graph)
+        <<",\"lights_api_available\":"<<b(data.lights_supported)
+        <<",\"light_gpu_readback\":"<<b(data.light_gpu_verified)
+        <<",\"skin_api_available\":"<<b(data.skin_supported)
+        <<",\"skin_gpu_readback\":"<<b(data.skin_gpu_verified)
+        <<",\"surfaces_api_available\":"<<b(data.surfaces_supported)
+        <<",\"surfaces_gpu_readback\":"<<b(data.surfaces_gpu_verified)
         <<",\"timing_api_available\":"<<b(data.timing_supported)
         <<",\"gpu_timestamp_valid\":"<<b(data.timing)
         <<",\"gpu_frame_ms\":"<<data.gpu_ms
@@ -163,11 +174,23 @@ int main(int argc,char** argv) {
             NORTHSTARCPP_RENDER_MATERIALS_V2_ABI);
         auto const* timing_api=extension<NorthStarRenderTimingApi>(query,
             NORTHSTARCPP_RENDER_TIMING_MODULE_ABI,NORTHSTARCPP_RENDER_TIMING_ABI);
+        auto const* lights_api=extension<NorthStarRenderLightsApi>(query,
+            NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI,NORTHSTARCPP_RENDER_LIGHTS_ABI);
+        auto const* skin_api=extension<NorthStarRenderSkinnedMaterialsApi>(query,
+            NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI,
+            NORTHSTARCPP_RENDER_SKINNED_MATERIALS_ABI);
+        auto const* surface_api=extension<NorthStarRenderSurfacesApi>(query,
+            NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI,
+            NORTHSTARCPP_RENDER_SURFACES_ABI);
         auto const* device_api=extension<NorthStarRenderDeviceApi>(query,
             NORTHSTARCPP_RENDER_DEVICE_MODULE_ABI,NORTHSTARCPP_RENDER_DEVICE_ABI);
         result.textures_supported=materials&&materials->set_batches;
         result.graph_supported=graph_api&&graph_api->set_batches_v2;
         result.timing_supported=timing_api&&timing_api->read;
+        result.lights_supported=lights_api&&lights_api->set_lights;
+        result.skin_supported=skin_api&&skin_api->set_batches;
+        result.surfaces_supported=surface_api&&surface_api->set_texture&&
+                                  surface_api->set_cube_surfaces;
         WNDCLASSW wc{};
         wc.lpfnWndProc=DefWindowProcW;
         wc.hInstance=instance;
@@ -271,6 +294,41 @@ int main(int argc,char** argv) {
                 "Textured GPU UV readback failed: ")+
                 (base->last_error()?base->last_error():"unknown"));
             result.texture=true;
+            if(result.lights_supported &&
+               (result.provider=="vulkan"||result.provider=="d3d11")) {
+                NorthStarRenderLight invalid{};
+                invalid.position_range[3]=-1.f;
+                if(lights_api->set_lights(renderer,&invalid,1))
+                    throw std::runtime_error(
+                        "Vulkan dynamic lights accepted invalid radius");
+                NorthStarRenderLight light{};
+                light.position_range[0]=0.f;
+                light.position_range[1]=0.f;
+                light.position_range[2]=0.f;
+                light.position_range[3]=16.f;
+                light.color_intensity[0]=1.f;
+                light.color_intensity[1]=1.f;
+                light.color_intensity[2]=1.f;
+                light.color_intensity[3]=28.f;
+                light.direction_cone[3]=-1.f; // Point light.
+                require(lights_api->set_lights(renderer,&light,1),
+                        "Vulkan light upload failed");
+                pixels.fill(255);
+                batch.unlit=0;
+                batch.roughness=1.f;batch.metallic=0.f;
+                require(materials->set_batches(renderer,&batch,1),
+                        "Vulkan PBR material for lighting failed");
+                pixels.fill(0);
+                frame.verify_pixels=5;
+                require(api->draw(renderer,&frame),
+                        std::string("Vulkan point light GPU readback failed: ")+
+                        (base->last_error()?base->last_error():"unknown"));
+                result.light_gpu_verified=true;
+                require(lights_api->set_lights(renderer,nullptr,0),
+                        "Vulkan dynamic lights cleanup failed");
+                // Restore the unlit material for subsequent graph checks.
+                batch.unlit=1;
+            }
 
             if(result.graph_supported) {
                 fill_texels();
@@ -300,8 +358,174 @@ int main(int argc,char** argv) {
                     std::this_thread::sleep_for(15ms);
                 }
                 require(graph_ready,"Material Graph GPU pipeline did not become ready");
+                if(result.provider=="vulkan") {
+                    // Confirm both new Vulkan PSO states, not just ABI presence.
+                    variant.blend_mode=1;
+                    variant.alpha_cutoff=.5f;
+                    fill_texels(); // Host-owned texture was intentionally freed/zeroed.
+                    require(graph_api->set_batches_v2(renderer,&variant,1),
+                        "Vulkan masked Material Graph variant rejected");
+                    pixels.fill(0);
+                    if(!api->draw(renderer,&frame))
+                        throw std::runtime_error(std::string(
+                            "Vulkan masked graph pixels incorrect: ")+
+                            (base->last_error()?base->last_error():"unknown"));
+                    variant.blend_mode=2;
+                    variant.opacity=.85f;
+                    fill_texels();
+                    require(graph_api->set_batches_v2(renderer,&variant,1),
+                        "Vulkan translucent Material Graph variant rejected");
+                    pixels.fill(0);
+                    if(!api->draw(renderer,&frame))
+                        throw std::runtime_error(std::string(
+                            "Vulkan translucent graph pixels incorrect: ")+
+                            (base->last_error()?base->last_error():"unknown"));
+                    variant.opacity=-.1f;
+                    require(!graph_api->set_batches_v2(renderer,&variant,1),
+                        "Vulkan accepted invalid Material Graph opacity");
+                    variant.opacity=1.f;
+                    static constexpr char unsafe_graph[]=
+                        "#define UNVALIDATED_USER_SHADER(p) (float4(0,1,0,1))\\n";
+                    variant.graph_hlsl_defines=unsafe_graph;
+                    variant.graph_hlsl_bytes=sizeof(unsafe_graph)-1;
+                    require(!graph_api->set_batches_v2(renderer,&variant,1),
+                        "Vulkan accepted shader directives outside graph whitelist");
+                }
                 result.graph=true;
             }
+            if(result.skin_supported &&
+               (result.provider=="vulkan"||result.provider=="d3d11")) {
+                // Original 8-weight ABI. Identity palette confirms no CPU
+                // expansion; GPU must execute the skinned vertex path.
+                std::array<NorthStarSkinMaterialVertex,6> skin_vertices{};
+                for(unsigned i=0;i<6;++i) {
+                    skin_vertices[i].x=quad[i].x;
+                    skin_vertices[i].y=quad[i].y;
+                    skin_vertices[i].z=quad[i].z;
+                    skin_vertices[i].nx=quad[i].nx;
+                    skin_vertices[i].ny=quad[i].ny;
+                    skin_vertices[i].nz=quad[i].nz;
+                    skin_vertices[i].u=quad[i].u;
+                    skin_vertices[i].v=quad[i].v;
+                    skin_vertices[i].joints[0]=0u;
+                    skin_vertices[i].weights[0]=1.f;
+                }
+                std::array<float,16> palette{};
+                palette[0]=palette[5]=palette[10]=palette[15]=1.f;
+                NorthStarSkinnedMaterialBatch skinned{};
+                fill_texels();
+                skinned.material.material=batch;
+                skinned.material.material.unlit=1u;
+                skinned.material.material.vertices=nullptr;
+                skinned.material.material.vertex_count=0;
+                skinned.material.blend_mode=0;
+                skinned.material.opacity=1.f;
+                skinned.material.alpha_cutoff=.5f;
+                skinned.vertices=skin_vertices.data();
+                skinned.vertex_count=6;
+                skinned.palette=palette.data();
+                skinned.joint_count=1;
+                require(materials->set_batches(renderer,nullptr,0),
+                    "Cannot clear static PBR before native GPU skin test");
+                require(skin_api->set_batches(renderer,&skinned,1),
+                    "Provider rejected original 8-weight GPU skin geometry");
+                pixels.fill(0);
+                frame.verify_pixels=2;
+                if(!api->draw(renderer,&frame))
+                    throw std::runtime_error(
+                        std::string("Native GPU skinned UV readback failed: ")+
+                        (base->last_error()?base->last_error():"unknown"));
+                // Verify palette actually moves geometry out of the
+                // frustum; a provider that merely draws original vertices
+                // cannot pass this GPU-side deformation check.
+                palette[12]=100.f;
+                require(skin_api->set_batches(renderer,&skinned,1),
+                    "GPU skin rejected translated bone palette");
+                frame.verify_pixels=6;
+                if(!api->draw(renderer,&frame))
+                    throw std::runtime_error(std::string(
+                        "Native GPU bone translation readback failed: ")+
+                        (base->last_error()?base->last_error():"unknown"));
+                skin_vertices[0].weights[0]=-1.f;
+                require(!skin_api->set_batches(renderer,&skinned,1),
+                    "GPU skin provider accepted invalid negative bone weight");
+                result.skin_gpu_verified=true;
+                require(skin_api->set_batches(renderer,nullptr,0),
+                        "Provider rejected native GPU skin clear");
+            }
+        }
+        if(result.full && result.provider=="vulkan" &&
+           result.surfaces_supported) {
+            // 9 genuine compressed GPU textures, no RGBA8 conversion.
+            // BC1 solid red/green/blue for sand/rock/forest and BC5
+            // neutral normals/roughness, 8x8 compressed block layout.
+            std::array<NorthStarSurfaceMip,1> mips{{{8u,8u,0u,0u}}};
+            std::array<std::uint8_t,32> bc1{};
+            std::array<std::uint8_t,64> bc5{};
+            for(unsigned slot=0;slot<9;++slot) {
+                const auto albedo=slot%3==0;
+                const auto bytes_per_block=albedo?8u:16u;
+                mips[0].bytes=4u*bytes_per_block;
+                const auto color=slot<3?0xf800u:slot<6?0x07e0u:0x001fu;
+                if(albedo) {
+                    for(unsigned block=0;block<4;++block) {
+                        bc1[block*8]=static_cast<std::uint8_t>(color&255u);
+                        bc1[block*8+1]=static_cast<std::uint8_t>(color>>8);
+                        bc1[block*8+2]=bc1[block*8];
+                        bc1[block*8+3]=bc1[block*8+1];
+                    }
+                }else for(unsigned block=0;block<4;++block) {
+                    bc5[block*16]=128u;bc5[block*16+1]=128u;
+                    bc5[block*16+8]=128u;bc5[block*16+9]=128u;
+                }
+                NorthStarSurfaceTexture surface{};
+                surface.slot=slot;surface.format_id=albedo?102:105;
+                surface.srgb=albedo?1u:0u;
+                surface.mip_count=1;
+                surface.mips=mips.data();
+                surface.data=albedo?bc1.data():bc5.data();
+                surface.data_bytes=mips[0].bytes;
+                if(!surface_api->set_texture(renderer,&surface))
+                    throw std::runtime_error(std::string(
+                        "Vulkan native BC surface upload failed: ")+
+                        (base->last_error()?base->last_error():"unknown"));
+            }
+            // The host may release/deallocate all compressed source data
+            // immediately after the set_texture() call. Only GPU-owned BC
+            // textures can still pass the pixel tests after this mutation.
+            bc1.fill(0);bc5.fill(0);
+            NorthStarSurfaceMip bad_mip{8u,8u,0u,1u};
+            NorthStarSurfaceTexture invalid_bc{};
+            invalid_bc.slot=0;
+            invalid_bc.format_id=102;invalid_bc.srgb=1;
+            invalid_bc.mip_count=1;invalid_bc.mips=&bad_mip;
+            invalid_bc.data=bc1.data();invalid_bc.data_bytes=32;
+            require(!surface_api->set_texture(renderer,&invalid_bc),
+                "Vulkan accepted a malformed BC1 mip payload");
+            // Force all existing static/skinned batches clear.
+            if(skin_api)require(skin_api->set_batches(renderer,nullptr,0),
+                "Failed to clear skinned geometry for World Surface GPU test");
+            if(materials)require(materials->set_batches(renderer,nullptr,0),
+                "Failed to clear authored geometry for World Surface GPU test");
+            NorthStarRenderCube world_cube{};
+            world_cube.z=7.f;
+            world_cube.size=4.f;
+            world_cube.rgb=0xffffffu;
+            world_cube.rotation[0]=world_cube.rotation[4]=world_cube.rotation[8]=1.f;
+            frame.cubes=&world_cube;
+            frame.count=1;
+            frame.verify_pixels=7;
+            for(std::uint32_t index=1;index<=3;++index) {
+                if(!surface_api->set_cube_surfaces(renderer,&index,1))
+                    throw std::runtime_error("Vulkan surface selector upload failed");
+                if(!api->draw(renderer,&frame))
+                    throw std::runtime_error(
+                        std::string("Vulkan BC1/BC5 GPU selector readback failed: ")+
+                        (base->last_error()?base->last_error():"unknown"));
+            }
+            result.surfaces_gpu_verified=true;
+            require(surface_api->set_cube_surfaces(renderer,nullptr,0),
+                "Vulkan world surface selectors clear failed");
         }
         close();
         print(result);return 0;

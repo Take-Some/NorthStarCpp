@@ -48,7 +48,7 @@ foreach(_required IN ITEMS
     "sdk/vendor/sources/blake3-1.8.7"
     "sdk/vendor/bcdec"
     "engine/northstarcpp/resources/icons/logoStar.ico"
-    "engine/northstarcpp/resources/icons/folder.png"
+    "engine/northstarcpp/resources/icons/assetBrowser/folder.png"
     "architecture/module_catalog.json"
     "tools/cmake/NorthStarPaths.cmake")
     if(NOT EXISTS "${ROOT}/${_required}")

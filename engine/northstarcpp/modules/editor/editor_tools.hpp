@@ -24,8 +24,11 @@ struct GizmoOptions {
 // Returns a normalized world-space axis. Translation can use an object's local
 // Euler frame; the authored rotation and scale controls remain axis-specific.
 Vector3 gizmo_axis(SceneObject const& object, GizmoAxis axis, bool local);
+// During a continuous Qt drag the caller can defer the full O(N) scene
+// validation until mouse release; per-coordinate clamping is retained.
 void apply_gizmo(Scene& scene, std::size_t index, GizmoMode mode,
-                 GizmoAxis axis, float amount, GizmoOptions const& options);
+                 GizmoAxis axis, float amount, GizmoOptions const& options,
+                 bool validate_entire_scene=true);
 
 // Edits are validated through the same scene API used by the game and exporter.
 // The ECS provider remains the source of truth between authoring transactions.

@@ -87,8 +87,10 @@ target_sources(northstarcpp_render_d3d11 PRIVATE
     modules/render/d3d11/renderer_sky.cpp
     modules/render/d3d11/renderer_characters.cpp
     modules/render/d3d11/renderer_materials.cpp
+    modules/render/d3d11/renderer_lights.cpp
     modules/render/d3d11/renderer_surfaces.cpp
     modules/render/d3d11/renderer_frame.cpp
+    modules/render/d3d11/renderer_editor_grid.cpp
 )
 target_link_libraries(northstarcpp_render_d3d11 PRIVATE northstarcpp_ui northstarcpp_math d3d11 dxgi d3dcompiler_47 dxguid)
 target_include_directories(northstarcpp_render_d3d11 PRIVATE "${northstarcpp_engine_sources}")
@@ -104,6 +106,7 @@ target_sources(northstarcpp_render_d3d12 PRIVATE
     modules/render/d3d12/renderer_scene.cpp
     modules/render/d3d12/renderer_diagnostics.cpp
     modules/render/d3d12/renderer_frame.cpp
+    modules/render/d3d12/renderer_editor_grid.cpp
     modules/render/d3d12/renderer_resource_states.cpp
     modules/render/d3d12/renderer_transient_alias.cpp
     modules/render/d3d12/renderer_texture_pool.cpp
@@ -113,6 +116,7 @@ target_sources(northstarcpp_render_d3d12 PRIVATE
     modules/render/d3d12/renderer_pass_deferred.cpp
     modules/render/d3d12/renderer_pass_postfx.cpp
     modules/render/d3d12/renderer_pass_present.cpp
+    modules/render/d3d12/renderer_ui.cpp
 )
 target_link_libraries(northstarcpp_render_d3d12 PRIVATE northstarcpp_ui northstarcpp_math d3d12 dxgi d3dcompiler_47 dxguid)
 target_include_directories(northstarcpp_render_d3d12 PRIVATE "${northstarcpp_engine_sources}")
@@ -127,10 +131,27 @@ if(WIN32)
             modules/render/vulkan/vulkan.cpp)
         target_sources(northstarcpp_render_vulkan PRIVATE
             modules/render/vulkan/renderer_device.cpp
-            modules/render/vulkan/renderer_frame.cpp)
+            modules/render/vulkan/renderer_frame.cpp
+            modules/render/vulkan/renderer_materials.cpp
+            modules/render/vulkan/renderer_skin.cpp
+            modules/render/vulkan/renderer_surfaces.cpp
+            modules/render/vulkan/renderer_ui.cpp
+            modules/render/vulkan/material_graph_glsl.cpp)
         target_compile_features(northstarcpp_render_vulkan PRIVATE cxx_std_17)
         target_compile_definitions(northstarcpp_render_vulkan PRIVATE VK_USE_PLATFORM_WIN32_KHR)
         target_link_libraries(northstarcpp_render_vulkan PRIVATE Vulkan::Vulkan)
+        # Shaderc is loaded lazily, and staged for isolated GPU QA builds.
+        get_filename_component(_northstar_vk_sdk_include_parent
+            "${Vulkan_INCLUDE_DIRS}" DIRECTORY)
+        set(_northstar_shaderc_runtime
+            "${_northstar_vk_sdk_include_parent}/Bin/shaderc_shared.dll")
+        if(EXISTS "${_northstar_shaderc_runtime}")
+            add_custom_command(TARGET northstarcpp_render_vulkan POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${_northstar_shaderc_runtime}"
+                    "$<TARGET_FILE_DIR:northstarcpp_render_vulkan>"
+                VERBATIM)
+        endif()
     else()
         message(STATUS "Vulkan SDK not found; skipping experimental Vulkan provider")
     endif()
@@ -171,6 +192,26 @@ if(BUILD_TESTING)
         set_tests_properties(northstarcpp_vulkan_validation_hardware PROPERTIES
             SKIP_RETURN_CODE 77 TIMEOUT 90)
     endif()
+    add_executable(northstarcpp_editor_grid_gpu_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_editor_grid_smoke.cpp")
+    target_include_directories(northstarcpp_editor_grid_gpu_smoke PRIVATE
+        "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
+    target_link_options(northstarcpp_editor_grid_gpu_smoke PRIVATE -static)
+    add_dependencies(northstarcpp_editor_grid_gpu_smoke
+        northstarcpp_render_d3d11 northstarcpp_render_d3d12)
+    foreach(backend d3d11 d3d12)
+        add_test(NAME northstarcpp_editor_grid_gpu_${backend}_warp
+            COMMAND "$<TARGET_FILE:northstarcpp_editor_grid_gpu_smoke>"
+                    "$<TARGET_FILE:northstarcpp_render_${backend}>")
+        set_tests_properties(northstarcpp_editor_grid_gpu_${backend}_warp
+            PROPERTIES TIMEOUT 60)
+        add_test(NAME northstarcpp_editor_grid_gpu_${backend}_hardware
+            COMMAND "$<TARGET_FILE:northstarcpp_editor_grid_gpu_smoke>"
+                    "$<TARGET_FILE:northstarcpp_render_${backend}>"
+                    --hardware)
+        set_tests_properties(northstarcpp_editor_grid_gpu_${backend}_hardware
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    endforeach()
     add_executable(northstarcpp_d3d11_material_smoke
         "${PROJECT_SOURCE_DIR}/tests/render_d3d11_material_smoke.cpp")
     target_include_directories(northstarcpp_d3d11_material_smoke PRIVATE
@@ -700,6 +741,8 @@ target_sources(northstarcpp_runtime PRIVATE
     modules/host/asset_zones.cpp
     modules/host/shared_asset_models.cpp
     modules/host/material_ymat_authoring.cpp
+    modules/host/material_ymat_xml.cpp
+    modules/host/material_graph_xml.cpp
     modules/host/shared_asset_textures.cpp
     modules/host/shared_assets.cpp
     modules/host/shared_asset_dictionary_index.cpp
@@ -722,6 +765,23 @@ target_include_directories(northstarcpp_runtime PRIVATE
     "${NORTHSTARCPP_VENDOR_ROOT}/bcdec"
     "${northstarcpp_engine_sources}")
 northstarcpp_builtin_module(northstarcpp_runtime perlin improved modules/perlin/improved/improved.cpp)
+northstarcpp_builtin_module(northstarcpp_runtime ui native modules/ui/native/native.cpp)
+# Native text shaping is optional for engine.ui. Keep its C ABI stable
+# if FreeType/HarfBuzz are absent; the embedded Latin font remains fallback.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(NORTHSTAR_UI_FT QUIET IMPORTED_TARGET freetype2)
+    pkg_check_modules(NORTHSTAR_UI_HB QUIET IMPORTED_TARGET harfbuzz)
+    if(TARGET PkgConfig::NORTHSTAR_UI_FT AND TARGET PkgConfig::NORTHSTAR_UI_HB)
+        target_compile_definitions(northstarcpp_runtime PRIVATE
+            NORTHSTARCPP_UI_HAS_FONT_SHAPING=1)
+        target_link_libraries(northstarcpp_runtime PUBLIC
+            PkgConfig::NORTHSTAR_UI_FT PkgConfig::NORTHSTAR_UI_HB)
+        message(STATUS "NorthStar native UI: FreeType/HarfBuzz enabled")
+    else()
+        message(STATUS "NorthStar native UI: embedded font fallback (no shaping dependencies)")
+    endif()
+endif()
 target_sources(northstarcpp_runtime PRIVATE
     modules/host/collision_service.cpp
     modules/collision/ray_triangle_core.cpp)
@@ -750,6 +810,17 @@ northstarcpp_builtin_module(northstarcpp_runtime time qpc modules/time/qpc/qpc.c
 target_sources(northstarcpp_runtime PRIVATE
     modules/time/frame_clock.cpp)
 northstarcpp_builtin_registry(northstarcpp_runtime)
+if(BUILD_TESTING)
+    add_executable(northstarcpp_ui_native_smoke
+        "${PROJECT_SOURCE_DIR}/tests/ui_native_smoke.cpp")
+    target_include_directories(northstarcpp_ui_native_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/host")
+    target_link_libraries(northstarcpp_ui_native_smoke PRIVATE northstarcpp_runtime)
+    target_link_options(northstarcpp_ui_native_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_ui_native
+        COMMAND "$<TARGET_FILE:northstarcpp_ui_native_smoke>")
+    set_tests_properties(northstarcpp_ui_native PROPERTIES TIMEOUT 20)
+endif()
 # Bootstrap JSON uses vendored header-only Boost.PropertyTree (no runtime DLL).
 target_include_directories(northstarcpp_runtime SYSTEM PRIVATE "${NORTHSTARCPP_VENDOR_INCLUDE_DIR}")
 target_link_libraries(northstarcpp_runtime PUBLIC northstarcpp_math
@@ -1278,7 +1349,8 @@ endif()
 
 # Platform-neutral virtual asset index shared by desktop editor frontends.
 add_library(northstarcpp_asset_catalog STATIC
-    modules/editor/asset_catalog.cpp)
+    modules/editor/asset_catalog.cpp
+    modules/editor/asset_catalog_nef8_cache.cpp)
 target_include_directories(northstarcpp_asset_catalog PUBLIC
     "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
 target_compile_features(northstarcpp_asset_catalog PUBLIC cxx_std_17)
@@ -1290,7 +1362,11 @@ add_library(northstarcpp_content_browser_qt STATIC
     modules/editor/qt_asset_card_delegate.hpp
     modules/editor/qt_asset_card_delegate.cpp
     modules/editor/qt_content_browser.hpp
+    modules/editor/qt_content_browser_internal.hpp
     modules/editor/qt_content_browser.cpp
+    modules/editor/qt_content_browser_actions.cpp
+    modules/editor/qt_content_browser_thumbnails.hpp
+    modules/editor/qt_content_browser_thumbnails.cpp
     modules/editor/qt_asset_preview_dialog.hpp
     modules/editor/qt_asset_preview_dialog.cpp
     modules/editor/qt_material_authoring.cpp
@@ -1331,16 +1407,24 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 35)
 endif()
 
-# Embed all four project folder icons into both standalone Asset Browser and
-# the integrated Editor dock. Installed builds do not need loose artwork.
+# Bundle all Asset Browser PNGs (folder and file art), in the dedicated
+# assetBrowser directory, for both standalone QA and editor dock.
+# Qt resource URLs mirror the physical assetBrowser hierarchy.
 qt_add_resources(northstarcpp_content_browser_qt northstar_folder_icons
     PREFIX "/northstar/icons"
     BASE "${NORTHSTARCPP_ENGINE_ICONS_DIR}"
     FILES
-        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/folder.png"
-        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/texturesFolder.png"
-        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/modelsFolder.png"
-        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/materialsFolder.png")
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/folder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/texturesFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/modelsFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/materialsFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/skeletalFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/animFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/skelFile.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/animFile.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/soundsFolder.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/materialFunc.png"
+        "${NORTHSTARCPP_ENGINE_ICONS_DIR}/assetBrowser/otherFile.png")
 
 target_include_directories(northstarcpp_content_browser_qt PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
@@ -1348,6 +1432,11 @@ target_link_libraries(northstarcpp_content_browser_qt PUBLIC
     Qt6::Widgets Qt6::Concurrent northstarcpp_asset_catalog
     PRIVATE northstarcpp_editor_tools)
 target_compile_features(northstarcpp_content_browser_qt PUBLIC cxx_std_17)
+add_executable(northstarcpp_ymat_xml_migrate
+    "${PROJECT_SOURCE_DIR}/tools/ymat_xml_migrate.cpp")
+target_link_libraries(northstarcpp_ymat_xml_migrate PRIVATE northstarcpp_runtime)
+target_compile_features(northstarcpp_ymat_xml_migrate PRIVATE cxx_std_17)
+
 if(BUILD_TESTING)
     add_executable(northstarcpp_qt_material_library_edit_smoke
         "${PROJECT_SOURCE_DIR}/tests/qt_material_library_edit_smoke.cpp")
@@ -1441,6 +1530,15 @@ if(BUILD_TESTING)
         COMMAND "$<TARGET_FILE:northstarcpp_asset_catalog_smoke>"
             "${PROJECT_BINARY_DIR}/asset_catalog_smoke"
             "${PROJECT_SOURCE_DIR}/sharedAssets")
+    add_executable(northstarcpp_asset_catalog_index_smoke
+        "${PROJECT_SOURCE_DIR}/tests/asset_catalog_index_smoke.cpp")
+    target_link_libraries(northstarcpp_asset_catalog_index_smoke PRIVATE
+        northstarcpp_asset_catalog)
+    add_test(NAME northstarcpp_asset_catalog_index
+        COMMAND "$<TARGET_FILE:northstarcpp_asset_catalog_index_smoke>"
+            "${PROJECT_BINARY_DIR}/asset_catalog_index_smoke")
+    set_tests_properties(northstarcpp_asset_catalog_index
+        PROPERTIES TIMEOUT 45)
     add_executable(northstarcpp_prefab_browser_smoke
         "${PROJECT_SOURCE_DIR}/tests/prefab_browser_smoke.cpp")
     target_include_directories(northstarcpp_prefab_browser_smoke PRIVATE
@@ -1472,6 +1570,17 @@ if(BUILD_TESTING)
             --content "${PROJECT_SOURCE_DIR}/sharedAssets")
     set_tests_properties(northstarcpp_asset_cards_qt
         PROPERTIES TIMEOUT 65 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_embedded_ycd_ymt_icons_qt
+        COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>"
+            --embedded-icons-smoke
+            --content "${PROJECT_SOURCE_DIR}/sharedAssets")
+    set_tests_properties(northstarcpp_embedded_ycd_ymt_icons_qt PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_asset_category_icons_qt
+        COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>"
+            --category-icons-smoke)
+    set_tests_properties(northstarcpp_asset_category_icons_qt
+        PROPERTIES TIMEOUT 35 RUN_SERIAL TRUE)
     add_test(NAME northstarcpp_folder_icons_qt
         COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>"
             --folder-icons-smoke
@@ -1499,11 +1608,71 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+# Camera-following XZ grid geometry is independent of Qt and the GPU
+# backend. Validate long-distance authoring and adaptive density separately.
+if(BUILD_TESTING)
+    add_executable(northstarcpp_editor_grid_smoke
+        "${PROJECT_SOURCE_DIR}/tests/editor_grid_smoke.cpp")
+    target_include_directories(northstarcpp_editor_grid_smoke PRIVATE
+        "${PROJECT_SOURCE_DIR}/engine/northstarcpp/modules/api/include")
+    target_link_libraries(northstarcpp_editor_grid_smoke PRIVATE
+        northstarcpp_math)
+    add_test(NAME northstarcpp_editor_grid
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_grid_smoke>")
+endif()
+
+# Viewport gizmo QA: QPainter raster + genuine Qt pointer events against the
+# same first-class Gizmo geometry used by the native GPU overlay.
+if(BUILD_TESTING)
+    add_executable(northstarcpp_qt_editor_gizmo_smoke
+        "${PROJECT_SOURCE_DIR}/tests/qt_editor_gizmo_smoke.cpp"
+        modules/editor/qt_editor_viewport.hpp
+        modules/editor/qt_editor_viewport.cpp
+        modules/editor/qt_editor_gizmo.cpp)
+    set_target_properties(northstarcpp_qt_editor_gizmo_smoke PROPERTIES AUTOMOC ON)
+    target_include_directories(northstarcpp_qt_editor_gizmo_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
+    target_link_libraries(northstarcpp_qt_editor_gizmo_smoke PRIVATE
+        Qt6::Widgets northstarcpp_editor_tools northstarcpp_runtime)
+    if(WIN32)
+        target_link_libraries(northstarcpp_qt_editor_gizmo_smoke PRIVATE
+            northstarcpp_viewport)
+    endif()
+    add_test(NAME northstarcpp_qt_editor_gizmo
+        COMMAND "$<TARGET_FILE:northstarcpp_qt_editor_gizmo_smoke>")
+    if(WIN32)
+        set_tests_properties(northstarcpp_qt_editor_gizmo PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 50)
+    else()
+        set_tests_properties(northstarcpp_qt_editor_gizmo PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 50)
+    endif()
+endif()
+
+# Layout-only QA uses the exact scroll wrapper installed by Qt Editor,
+# without rebuilding Bullet/Jolt, GPU providers or runtime DLLs.
+if(BUILD_TESTING)
+    add_executable(northstarcpp_inspector_scroll_smoke
+        "${PROJECT_SOURCE_DIR}/tests/qt_inspector_scroll_smoke.cpp"
+        modules/editor/qt_inspector_scroll.cpp)
+    target_include_directories(northstarcpp_inspector_scroll_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
+    target_link_libraries(northstarcpp_inspector_scroll_smoke PRIVATE Qt6::Widgets)
+    add_test(NAME northstarcpp_inspector_scroll_components
+        COMMAND "$<TARGET_FILE:northstarcpp_inspector_scroll_smoke>")
+    set_tests_properties(northstarcpp_inspector_scroll_components PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+endif()
+
 # Dockable cross-platform Qt editor shell. The CPU scene proxy viewport is
 # a deliberate fallback until the active GPU backend exposes a Qt render target.
 add_executable(northstarcpp_editor_qt WIN32
     modules/editor/qt_editor_main.cpp
     modules/editor/qt_editor_window.hpp
+    modules/editor/qt_play_surface.hpp
+    modules/editor/qt_play_surface.cpp
+    modules/editor/qt_inspector_scroll.hpp
+    modules/editor/qt_inspector_scroll.cpp
     modules/editor/qt_camera_studio.cpp
     modules/editor/qt_editor_window.cpp
     modules/editor/qt_material_authoring.hpp
@@ -1513,7 +1682,9 @@ add_executable(northstarcpp_editor_qt WIN32
     modules/editor/qt_material_gpu_preview.hpp
     modules/editor/qt_material_gpu_preview.cpp
     modules/editor/qt_editor_viewport.hpp
-    modules/editor/qt_editor_viewport.cpp)
+    modules/editor/qt_editor_viewport.cpp
+    modules/editor/qt_editor_gizmo.hpp
+    modules/editor/qt_editor_gizmo.cpp)
 set_target_properties(northstarcpp_editor_qt PROPERTIES
     AUTOMOC ON RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
 target_include_directories(northstarcpp_editor_qt PRIVATE
@@ -1554,6 +1725,10 @@ if(BUILD_TESTING)
         set_tests_properties(northstarcpp_qt_editor_mouse_look PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 40)
     endif()
+    add_test(NAME northstarcpp_qt_editor_native_ui
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --native-ui-smoke)
+    set_tests_properties(northstarcpp_qt_editor_native_ui PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 40)
     add_test(NAME northstarcpp_qt_editor_authoring
         COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --smoke)
     if(WIN32)
@@ -1561,8 +1736,6 @@ if(BUILD_TESTING)
             COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --gpu-smoke)
         set_tests_properties(northstarcpp_qt_editor_gpu_surface PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 60)
-    endif()
-    if(WIN32)
         set_tests_properties(northstarcpp_qt_editor_authoring PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 40)
     else()
@@ -1766,6 +1939,23 @@ if(BUILD_TESTING)
     add_test(NAME northstarcpp_scene_world_v3
         COMMAND northstarcpp_scene_world_smoke
             "${PROJECT_BINARY_DIR}/scene_world_v3_smoke")
+    add_dependencies(northstarcpp_editor_qt northstarcpp_player)
+    add_test(NAME northstarcpp_play_in_editor_render_qt
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --embedded-render-smoke)
+    set_tests_properties(northstarcpp_play_in_editor_render_qt
+        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_play_in_editor_qt
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --embedded-game-smoke)
+    set_tests_properties(northstarcpp_play_in_editor_qt
+        PROPERTIES TIMEOUT 35 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_inspector_layout_qt
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --inspector-layout-smoke)
+    set_tests_properties(northstarcpp_inspector_layout_qt
+        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_content_browser_dock_qt
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --content-dock-smoke)
+    set_tests_properties(northstarcpp_content_browser_dock_qt
+        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
     add_test(NAME northstarcpp_camera_studio_qt
         COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --camera-studio-smoke)
     set_tests_properties(northstarcpp_camera_studio_qt
@@ -1815,6 +2005,13 @@ if(BUILD_TESTING)
                 "$<TARGET_FILE:northstarcpp_provider_selection_smoke>"
                 engine.render !unavailable)
     endif()
+    add_executable(northstarcpp_render_feature_contract_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_feature_requirements_smoke.cpp")
+    target_include_directories(northstarcpp_render_feature_contract_smoke PRIVATE
+        "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
+    target_compile_features(northstarcpp_render_feature_contract_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_render_feature_contract
+        COMMAND "$<TARGET_FILE:northstarcpp_render_feature_contract_smoke>")
     add_executable(northstarcpp_project_catalog_smoke
         "${PROJECT_SOURCE_DIR}/tests/project_catalog_smoke.cpp")
     target_link_libraries(northstarcpp_project_catalog_smoke PRIVATE

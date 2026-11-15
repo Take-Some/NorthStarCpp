@@ -6,6 +6,7 @@
 #include "../shared/postfx_bloom_hlsl.hpp"
 #include "../shared/postfx_hdr_hlsl.hpp"
 #include "../shared/shadow_hlsl.hpp"
+#include "../shared/editor_grid_hlsl.hpp"
 #include <cstdio>
 #include <stdexcept>
 namespace northstarcpp::render::d3d12::shader_compiler {
@@ -55,6 +56,18 @@ GBufferOut ps_gbuffer(P p) {
     if(FAILED(hr)&&errors)
         throw std::runtime_error(static_cast<const char*>(errors->GetBufferPointer()));
     check(hr,"Compile D3D12 shader");return binary;
+}
+ComPtr<ID3DBlob> compile_editor_grid(char const* entry,char const* profile) {
+    auto const& source=northstarcpp::shaders::analytic_editor_grid_hlsl;
+    ComPtr<ID3DBlob> binary,errors;
+    auto const hr=D3DCompile(source,sizeof(source)-1,"NorthStar D3D12 grid",
+        nullptr,nullptr,entry,profile,D3DCOMPILE_ENABLE_STRICTNESS,0,
+        &binary,&errors);
+    if(FAILED(hr)&&errors)
+        throw std::runtime_error(
+            static_cast<const char*>(errors->GetBufferPointer()));
+    check(hr,"Compile D3D12 analytic editor grid");
+    return binary;
 }
 constexpr char sky_shader_code[] = R"(
 cbuffer Camera : register(b0) { row_major float4x4 view_projection; };

@@ -3,6 +3,7 @@
 // Updated: 2026
 
 #include <northstarcpp/project_catalog.hpp>
+#include <northstarcpp/render_feature_requirements.hpp>
 #include <northstarcpp/scene.hpp>
 
 #ifndef NOMINMAX
@@ -465,6 +466,17 @@ Project Catalog::inspect(fs::path const& path) const
                 project.provider_choices.emplace(id,value);
             }
         }
+        if(auto requirements=data.get_child_optional("required_renderer_features")) {
+            if(requirements->size()>northstarcpp::render::feature_requirements.size())
+                throw std::runtime_error("Too many renderer requirements");
+            for(auto const& entry:*requirements) {
+                if(!entry.first.empty()||!entry.second.empty())
+                    throw std::runtime_error("Invalid renderer requirements JSON");
+                project.required_renderer_features.push_back(entry.second.data());
+            }
+            northstarcpp::render::validate_feature_requirements(
+                project.required_renderer_features);
+        }
         auto scene_name = data.get<std::string>("startup_scene", startup_name);
         if (!safe_scene(scene_name))
             throw std::runtime_error("Unsafe startup scene path");
@@ -743,6 +755,30 @@ void Catalog::set_provider(fs::path const& path,
     if(providers.empty())data.erase("providers");
     else data.put_child("providers",providers);
     save_json(manifest,data); // existing atomic_write with rollback on failure
+}
+
+void Catalog::set_renderer_requirements(
+    fs::path const& path,std::vector<std::string> const& requirements)
+{
+    northstarcpp::render::validate_feature_requirements(requirements);
+    auto project=inspect(path);
+    if(project.status!=Project::Status::ready)
+        throw std::runtime_error("Cannot change requirements of an invalid project");
+    auto manifest=project.directory/manifest_name;
+    if(redirected(manifest))
+        throw std::runtime_error("Refusing redirected project manifest");
+    auto data=read_json(manifest);
+    data.erase("required_renderer_features");
+    if(!requirements.empty()) {
+        pt::ptree entries;
+        for(auto const& id:requirements) {
+            pt::ptree entry;
+            entry.put_value(id);
+            entries.push_back({"",std::move(entry)});
+        }
+        data.put_child("required_renderer_features",entries);
+    }
+    save_json(manifest,data);
 }
 
 void Catalog::forget(fs::path const& path)

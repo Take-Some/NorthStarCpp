@@ -47,21 +47,21 @@ bool valid_utf8(std::string const& text)
 }
 
 template<class Asset>
-Asset const* find(std::map<std::string, std::vector<Asset>> const& cache, std::string const& reference)
+Asset* find(std::map<std::string, std::vector<Asset>>& cache, std::string const& reference)
 {
     auto const at = reference.find('@');
     auto const dictionary = cache.find(reference.substr(0, at));
     if (dictionary == cache.end())
         return nullptr;
     auto const name = reference.substr(at + 1);
-    auto const& list = dictionary->second;
+    auto& list = dictionary->second;
     auto const selected = std::find_if(list.begin(), list.end(),
         [&](Asset const& asset) { return asset.name == name; });
     return selected == list.end() ? nullptr : &*selected;
 }
 
 template<class Asset, class Loader>
-Asset const* resolve(AssetStore const& assets, std::map<std::string, std::vector<Asset>>& cache,
+Asset* resolve(AssetStore const& assets, std::map<std::string, std::vector<Asset>>& cache,
                      std::string const& reference, Loader loader)
 {
     detail::validate_reference(reference);
@@ -262,14 +262,20 @@ shared_assets::DrawableResources AssetStore::load_drawable_resources(std::string
         if (!material)
             throw std::runtime_error("Material entry not found: " + mesh.material);
         included_materials.insert(mesh.material);
-        result.materials.push_back({mesh.material, *material});
-        for (auto const& binding : material->textures) {
+        // The temporary dictionary cache is local to this resolution.
+        // Move the selected material instead of deep-copying its graph,
+        // parameters and texture bindings into the final asset graph.
+        result.materials.push_back({mesh.material, std::move(*material)});
+        for (auto const& binding : result.materials.back().asset.textures) {
             if (!included_textures.insert(binding.reference).second)
                 continue;
             auto const* texture = resolve(*this, textures, binding.reference, load_textures);
             if (!texture)
                 throw std::runtime_error("Texture entry not found: " + binding.reference);
-            result.textures.push_back({binding.reference, *texture});
+            // Native compressed BCn payloads can be many MiB. Each
+            // reference is included once; transfer its buffer ownership
+            // rather than copying those bytes a second time.
+            result.textures.push_back({binding.reference, std::move(*texture)});
         }
     }
     return result;

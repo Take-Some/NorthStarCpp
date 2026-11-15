@@ -5,10 +5,11 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace northstarcpp::editor {
 enum class AssetKind {
-    folder, mesh, material, texture, audio, scene, script, animation, shader, other, prefab, character, material_function
+    folder, mesh, material, texture, audio, scene, script, animation, shader, other, prefab, character, material_function, skeleton
 };
 struct AssetRecord {
     std::string virtual_path;  // UTF-8, '/' separated, root-relative
@@ -16,6 +17,9 @@ struct AssetRecord {
     AssetKind kind{AssetKind::other};
     bool directory=false;
     std::uintmax_t size=0;
+    // Computed once from the decoded NEF8 list, never rescanned in Qt
+    // subtitle/details rendering. Zero on ordinary files/directories.
+    std::size_t virtual_child_count=0;
     // Parsed on the catalog's background indexing worker. Invalid prefab
     // files stay visible but never masquerade as a valid scene template.
     std::size_t prefab_actor_count=0;
@@ -47,6 +51,8 @@ public:
     std::filesystem::path const& root() const noexcept { return root_; }
     std::vector<AssetRecord> const& entries() const noexcept { return entries_; }
     bool truncated() const noexcept { return truncated_; }
+    std::size_t dictionary_cache_hits() const noexcept {return cache_hits_;}
+    std::size_t dictionary_cache_misses() const noexcept {return cache_misses_;}
     // Physical filesystem paths only; virtual children cannot be opened as
     // ordinary files or modified through filesystem operations.
     std::filesystem::path resolve(std::string const& virtual_path) const;
@@ -57,6 +63,10 @@ public:
 private:
     std::filesystem::path root_;
     std::vector<AssetRecord> entries_;
+    // Built once after sorting, with vector indices (no pointer
+    // invalidation on catalog move/copy). Lookups used to be O(N).
+    std::unordered_map<std::string,std::size_t> entry_index_;
+    std::size_t cache_hits_=0,cache_misses_=0;
     bool truncated_=false;
 };
 } // namespace northstarcpp::editor

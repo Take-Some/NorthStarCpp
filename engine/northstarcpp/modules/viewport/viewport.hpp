@@ -9,6 +9,7 @@
 #endif
 #include <windows.h>
 #include <memory>
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -44,7 +45,20 @@ struct ViewportGizmo {
     Vector3 axes[3]{{1.f,0.f,0.f},{0.f,1.f,0.f},{0.f,0.f,1.f}};
     unsigned mode = 0; // 0 translate, 1 rotate, 2 scale
     int active_axis = -1;
+    bool show_grid=false;
+    int grid_width=1280;
+    int grid_height=720;
     float length=2.4f; // constant screen-relative handle length per view
+};
+
+// Per-frame CPU submission statistics for Editor diagnostics and regression
+// tests. No renderer-provider ABI changes: counts describe the host batches.
+struct ViewportAssetStats {
+    std::size_t native_meshes = 0;
+    std::size_t material_batches = 0;
+    std::size_t textured_material_batches = 0;
+    std::size_t cube_proxies = 0;
+    std::size_t invalid_meshes = 0;
 };
 
 class Viewport {
@@ -55,6 +69,7 @@ public:
     // Actual selected GPU provider for startup diagnostics.
     std::string renderer_provider_name() const;
     std::string renderer_provider_version() const;
+    ViewportAssetStats asset_stats() const noexcept;
 
     // Project scripts select every skeletal resource and animation state.
     // The native viewport only decodes VFS assets and evaluates the skin pose.

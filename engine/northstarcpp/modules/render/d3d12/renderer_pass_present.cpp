@@ -34,6 +34,9 @@ void RendererState::record_present_pass(FramePassContext& context) {
                 commands->DrawInstanced(UINT(vertices.size())-hud_line_start,1,hud_line_start,0);
             }
         }
+        // Screen-space engine.ui is composited after scene tonemapping and HUD.
+        // The UI texture is independent from world lighting and depth.
+        record_ui_pass(context);
         if(timestamp_heap) {
             commands->EndQuery(timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,4);
@@ -84,7 +87,9 @@ void RendererState::record_present_pass(FramePassContext& context) {
             // so pixel thresholds alone cannot distinguish an empty scene.
             // Reject truly empty submissions independently of SDR luminance.
             if(frame.count==0 && mesh_vertices.empty() && material_draws.empty() &&
-               !sky_index_count && !frame.player_max_health)
+               !sky_index_count && !frame.player_max_health &&
+               frame.verify_pixels!=7u && frame.verify_pixels!=8u &&
+               frame.verify_pixels!=9u)
                 throw std::runtime_error("GPU scene acceptance requires visible content");
             verify_readback(pixels.Get(),pitch,frame.verify_pixels);
         }}

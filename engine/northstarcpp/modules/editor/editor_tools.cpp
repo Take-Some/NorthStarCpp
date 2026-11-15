@@ -68,7 +68,8 @@ Vector3 gizmo_axis(SceneObject const& object, GizmoAxis axis, bool local)
 }
 
 void apply_gizmo(Scene& scene, std::size_t index, GizmoMode mode,
-                 GizmoAxis axis, float amount, GizmoOptions const& options)
+                 GizmoAxis axis, float amount, GizmoOptions const& options,
+                 bool validate_entire_scene)
 {
     require_index(scene,index);
     if (!std::isfinite(amount) || std::abs(amount)>900000.f)
@@ -96,7 +97,7 @@ void apply_gizmo(Scene& scene, std::size_t index, GizmoMode mode,
             std::clamp(*coordinate+delta,0.01f,1000.f) :
             std::clamp(*coordinate+delta,-360000.f,360000.f);
     }
-    validate_scene(scene);
+    if(validate_entire_scene)validate_scene(scene);
 }
 
 void promote_to_v3(Scene& scene)
@@ -327,8 +328,20 @@ void assign_actor_material(Scene& scene,std::size_t actor,
             virtual_material.compare(virtual_material.size()-suffix.size(),
                                      suffix.size(),suffix)==0;
     };
+    // A YMAT file is a NEF8 material library. Actors may bind a specific
+    // record as "library.ymat@Material Name"; never fall back to entry zero.
+    auto const selector=virtual_material.find('@');
+    bool const selected_ymat=selector!=std::string::npos &&
+        selector>0 && selector+1<virtual_material.size() &&
+        virtual_material.find('@',selector+1)==std::string::npos &&
+        virtual_material.substr(0,selector).size()>=5 &&
+        virtual_material.substr(selector-5,5)==".ymat" &&
+        virtual_material.find_first_of("/\\:",selector+1)==std::string::npos &&
+        std::none_of(virtual_material.begin()+selector+1,
+            virtual_material.end(),[](unsigned char c){return c<32;});
     if(!valid_suffix(".material.json") && !valid_suffix(".ymat") &&
-       !valid_suffix(".material") && !valid_suffix(".mtl"))
+       !valid_suffix(".material") && !valid_suffix(".mtl") &&
+       !selected_ymat)
         throw std::invalid_argument("An actor must reference a material, not a texture");
     auto const entity=scene.objects[actor].node.id;
     if(!entity)throw std::runtime_error("Actor has no stable scene ID");

@@ -55,6 +55,16 @@ bool Renderer::timing(NorthStarRenderTimingStats& stats) const noexcept {
 void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
     if(frame.count && !frame.cubes)
         throw std::invalid_argument("Vulkan frame cubes pointer is null");
+    if(!world_surface_ids_.empty() &&
+       world_surface_ids_.size()!=frame.count)
+        throw std::invalid_argument("Vulkan cube surface IDs do not match frame count");
+    if(std::any_of(world_surface_ids_.begin(),world_surface_ids_.end(),
+        [](std::uint32_t id){return id>0;})) {
+        if(!std::all_of(world_texture_resident_.begin(),
+           world_texture_resident_.end(),[](bool resident){return resident;}))
+            throw std::runtime_error(
+                "Vulkan world surface was requested before all 9 BCn textures became resident");
+    }
     frame_vertices_.clear();
     frame_vertices_.reserve(scene_.size()+static_cast<std::size_t>(frame.count)*36);
     const float near_clip=frame.camera_near_clip>0.f?frame.camera_near_clip:.1f;
@@ -82,6 +92,8 @@ void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
         out.color[1]=component(color,8);
         out.color[2]=component(color,0);
         out.color[3]=1.f;
+        out.world[0]=x;out.world[1]=y;out.world[2]=z;
+        out.surface=0.f;
         return true;
     };
     for(std::size_t i=0;i+2<scene_.size();i+=3) {
@@ -113,6 +125,8 @@ void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
                 const float y=cube.y+cube.rotation[1]*a+cube.rotation[4]*b+cube.rotation[7]*c;
                 const float z=cube.z+cube.rotation[2]*a+cube.rotation[5]*b+cube.rotation[8]*c;
                 visible=project(x,y,z,cube.rgb,vertices[j])&&visible;
+                vertices[j].surface=world_surface_ids_.empty()?0.f:
+                    static_cast<float>(world_surface_ids_[i]);
             }
             if(visible)frame_vertices_.insert(frame_vertices_.end(),vertices,vertices+3);
         }
@@ -142,6 +156,13 @@ void Renderer::record_opaque(VkCommandBuffer cmd,std::uint32_t image,
     rendering.layerCount=1;
     rendering.colorAttachmentCount=1;
     rendering.pColorAttachments=&attachment;
+    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depth.imageView=depth_view_;
+    depth.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depth.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.clearValue.depthStencil={1.f,0};
+    rendering.pDepthAttachment=&depth;
     vkCmdBeginRendering(cmd,&rendering);
     if(render_vertices_) {
         VkViewport viewport{0.f,0.f,static_cast<float>(extent_.width),
@@ -149,10 +170,48 @@ void Renderer::record_opaque(VkCommandBuffer cmd,std::uint32_t image,
         VkRect2D scissor{};scissor.extent=extent_;
         vkCmdSetViewport(cmd,0,1,&viewport);
         vkCmdSetScissor(cmd,0,1,&scissor);
-        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_);
+        const bool textured_world=std::any_of(
+            world_surface_ids_.begin(),world_surface_ids_.end(),
+            [](std::uint32_t id){return id>0;});
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          textured_world?world_pipeline_:pipeline_);
+        if(textured_world)
+            vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
+                world_pipeline_layout_,0,1,&world_set_,0,nullptr);
         const VkDeviceSize offset=0;
         vkCmdBindVertexBuffers(cmd,0,1,&vertices_buffer_,&offset);
         vkCmdDraw(cmd,render_vertices_,1,0,0);
+    }
+    if(!material_draws_.empty()||!skin_draws_.empty()) {
+        VkViewport viewport{0.f,0.f,static_cast<float>(extent_.width),
+                            static_cast<float>(extent_.height),0.f,1.f};
+        VkRect2D scissor{};scissor.extent=extent_;
+        vkCmdSetViewport(cmd,0,1,&viewport);
+        vkCmdSetScissor(cmd,0,1,&scissor);
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,material_pipeline_);
+        const VkDeviceSize offset=0;
+        vkCmdBindVertexBuffers(cmd,0,1,&material_vertices_buffer_,&offset);
+        // Draw opaque/masked before translucent irrespective of host order.
+        for(unsigned pass=0;pass<2;++pass) {
+            if(pass==0 && !skin_draws_.empty()) {
+                vkCmdBindVertexBuffers(cmd,0,1,&skin_output_,&offset);
+                for(const auto& skin:skin_draws_) {
+                    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      skin.pipeline);
+                    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        material_pipeline_layout_,0,1,&skin.textures,0,nullptr);
+                    vkCmdDraw(cmd,skin.count,1,skin.first,0);
+                }
+                vkCmdBindVertexBuffers(cmd,0,1,&material_vertices_buffer_,&offset);
+            }
+            for(const auto& batch:material_draws_) {
+                if((batch.blend_mode==2)!=(pass==1))continue;
+                vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,batch.pipeline);
+                vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    material_pipeline_layout_,0,1,&batch.textures,0,nullptr);
+                vkCmdDraw(cmd,batch.count,1,batch.first,0);
+            }
+        }
     }
     vkCmdEndRendering(cmd);
 }
@@ -168,8 +227,11 @@ void Renderer::record_readback(VkCommandBuffer cmd,std::uint32_t image,
 }
 void Renderer::validate_readback(const NorthStarRenderFrame& frame) {
     if(!frame.verify_pixels)return;
-    if(frame.verify_pixels!=1)
-        throw std::runtime_error("Vulkan material UV readback mode is unsupported");
+    if(frame.verify_pixels!=1 && frame.verify_pixels!=2 &&
+       frame.verify_pixels!=3 && frame.verify_pixels!=4 &&
+       frame.verify_pixels!=5 && frame.verify_pixels!=6 &&
+       frame.verify_pixels!=7 && frame.verify_pixels!=8)
+        throw std::runtime_error("Vulkan requested readback mode is unsupported");
     void* data=nullptr;
     const auto bytes=static_cast<VkDeviceSize>(extent_.width)*extent_.height*4;
     if(bytes>readback_capacity_)throw std::runtime_error("Vulkan readback buffer too small");
@@ -182,13 +244,100 @@ void Renderer::validate_readback(const NorthStarRenderFrame& frame) {
         if(b||g||r)nonblack=true;
         if(b>96||g>96||r>96)bright=true;
     }
+    if(frame.verify_pixels==8) {
+        const size_t center=(static_cast<size_t>(extent_.height/2)*
+                             extent_.width+extent_.width/2)*4;
+        // Vulkan swapchain is BGRA8. UI texture itself is RGBA8.
+        const bool ok=!ui_cpu_rgba_.empty() && center+3<bytes &&
+                      pixels[center+2]>200 && pixels[center+1]<80 &&
+                      pixels[center]<80;
+        vkUnmapMemory(device_,readback_memory_);
+        if(!ok)throw std::runtime_error(
+            "Vulkan GPU engine.ui compositing readback mismatch");
+        return;
+    }
+    if(frame.verify_pixels==4) {
+        // Hardware depth acceptance: the near GREEN triangle must occlude
+        // the far RED one, irrespective of geometry submission order.
+        // Vulkan swapchain formats are BGRA8, so green is component 1.
+        auto const center=(static_cast<std::size_t>(extent_.height/2)*
+                           extent_.width+extent_.width/2)*4;
+        bool const near_visible=center+3<bytes &&
+            pixels[center+1]>170 &&
+            pixels[center+2]<100 &&
+            pixels[center+0]<100;
+        vkUnmapMemory(device_,readback_memory_);
+        if(!near_visible)
+            throw std::runtime_error("Vulkan depth occlusion GPU readback mismatch");
+        return;
+    }
+    if(frame.verify_pixels==7) {
+        // Native BC1 world surfaces: each authored surface group has a
+        // distinct GPU-sampled color in the central visible cube pixel.
+        auto const center=(static_cast<std::size_t>(extent_.height/2)*
+                           extent_.width+extent_.width/2)*4;
+        const auto id=world_surface_ids_.empty()?0u:world_surface_ids_[0];
+        bool valid=id>=1&&id<=3&&center+3<bytes;
+        if(valid) {
+            const int expected=id==1?2:id==2?1:0; // BGRA swapchain.
+            valid=pixels[center+expected]>85;
+            for(int channel=0;channel<3;++channel)
+                if(channel!=expected&&pixels[center+channel]>50)
+                    valid=false;
+        }
+        vkUnmapMemory(device_,readback_memory_);
+        if(!valid)
+            throw std::runtime_error(
+                "Vulkan BC1/BC5 world surface GPU color/selector mismatch");
+        return;
+    }
+    if(frame.verify_pixels==5) {
+        // PBR light acceptance: a lit white quad must brighten the central
+        // pixel above ambient under a strong nearby physical point light.
+        auto const center=(static_cast<std::size_t>(extent_.height/2)*
+                           extent_.width+extent_.width/2)*4;
+        auto const lit=!material_draws_.empty()&&!dynamic_lights_.empty() &&
+            std::any_of(material_sources_.begin(),material_sources_.end(),
+                [](auto const& source){return source.unlit==0;}) &&
+            center+3<bytes &&
+            (pixels[center]>110||pixels[center+1]>110||pixels[center+2]>110);
+        vkUnmapMemory(device_,readback_memory_);
+        if(!lit)
+            throw std::runtime_error("Vulkan point/spot GPU lighting readback failed");
+        return;
+    }
+    if(frame.verify_pixels==2 || frame.verify_pixels==3 ||
+       frame.verify_pixels==6) {
+        std::uint64_t red=0,green=0;
+        for(std::size_t index=0;index+3<bytes;index+=4) {
+            auto const* pixel=pixels+index;
+            if(pixel[2]>130 && pixel[1]<90 && pixel[0]<90)++red;
+            if(pixel[1]>130 && pixel[2]<90 && pixel[0]<90)++green;
+        }
+        vkUnmapMemory(device_,readback_memory_);
+        if(frame.verify_pixels==2) {
+            if((material_draws_.empty()&&skin_draws_.empty())||
+               red<100||green<100)
+                throw std::runtime_error(
+                    "Vulkan textured GPU readback lacks two sampled UV colors");
+        }else if(frame.verify_pixels==6) {
+            if(skin_draws_.empty()||red>25||green>25)
+                throw std::runtime_error(
+                    "Vulkan GPU bone matrix translation was not applied");
+        }else if(material_draws_.empty() || green<100 || red>25)
+            throw std::runtime_error(
+                "Vulkan generated Material Graph GPU color mismatch");
+        return;
+    }
     vkUnmapMemory(device_,readback_memory_);
     if(!nonblack || (render_vertices_ && !bright))
         throw std::runtime_error("Vulkan pixel readback is empty or missing rendered geometry");
 }
 void Renderer::draw(const NorthStarRenderFrame& frame) {
-    if(frame.verify_pixels>1)
-        throw std::runtime_error("Vulkan UV verification mode is unsupported");
+    if(frame.verify_pixels>3 && frame.verify_pixels!=4 &&
+       frame.verify_pixels!=5 && frame.verify_pixels!=6 &&
+       frame.verify_pixels!=7 && frame.verify_pixels!=8)
+        throw std::runtime_error("Vulkan unsupported GPU verification mode");
     if(!device_||!swapchain_)throw std::runtime_error("Vulkan renderer not initialized");
     check(vkWaitForFences(device_,1,&completed_,VK_TRUE,10'000'000'000ull),
           "vkWaitForFences");
@@ -212,6 +361,11 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     if(acquired!=VK_SUCCESS&&acquired!=VK_SUBOPTIMAL_KHR)
         check(acquired,"vkAcquireNextImageKHR");
     collect_vertices(frame);
+    upload_light_buffer();
+    upload_material_textures();
+    collect_material_vertices(frame);
+    upload_skin_geometry();
+    ensure_ui_resources();
     check(vkResetCommandPool(device_,command_pool_,0),"vkResetCommandPool");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -221,6 +375,7 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
         vkCmdWriteTimestamp2(command_,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                             timing_queries_,0);
     }
+    record_skin_compute(command_,frame);
     northstarcpp::render::RenderGraphPlan execution=graph_plan_;
     if(!swapchain_seen_.at(image))
         for(auto& transition:execution.passes.at(0).transitions)
@@ -228,8 +383,12 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     VkImageSubresourceRange subresource{};
     subresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
     subresource.levelCount=1;subresource.layerCount=1;
-    std::vector<northstarcpp::render::VulkanGraphImage> bindings(1);
+    std::vector<northstarcpp::render::VulkanGraphImage> bindings(2);
     bindings[0]={images_[image],subresource,VK_QUEUE_FAMILY_IGNORED,
+                 VK_QUEUE_FAMILY_IGNORED};
+    auto depth_range=subresource;
+    depth_range.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
+    bindings[1]={depth_image_,depth_range,VK_QUEUE_FAMILY_IGNORED,
                  VK_QUEUE_FAMILY_IGNORED};
     northstarcpp::render::record_vulkan_graph(
         command_,vkCmdPipelineBarrier2,execution,bindings,
@@ -241,20 +400,21 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,1);
                 break;
             case 1:
-                // Reserved splits: opaque, deferred, postfx, HUD. Currently
-                // Vulkan has no separate deferred/postfx/HUD GPU passes.
+                record_ui_overlay(cmd,image);
                 if(timing_queries_) {
                     vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                          timing_queries_,2);
                     vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                          timing_queries_,3);
                 }
-                record_readback(cmd,image,frame);
                 break;
             case 2:
+                record_readback(cmd,image,frame);
+                break;
+            case 3:
                 if(timing_queries_)vkCmdWriteTimestamp2(cmd,
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,4);
-                break; // Image already transitioned to PRESENT_SRC_KHR
+                break;
             default:throw std::logic_error("Unknown Vulkan Render Graph pass");
             }
         });
