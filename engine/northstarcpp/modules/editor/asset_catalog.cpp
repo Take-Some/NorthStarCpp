@@ -1,6 +1,7 @@
 // Cross-platform asset catalog; source of truth is project Content directory.
 #include <northstarcpp/editor_asset_catalog.hpp>
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/scene.hpp>
 #include <algorithm>
 #include <fstream>
 #include <cctype>
@@ -21,6 +22,26 @@ bool belongs_to(fs::path const& candidate, fs::path const& root) {
         if(a==candidate.end() || *a!=*b) return false;
     return true;
 }
+// Parse bounded prefab metadata during asynchronous catalog indexing only.
+void index_prefab(AssetRecord& record,fs::path const& source) noexcept {
+    if(record.size==0 || record.size>4u*1024u*1024u)return;
+    try {
+        std::ifstream input(source,std::ios::binary);
+        if(!input)throw std::runtime_error("Unreadable prefab");
+        std::string bytes(static_cast<std::size_t>(record.size),'\0');
+        if(!input.read(bytes.data(),
+                       static_cast<std::streamsize>(bytes.size())))
+            throw std::runtime_error("Truncated prefab");
+        auto scene=parse_scene_v3(bytes);
+        validate_scene(scene);
+        if(scene.version!=3 || scene.objects.empty())
+            throw std::invalid_argument("Invalid or empty prefab");
+        record.prefab_actor_count=scene.objects.size();
+        record.prefab_valid=true;
+    }catch(std::exception const&) {
+        // Keep corrupt assets visible but never classify them as valid.
+    }
+}
 }
 char const* kind_name(AssetKind k) noexcept {
     switch(k) {
@@ -30,6 +51,9 @@ char const* kind_name(AssetKind k) noexcept {
     case AssetKind::texture:return "Texture";
     case AssetKind::audio:return "Audio";
     case AssetKind::scene:return "Scene";
+    case AssetKind::prefab:return "Prefab";
+    case AssetKind::character:return "Character";
+    case AssetKind::material_function:return "Material Function";
     case AssetKind::script:return "Script";
     case AssetKind::animation:return "Animation";
     case AssetKind::shader:return "Shader";
@@ -40,12 +64,30 @@ AssetKind kind_from_extension(fs::path const& p) noexcept {
     auto e=lowercase(p.extension().u8string());
     if(e==".ydd" || e==".mesh" || e==".obj" || e==".fbx" ||
        e==".gltf" || e==".glb")return AssetKind::mesh;
-    if(e==".ymat" || e==".material" || e==".mtl")return AssetKind::material;
+    auto const filename=lowercase(p.filename().u8string());
+    static constexpr char character_suffix[]=".character.json";
+    constexpr auto character_suffix_length=sizeof(character_suffix)-1;
+    if(filename.size()>character_suffix_length &&
+       filename.compare(filename.size()-character_suffix_length,
+                        character_suffix_length,character_suffix)==0)
+        return AssetKind::character;
+    if(e==".json" && filename.size()>23 &&
+       filename.compare(filename.size()-23,23,
+                        ".material-function.json")==0)
+        return AssetKind::material_function;
+    if(e==".ymat" || e==".material" || e==".mtl" ||
+       (e==".json" &&
+         ((filename.size()>14 &&
+           filename.compare(filename.size()-14,14,".material.json")==0) ||
+          (filename.size()>23 &&
+           filename.compare(filename.size()-23,23,".material-instance.json")==0))))
+        return AssetKind::material;
     if(e==".ytd" || e==".png" || e==".jpg" || e==".jpeg" ||
        e==".dds" || e==".tga" || e==".webp" || e==".bmp" ||
        e==".ktx" || e==".ktx2")return AssetKind::texture;
     if(e==".wav" || e==".ogg" || e==".mp3" || e==".flac")return AssetKind::audio;
-    if(e==".nscn" || e==".nscene" || e==".nprefab" || e==".ymap" || e==".world")return AssetKind::scene;
+    if(e==".nprefab")return AssetKind::prefab;
+    if(e==".nscn" || e==".nscene" || e==".ymap" || e==".world")return AssetKind::scene;
     if(e==".js" || e==".mjs" || e==".ysc" || e==".lua" ||
        e==".ts" || e==".py")return AssetKind::script;
     if(e==".anim" || e==".ycd" || e==".gltfanim")return AssetKind::animation;
@@ -102,6 +144,8 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
         if(!folder) {
             rec.size=it->file_size(entry_error);
             if(entry_error)rec.size=0;
+            if(rec.kind==AssetKind::prefab)
+                index_prefab(rec,it->path());
             auto ext=lowercase(it->path().extension().u8string());
             if((ext==".ytd" || ext==".ydd" || ext==".ymat") && rec.size>=128) {
                 // Only valid NEF8 ListFiles are virtual directories.
@@ -145,6 +189,56 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
         }
         entries_.push_back(std::move(rec));
     }
+    // Prefab templates belong to project/prefabs, alongside project/assets.
+    // Add them to Content as virtual prefabs/... paths without rewriting
+    // existing mesh/material VFS references or following junctions.
+    auto const prefab_root=root_.parent_path()/"prefabs";
+    std::error_code prefab_ec;
+    if(fs::is_directory(prefab_root,prefab_ec) &&
+       !fs::is_symlink(fs::symlink_status(prefab_root,prefab_ec))) {
+        if(entries_.size()<max_records) {
+            AssetRecord folder_record;
+            folder_record.virtual_path="prefabs";
+            folder_record.filename="prefabs";
+            folder_record.kind=AssetKind::folder;
+            folder_record.directory=true;
+            folder_record.external_prefab=true;
+            entries_.push_back(std::move(folder_record));
+        }
+        fs::recursive_directory_iterator prefabs(prefab_root,
+            fs::directory_options::skip_permission_denied,prefab_ec),end_prefabs;
+        if(!prefab_ec)for(;prefabs!=end_prefabs;prefabs.increment(prefab_ec)) {
+            if(prefab_ec){prefab_ec.clear();continue;}
+            if(entries_.size()>=max_records){truncated_=true;break;}
+            if(prefabs->is_symlink(prefab_ec)) {
+                prefabs.disable_recursion_pending();
+                continue;
+            }
+            bool const dir=prefabs->is_directory(prefab_ec);
+            if(prefab_ec)continue;
+            if(!dir && lowercase(prefabs->path().extension().u8string())!=".nprefab")
+                continue;
+            auto relative=prefabs->path().lexically_relative(prefab_root)
+                .generic_u8string();
+            auto virtual_path=std::string("prefabs/")+relative;
+            if(!safe_virtual_path(virtual_path)) {
+                if(dir)prefabs.disable_recursion_pending();
+                continue;
+            }
+            AssetRecord record;
+            record.virtual_path=virtual_path;
+            record.filename=prefabs->path().filename().u8string();
+            record.directory=dir;
+            record.kind=dir?AssetKind::folder:AssetKind::prefab;
+            record.external_prefab=true;
+            if(!dir) {
+                record.size=prefabs->file_size(prefab_ec);
+                if(prefab_ec)record.size=0;
+                index_prefab(record,prefabs->path());
+            }
+            entries_.push_back(std::move(record));
+        }
+    }
     std::sort(entries_.begin(),entries_.end(),
         [](AssetRecord const& a,AssetRecord const& b){
             if(a.directory!=b.directory)return a.directory>b.directory;
@@ -167,22 +261,26 @@ std::string AssetCatalog::asset_reference(std::string const& virtual_path) const
     return rec->asset_reference();
 }
 fs::path AssetCatalog::resolve(std::string const& virtual_path) const {
-    if(auto rec=find(virtual_path);rec && rec->is_virtual_entry())
+    auto const* record=find(virtual_path);
+    if(record && record->is_virtual_entry())
         throw std::invalid_argument("ListFile child is not a physical file");
     if(root_.empty() || !safe_virtual_path(virtual_path))
         throw std::invalid_argument("Unsafe asset reference");
     fs::path requested=fs::u8path(virtual_path);
     if(requested.is_absolute() || requested.has_root_name())
         throw std::invalid_argument("Absolute asset reference");
-    auto full=(root_/requested).lexically_normal();
-    if(!belongs_to(full,root_))
+    bool const prefab=record && record->external_prefab;
+    auto const base=prefab?root_.parent_path():root_;
+    auto full=(base/requested).lexically_normal();
+    if(!belongs_to(full,prefab?root_.parent_path()/"prefabs":root_))
         throw std::invalid_argument("Asset escaped project root");
     // A changed on-disk symlink must never allow resolving outside the
     // project even if an earlier scan did not follow symlinks.
     std::error_code error;
     auto actual=fs::weakly_canonical(full,error);
     if(!error) {
-        auto root_actual=fs::weakly_canonical(root_,error);
+        auto root_actual=fs::weakly_canonical(
+            prefab?root_.parent_path()/"prefabs":root_,error);
         if(!error && !belongs_to(actual,root_actual))
             throw std::invalid_argument("Asset symlink escaped project root");
     }

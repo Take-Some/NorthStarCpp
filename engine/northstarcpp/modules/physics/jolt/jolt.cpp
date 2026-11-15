@@ -112,6 +112,7 @@ struct Body {
     float half = 0.f;
     bool is_static = false;
     bool resident = true;
+    bool alive = true;
 };
 
 struct World {
@@ -126,7 +127,8 @@ struct World {
         // A bounded budget prevents an accidental allocation explosion.
         if (count > 100000)
             throw std::runtime_error("Too many physics objects for Jolt world");
-        auto const max_bodies = std::max(2048u, count + 1u);
+        // Keep spare capacity for incremental script-spawned bodies.
+        auto const max_bodies = std::max(2048u, count + 4096u);
         physics.Init(max_bodies, 0, std::max(8192u, 8u * max_bodies),
             std::max(4096u, 4u * max_bodies), broad_phase, layer_vs_broadphase, layer_pairs);
         physics.SetGravity(j::Vec3(0.f, -9.81f, 0.f));
@@ -141,6 +143,7 @@ struct World {
         if (ground.IsInvalid())
             throw std::runtime_error("Jolt ground body creation failed");
 
+        initial_body_count = count;
         bodies.reserve(count);
         for (uint32_t n = 0; n < count; ++n) {
             auto const& input = objects[n];
@@ -180,6 +183,7 @@ struct World {
     {
         auto& iface = physics.GetBodyInterface();
         for (auto const& b : bodies) {
+            if (!b.alive) continue;
             if (b.resident)
                 iface.RemoveBody(b.id);
             iface.DestroyBody(b.id);
@@ -267,7 +271,8 @@ struct World {
 
     void move_static(uint32_t index, float x, float y, float z)
     {
-        if (index >= bodies.size() || !bodies[index].is_static ||
+        if (index >= bodies.size() || !bodies[index].alive ||
+            !bodies[index].is_static ||
             !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
             throw std::runtime_error("Invalid Jolt static relocation");
         auto& iface = physics.GetBodyInterface();
@@ -275,9 +280,59 @@ struct World {
             j::EActivation::DontActivate);
     }
 
+    uint32_t add_runtime_body(NorthStarRigidBody const& input)
+    {
+        if (bodies.size() >= 16384u || input.player ||
+            !std::isfinite(input.x) || !std::isfinite(input.y) ||
+            !std::isfinite(input.z) || !std::isfinite(input.size) ||
+            !std::isfinite(input.mass) || input.size <= 0.f ||
+            input.size > 1000.f || input.mass < 0.f || input.mass > 1000000.f)
+            throw std::invalid_argument("Invalid Jolt runtime body");
+        auto const half = input.size * 0.5f;
+        j::RefConst<j::Shape> shape = new j::BoxShape(j::Vec3(half, half, half));
+        j::BodyCreationSettings setup(shape,
+            j::RVec3(input.x, input.y + half, input.z), j::Quat::sIdentity(),
+            input.mass > 0.f ? j::EMotionType::Dynamic : j::EMotionType::Static,
+            input.mass > 0.f ? layers::dynamic_body : layers::static_body);
+        setup.mFriction = 0.65f;
+        if (input.mass > 0.f) {
+            setup.mMotionQuality = j::EMotionQuality::LinearCast;
+            setup.mOverrideMassProperties = j::EOverrideMassProperties::CalculateInertia;
+            setup.mMassPropertiesOverride.mMass = input.mass;
+        }
+        auto& iface = physics.GetBodyInterface();
+        auto const id = iface.CreateAndAddBody(setup,
+            input.mass > 0.f ? j::EActivation::Activate : j::EActivation::DontActivate);
+        if (id.IsInvalid())
+            throw std::runtime_error("Jolt runtime body allocation failed");
+        try {
+            bodies.push_back({id, half, input.mass == 0.f});
+        } catch (...) {
+            iface.RemoveBody(id);
+            iface.DestroyBody(id);
+            throw;
+        }
+        return static_cast<uint32_t>(bodies.size() - 1);
+    }
+
+    void remove_runtime_body(uint32_t index)
+    {
+        if (index < initial_body_count || index >= bodies.size() ||
+            !bodies[index].alive)
+            throw std::invalid_argument("Stale or authored Jolt body index");
+        auto& entry = bodies[index];
+        auto& iface = physics.GetBodyInterface();
+        if (entry.resident) iface.RemoveBody(entry.id);
+        iface.DestroyBody(entry.id);
+        entry.id = j::BodyID();
+        entry.resident = false;
+        entry.alive = false;
+    }
+
     void set_static_resident(uint32_t index, bool resident)
     {
-        if (index>=bodies.size() || !bodies[index].is_static ||
+        if (index>=bodies.size() || !bodies[index].alive ||
+            !bodies[index].is_static ||
             bodies[index].id==player)
             throw std::invalid_argument("Only scene static bodies may change Jolt residency");
         auto& body=bodies[index];
@@ -290,7 +345,8 @@ struct World {
 
     int static_resident(uint32_t index) const
     {
-        if (index>=bodies.size() || !bodies[index].is_static ||
+        if (index>=bodies.size() || !bodies[index].alive ||
+            !bodies[index].is_static ||
             bodies[index].id==player) return -1;
         return bodies[index].resident ? 1 : 0;
     }
@@ -383,6 +439,11 @@ struct World {
         auto const& iface = physics.GetBodyInterface();
         for (uint32_t n = 0; n < count; ++n) {
             auto const& body = bodies[n];
+            if (!body.alive) {
+                output[n] = {};
+                output[n].rotation[0] = output[n].rotation[4] = output[n].rotation[8] = 1.f;
+                continue;
+            }
             j::RVec3 pos = iface.GetPosition(body.id);
             j::Quat rot = iface.GetRotation(body.id);
             j::Vec3 x = rot.RotateAxisX();
@@ -407,6 +468,7 @@ struct World {
     j::BodyID ground;
     j::BodyID player;
     std::vector<Body> bodies;
+    uint32_t initial_body_count = 0;
     std::vector<j::BodyID> static_meshes;
     double elapsed = 0.0;
 };
@@ -486,6 +548,23 @@ int is_static_resident(void* world,uint32_t index)
 }
 const NorthStarPhysicsResidencyApi residency_api{
     NORTHSTARCPP_PHYSICS_RESIDENCY_ABI,set_static_resident,is_static_resident};
+int add_runtime_body(void* world, NorthStarRigidBody const* body, uint32_t* index)
+{
+    return guarded([&] {
+        if (!world || !body || !index)
+            throw std::invalid_argument("Invalid Jolt runtime create arguments");
+        *index = static_cast<World*>(world)->add_runtime_body(*body);
+    });
+}
+int remove_runtime_body(void* world, uint32_t index)
+{
+    return guarded([&] {
+        if (!world) throw std::invalid_argument("Missing Jolt runtime world");
+        static_cast<World*>(world)->remove_runtime_body(index);
+    });
+}
+const NorthStarPhysicsRuntimeApi runtime_api{
+    NORTHSTARCPP_PHYSICS_RUNTIME_ABI, add_runtime_body, remove_runtime_body};
 
 const NorthStarPhysicsApi api{create, destroy, step, read_poses, jump, move_static,
     sweep_sphere, add_static_mesh, apply_impulse};
@@ -497,6 +576,12 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if (version == NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_PHYSICS, "Jolt", "5.6.0",
+            NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI, sizeof(runtime_api), &runtime_api, last_error};
+        return northstarcpp::module_provider::match(extension, host, capability, version);
+    }
     if (version == NORTHSTARCPP_PHYSICS_RESIDENCY_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_PHYSICS, "Jolt", "5.6.0",
@@ -511,4 +596,10 @@ NorthStarPhysicsResidencyApi const* northstar_physics_get_residency_api(
     uint32_t version)
 {
     return version==NORTHSTARCPP_PHYSICS_RESIDENCY_ABI ? &residency_api : nullptr;
+}
+
+extern "C" NORTHSTARCPP_MODULE_EXPORT
+NorthStarPhysicsRuntimeApi const* northstar_physics_get_runtime_api(uint32_t version)
+{
+    return version==NORTHSTARCPP_PHYSICS_RUNTIME_ABI ? &runtime_api : nullptr;
 }

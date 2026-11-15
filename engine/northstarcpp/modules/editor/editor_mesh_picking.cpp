@@ -13,7 +13,7 @@
 #include <vector>
 
 namespace northstarcpp::editor_tools {
-std::optional<std::size_t> pick_actor_geometry(
+std::optional<ActorSurfaceHit> hit_actor_geometry(
     Scene const& scene, Ray const ray, CollisionService const& collision,
     GeometryService const& geometry) {
     if (!std::isfinite(ray.direction.x) ||
@@ -21,7 +21,7 @@ std::optional<std::size_t> pick_actor_geometry(
         !std::isfinite(ray.direction.z))
         return {};
     float best = std::numeric_limits<float>::max();
-    std::optional<std::size_t> chosen;
+    std::optional<ActorSurfaceHit> chosen;
     for (std::size_t i = 0; i < scene.objects.size(); ++i) {
         auto const& object = scene.objects[i];
         if (scene.version == 3 && !object.node.visible)
@@ -46,7 +46,10 @@ std::optional<std::size_t> pick_actor_geometry(
             auto distance = intersect_actor_proxy(ray, object, scene.version);
             if (distance && *distance < best) {
                 best = *distance;
-                chosen = i;
+                chosen = ActorSurfaceHit{i,*distance,{
+                    ray.origin.x+ray.direction.x*(*distance),
+                    ray.origin.y+ray.direction.y*(*distance),
+                    ray.origin.z+ray.direction.z*(*distance)}};
             }
             continue;
         }
@@ -85,9 +88,18 @@ std::optional<std::size_t> pick_actor_geometry(
             world,mesh.indices,best);
         if (hit && hit->distance < best) {
             best=hit->distance;
-            chosen=i;
+            chosen=ActorSurfaceHit{i,hit->distance,{
+                ray.origin.x+ray.direction.x*hit->distance,
+                ray.origin.y+ray.direction.y*hit->distance,
+                ray.origin.z+ray.direction.z*hit->distance}};
         }
     }
     return chosen;
+}
+std::optional<std::size_t> pick_actor_geometry(
+    Scene const& scene,Ray ray,CollisionService const& collision,
+    GeometryService const& geometry) {
+    auto hit=hit_actor_geometry(scene,ray,collision,geometry);
+    return hit?std::optional<std::size_t>(hit->index):std::nullopt;
 }
 } // namespace northstarcpp::editor_tools

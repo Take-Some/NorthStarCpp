@@ -6,6 +6,9 @@
 #include <QMainWindow>
 #include <QVector3D>
 #include <QString>
+#include <QStringList>
+#include <QHash>
+#include <QImage>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -14,6 +17,8 @@ class QDockWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QLineEdit;
+class QComboBox;
+class QPushButton;
 class QDoubleSpinBox;
 class QCheckBox;
 class QPlainTextEdit;
@@ -57,6 +62,14 @@ private:
     QLineEdit* outlinerSearch_{};
     QLineEdit* objectName_{};
     QLineEdit* assetPath_{};
+    QComboBox* materialPicker_{};
+    QPushButton* materialEditButton_{};
+    QStringList cachedMaterials_;
+    QString cachedMaterialRoot_;
+    QHash<QString,QImage> materialSpheres_;
+    bool materialPreviewBusy_=false;
+    std::uint64_t materialPreviewRevision_=0;
+    int materialPreviewFocus_=1;
     QDoubleSpinBox *px_{},*py_{},*pz_{},*size_{},*mass_{};
     QDoubleSpinBox *rx_{},*ry_{},*rz_{},*sx_{},*sy_{},*sz_{};
     QCheckBox *visible_{},*collision_{};
@@ -68,6 +81,7 @@ private:
     QString configuredPlayerPath_;
     QAction* exploreModeAction_{};
     QAction* fpsModeAction_{};
+
     void choosePlayerExecutable();
     void setupUi();
     void updateAll();
@@ -84,10 +98,16 @@ private:
     void deleteSelected();
     void editScene(std::function<void(Scene&)> change,int selectedAfter=-2);
     void createActor(QString const& asset,QVector3D position);
+    void instantiatePrefab(QString const& reference,QVector3D position);
     void createProceduralActor(QString const& title,
                                NorthStarGeometryRequest request,
                                QVector3D position={0,0,0});
     void createMaterial();
+    void refreshMaterialChoices(bool force=false);
+    void queueMaterialPreviews(int nearIndex=1);
+    void assignMaterial(int actor,QString const& reference);
+    void openMaterialEditor(QString const& reference);
+    void handleAssetDrop(QString const& reference,QVector3D position,int hitActor);
     void undo();
     void redo();
     void log(QString const& line);

@@ -53,6 +53,31 @@ struct AssetStore::State {
 AssetStore::AssetStore() : state(std::make_unique<State>()) {}
 AssetStore::~AssetStore() { state->streaming.stop(); }
 std::string AssetStore::provider_name() const { return state->module.provider(); }
+void AssetStore::mount_project_assets(std::filesystem::path const& project_root,
+                                      std::filesystem::path const& shared_root)
+{
+    namespace fs = std::filesystem;
+    if (!fs::is_directory(project_root))
+        throw std::invalid_argument("Project VFS root is not a directory");
+    auto const assets = project_root / "assets";
+    auto const has_assets = fs::is_directory(assets);
+    if (!shared_root.empty()) {
+        if (!fs::is_directory(shared_root))
+            throw std::invalid_argument("Engine sharedAssets root is not a directory");
+        // Do not mount the same directory twice: the VFS provider rejects
+        // duplicate roots even when their priorities differ.
+        std::error_code ec;
+        bool const is_project = fs::equivalent(project_root, shared_root, ec) && !ec;
+        ec.clear();
+        bool const is_assets = has_assets &&
+            fs::equivalent(assets, shared_root, ec) && !ec;
+        if (!is_project && !is_assets)
+            mount_shared_assets(shared_root);
+    }
+    mount_directory("", project_root, 0); // scripts/, project metadata, scenes
+    if (has_assets)
+        mount_directory("", assets, 100); // textures/, models/, gameplay/
+}
 void AssetStore::mount_directory(std::string const& prefix,
     std::filesystem::path const& root, int32_t priority)
 {

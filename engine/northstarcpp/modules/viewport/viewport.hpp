@@ -10,6 +10,8 @@
 #include <windows.h>
 #include <memory>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include <northstarcpp/scene.hpp>
 
@@ -21,6 +23,21 @@ class FpsArena;
 struct CameraPose;
 namespace shared_assets { struct DrawableResources; }
 class AssetStore;
+
+// Player-independent skeletal resource description supplied by project scripts.
+// Model, rig, materials, textures and animation names are virtual VFS paths.
+struct CharacterAnimationAsset {
+    std::string name;
+    std::string source;
+    std::string clip;
+};
+struct CharacterAssetSpec {
+    std::string skeleton;
+    std::string model;
+    std::string material;
+    std::string textures;
+    std::vector<CharacterAnimationAsset> animations;
+};
 
 // Authoring-only overlay; not part of the engine renderer ABI.
 struct ViewportGizmo {
@@ -35,16 +52,24 @@ public:
     explicit Viewport(HWND window, bool software);
     ~Viewport();
 
-    // Resolves authored YDD/ymat/YTD data through AssetManager on the host side.
-    void load_character(AssetStore const& assets, std::string const& root_prefix);
-    void pose_character(Vector3 foot, float heading, float dt, bool moving, bool airborne);
+    // Actual selected GPU provider for startup diagnostics.
+    std::string renderer_provider_name() const;
+    std::string renderer_provider_version() const;
+
+    // Project scripts select every skeletal resource and animation state.
+    // The native viewport only decodes VFS assets and evaluates the skin pose.
+    void load_character(AssetStore const& assets, CharacterAssetSpec const& spec);
+    void pose_character(Vector3 foot, float heading, float dt,
+                        std::string const& animation);
     void hide_character();
+    void clear_character();
     void set_sky(shared_assets::DrawableResources const& resources);
     // Mount source or archived project assets for authored OBJ scene meshes.
     // Geometry is loaded through AssetStore, never by render-provider filesystem I/O.
     void set_asset_sources(std::filesystem::path const& project_root,
                            std::filesystem::path const& archive = {},
-                           std::filesystem::path const& archive_data = {});
+                           std::filesystem::path const& archive_data = {},
+                           std::filesystem::path const& shared_root = {});
 
     // The renderer consumes a scene snapshot. Simulation and editor state stay on the host side.
     void draw(Scene const& scene, int selected, bool verify_pixels = false,

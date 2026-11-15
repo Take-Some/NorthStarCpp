@@ -2,6 +2,7 @@
 // Author: Kayla Verner
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/character.hpp>
 #include "asset_list_file.hpp"
 
 #include <algorithm>
@@ -113,18 +114,67 @@ Inventory inspect_directory(fs::path const& root)
         auto const ext = extension(path);
         try {
             if (ext == ".ymat") {
-                auto list = load_materials(assets, path);
-                result.materials += list.size();
-                materials.emplace(path, std::move(list));
+                auto const source=detail::read_list_file(assets,path);
+                if(source.kind==30) {
+                    // Authored character materials are JSON YMAT, not the
+                    // world material XML YMAT variant. Validate separately.
+                    auto const data=detail::parse_json(
+                        std::string(source.body.begin(),source.body.end()));
+                    auto const& records=data.get_child("materials");
+                    detail::require(data.get<std::string>("schema")=="northstar.ymat.v1" &&
+                        records.size()==source.entries,"Invalid character material library");
+                    std::set<std::string> names;
+                    for(auto const& record:records) {
+                        detail::require(record.first.empty(),"Invalid character material array");
+                        auto name=record.second.get<std::string>("name");
+                        detail::validate_name(name);
+                        detail::require(names.insert(name).second,
+                                        "Duplicate character material name");
+                    }
+                    result.materials+=records.size();
+                } else {
+                    auto list=detail::parse_materials(source,path);
+                    result.materials+=list.size();
+                    materials.emplace(path,std::move(list));
+                }
             } else if (ext == ".ymt") {
                 auto const file = detail::read_list_file(assets, path);
                 if (detail::legacy_material_library(file))
                     throw std::runtime_error("Legacy .ymt material: convert to .ymat");
-                ++result.unsupported_skeletons;
-            } else if (ext == ".ydd") {
-                auto list = load_drawables(assets, path);
-                result.drawables += list.size();
-                models.emplace(path, std::move(list));
+                if(file.kind==10) {
+                    (void)load_skeleton(assets,path);
+                } else ++result.unsupported_skeletons;
+            } else if (ext == ".ydd" || ext == ".ydr") {
+                auto const file=detail::read_list_file(assets,path);
+                if (file.kind==2 && file.body.size()>=40 &&
+                    detail::Bytes(file.body).integer(0,4)==5) {
+                    auto const geometry=detail::Bytes(file.body).integer(32,8);
+                    if (geometry<=file.body.size()-8 &&
+                        detail::Bytes(file.body).integer(geometry+4,4)!=1) {
+                        // Opaque attachment/shell records are not mesh
+                        // dictionaries; keep them accounted for, not rendered
+                        // as a fabricated cube or rejected from the catalog.
+                        ++result.unsupported_skeletons;
+                        continue;
+                    }
+                }
+                // Binary YDD is a first-class drawable. A matching .ymt
+                // skeleton enables the optional skeletal path; it must not
+                // be required for static rendering of an otherwise valid YDD.
+                auto skeleton_path=fs::path(path).replace_extension(".ymt").generic_u8string();
+                bool has_skeleton=false;
+                try { (void)assets.size(skeleton_path); has_skeleton=true; }
+                catch (std::runtime_error const&) {}
+                if(file.kind==2 && has_skeleton && file.body.size()>=4 &&
+                   detail::Bytes(file.body).integer(0,4)==4) {
+                    auto rig=load_skeleton(assets,skeleton_path);
+                    auto model=load_character_model(assets,path,rig);
+                    result.drawables+=model.parts.size();
+                } else {
+                    auto list=load_drawables(assets,path);
+                    result.drawables+=list.size();
+                    models.emplace(path,std::move(list));
+                }
             } else if (ext == ".ytd") {
                 auto list = load_textures(assets, path);
                 result.textures += list.size();

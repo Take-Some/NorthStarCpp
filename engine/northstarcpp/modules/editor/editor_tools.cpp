@@ -309,4 +309,59 @@ bool History::redo(Scene current,std::size_t selected_index,
     restored_selection=next.selected_index;
     return true;
 }
+void assign_actor_material(Scene& scene,std::size_t actor,
+                           std::string const& virtual_material) {
+    require_index(scene,actor);
+    if(scene.version!=3)
+        promote_to_v3(scene);
+    if(virtual_material.empty() || virtual_material.size()>1024 ||
+       virtual_material.front()=='/' || virtual_material.find('\\')!=std::string::npos ||
+       virtual_material.find(':')!=std::string::npos ||
+       virtual_material.find("//")!=std::string::npos ||
+       virtual_material.find("../")!=std::string::npos ||
+       virtual_material.find("/..")!=std::string::npos ||
+       virtual_material.find('\0')!=std::string::npos)
+        throw std::invalid_argument("Unsafe material asset reference");
+    auto valid_suffix=[&](std::string const& suffix) {
+        return virtual_material.size()>=suffix.size() &&
+            virtual_material.compare(virtual_material.size()-suffix.size(),
+                                     suffix.size(),suffix)==0;
+    };
+    if(!valid_suffix(".material.json") && !valid_suffix(".ymat") &&
+       !valid_suffix(".material") && !valid_suffix(".mtl"))
+        throw std::invalid_argument("An actor must reference a material, not a texture");
+    auto const entity=scene.objects[actor].node.id;
+    if(!entity)throw std::runtime_error("Actor has no stable scene ID");
+    auto entry=std::find_if(scene.components.begin(),scene.components.end(),
+        [&](SceneComponentBlob const& item){
+            return item.entity_id==entity &&
+                   item.type==actor_material_component_type;
+        });
+    if(entry!=scene.components.end()) {
+        entry->version=1;
+        entry->payload=virtual_material;
+    } else {
+        scene.components.push_back({entity,actor_material_component_type,1,
+                                    virtual_material});
+    }
+}
+void clear_actor_material(Scene& scene,std::size_t actor) {
+    require_index(scene,actor);
+    auto const entity=scene.objects[actor].node.id;
+    scene.components.erase(std::remove_if(scene.components.begin(),
+        scene.components.end(),[&](SceneComponentBlob const& entry) {
+            return entry.entity_id==entity &&
+                   entry.type==actor_material_component_type;
+        }),scene.components.end());
+}
+std::string actor_material(Scene const& scene,std::size_t actor) {
+    if(actor>=scene.objects.size())return {};
+    auto const id=scene.objects[actor].node.id;
+    for(auto const& component:scene.components)
+        if(component.entity_id==id &&
+           component.type==actor_material_component_type &&
+           component.version==1)
+            return component.payload;
+    return {};
+}
 } // namespace northstarcpp::editor_tools

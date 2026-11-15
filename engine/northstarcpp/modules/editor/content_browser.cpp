@@ -159,7 +159,7 @@ bool EditorContentBrowser::accepts(fs::path const& p) const {
     auto const ext=lower(p.extension().wstring());
     auto const category=SendMessageW(categories_,CB_GETCURSEL,0,0);
     if (category<=0)return true;
-    if (category==1)return ext==L".ydd" || ext==L".mesh" || ext==L".obj" ||
+    if (category==1)return (ext==L".ydd" || ext==L".ydr") || ext==L".mesh" || ext==L".obj" ||
         ext==L".fbx" || ext==L".gltf" || ext==L".glb";
     if (category==2)return ext==L".ymat" || ext==L".material" || ext==L".mtl";
     if (category==3)return ext==L".ytd" || ext==L".png" || ext==L".jpg" ||
@@ -169,7 +169,7 @@ bool EditorContentBrowser::accepts(fs::path const& p) const {
         ext==L".ymap";
     if (category==6)return ext==L".lua" || ext==L".js" || ext==L".mjs" ||
         ext==L".ysc" || ext==L".py";
-    static wchar_t const* known[]={L".ydd",L".mesh",L".obj",L".fbx",L".gltf",
+    static wchar_t const* known[]={L".ydd",L".ydr",L".mesh",L".obj",L".fbx",L".gltf",
         L".glb",L".ymat",L".material",L".mtl",L".ytd",L".png",L".jpg",
         L".dds",L".tga",L".webp",L".wav",L".ogg",L".mp3",L".nscn",L".nscene",
         L".json",L".ymap",L".nprefab",L".lua",L".js",L".mjs",L".ysc",L".py"};
@@ -254,7 +254,7 @@ void EditorContentBrowser::queue_thumbnails() {
     for(auto const& entry:entries_) {
         if(entry.folder)continue;
         auto const ext=lower(entry.relative.extension().wstring());
-        if(ext!=L".ytd" && ext!=L".ydd" && ext!=L".ymat")continue;
+        if(ext!=L".ytd" && ext!=L".ydd" && ext!=L".ydr" && ext!=L".ymat")continue;
         preview_jobs_.push_back({generation_,root_,entry.relative});
         if(++queued>=300)break;
     }
@@ -302,7 +302,7 @@ void EditorContentBrowser::thumbnail_worker() {
                 auto textures=shared_assets::load_textures(*assets,key);
                 if(!textures.empty())
                     result.image=editor_tools::thumbnail_texture(textures.front());
-            } else if(ext==L".ydd") {
+            } else if(ext==L".ydd" || ext==L".ydr") {
                 auto models=shared_assets::load_drawables(*assets,key);
                 if(!models.empty())
                     result.image=editor_tools::thumbnail_drawable(models.front());

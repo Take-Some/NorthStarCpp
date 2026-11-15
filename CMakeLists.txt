@@ -277,6 +277,7 @@ if(WIN32)
                   "${PROJECT_SOURCE_DIR}/docs/GAME_DISTRIBUTION.md"
                   "${PROJECT_SOURCE_DIR}/docs/CRASH_REPORTING.md"
                   "${PROJECT_SOURCE_DIR}/docs/CAMERA_SYSTEM.md"
+                  "${PROJECT_SOURCE_DIR}/docs/VFS_SHARED_ASSETS.md"
                   "${PROJECT_SOURCE_DIR}/docs/LOGGER.md"
                   "${PROJECT_SOURCE_DIR}/docs/ENGINE_MIGRATION_STATUS.md"
                   "${PROJECT_SOURCE_DIR}/docs/FLECS_ECS.md"

@@ -1,12 +1,13 @@
 @echo off
 setlocal
 for %%I in ("%~dp0..\..") do set "ROOT=%%~fI"
-set "PLAYER=%ROOT%\out\qa-fps-dist-20261114\NorthStarCpp-0.4.0-windows-x64-Release-QA\bin\northstarcpp_player.exe"
+set "PLAYER=%ROOT%\out\fps-release-qa-20261114\northstarcpp_player.exe"
 if not exist "%PLAYER%" (
-  echo [ERROR] Verified NorthStarCpp QA Player is not installed.
+  echo [ERROR] Current NorthStarCpp development Player is not built.
   echo Expected: "%PLAYER%"
+  echo Build: cmake --build out/fps-release-qa-20261114 --target northstarcpp_player
   exit /b 2
 )
 cd /d "%ROOT%"
-"%PLAYER%" --explore --scene "%~dp0main.nscn" %*
+"%PLAYER%" --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\sharedAssets" %*
 exit /b %ERRORLEVEL%

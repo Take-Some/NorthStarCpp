@@ -149,6 +149,37 @@ int main() {
         try {socket.update(.016f,t,&scene);return 30;}
         catch(std::invalid_argument const&){}
         t.attachment.enabled=false;
+
+        // Native transition must animate dollying both into and out of
+        // third person. Wheel distance changes must use follow smoothing.
+        CameraSettings smooth_settings;
+        CameraDirector smooth(smooth_settings);
+        CameraTarget person;
+        person.eye={0.f,1.6f,0.f};
+        person.ignore_object=0;
+        smooth.update(.016f,person,&scene);
+        smooth.set_mode(CameraMode::third_person,.45f);
+        auto approaching=smooth.update(.016f,person,&scene);
+        if (!(approaching.position.z<0.f && approaching.position.z>-4.f))
+            return 31;
+        for (int i=0;i<60;++i) approaching=smooth.update(.016f,person,&scene);
+        if (!approx(approaching.position.z,-4.f,.03f)) return 32;
+        smooth.set_mode(CameraMode::first_person,.45f);
+        auto zooming_in=smooth.update(.016f,person,&scene);
+        if (!(zooming_in.position.z<0.f && zooming_in.position.z>-4.f))
+            return 33;
+        for (int i=0;i<60;++i) zooming_in=smooth.update(.016f,person,&scene);
+        if (!approx(zooming_in.position.z,0.f,.03f)) return 34;
+        smooth.set_mode(CameraMode::third_person,0.f);
+        for (int i=0;i<60;++i) smooth.update(.016f,person,&scene);
+        smooth_settings.third_person_distance=8.f;
+        smooth.configure(smooth_settings);
+        auto zooming_out=smooth.update(.016f,person,&scene);
+        if (!(zooming_out.position.z<-4.f && zooming_out.position.z>-8.f))
+            return 35;
+        for (int i=0;i<60;++i) zooming_out=smooth.update(.016f,person,&scene);
+        if (!approx(zooming_out.position.z,-8.f,.03f)) return 36;
+
         try{camera.update(-0.1f,t,&scene);return 11;}
         catch(std::invalid_argument const&){}
         try{camera.set_zoom(2.f);return 12;}

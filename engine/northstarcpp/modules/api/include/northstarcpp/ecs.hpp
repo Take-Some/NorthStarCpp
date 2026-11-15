@@ -23,6 +23,9 @@ public:
     EcsWorld& operator=(EcsWorld&&) noexcept;
 
     NsEntity create(SceneObject const& object);
+    // Append one transient entity without rebuilding or validating the
+    // entire authored document. The scene host owns stable-ID uniqueness.
+    NsEntity create_runtime(SceneObject const& object);
     void update(NsEntity entity, SceneObject const& object);
     void erase(NsEntity entity);
     bool alive(NsEntity entity) const;

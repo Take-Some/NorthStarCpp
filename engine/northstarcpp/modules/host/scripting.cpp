@@ -3,6 +3,8 @@
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/shared_assets.hpp>
 #include "module_loader.hpp"
+#include <algorithm>
+#include <iterator>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -15,6 +17,138 @@ namespace northstarcpp {
 namespace {
 bool valid_identifier(std::string_view name, bool dots);
 constexpr std::size_t max_host_bytes = NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES * 4ull;
+
+// Import lowering for VFS-backed class exports. Both engine.scripting
+// providers currently evaluate classic scripts, so these *named*, static
+// imports are translated to lexical bindings in an isolated function scope.
+// This intentionally does not claim full ESM (export, dynamic import, cycles).
+std::string lower_engine_imports(std::string_view source) {
+    auto const identifier_start=[](char c) {
+        return (c>='A' && c<='Z') || (c>='a' && c<='z') ||
+               c=='_' || c=='$';
+    };
+    auto const identifier_part=[&](char c) {
+        return identifier_start(c) || (c>='0' && c<='9');
+    };
+    auto skip_whitespace=[&](std::size_t& i) {
+        while(i<source.size() &&
+              (source[i]==' ' || source[i]=='\t' || source[i]=='\n' || source[i]=='\r'))
+            ++i;
+    };
+    auto skip_comments=[&](std::size_t& i) {
+        for(;;) {
+            skip_whitespace(i);
+            if(source.substr(i,2)=="//") {
+                i+=2;
+                while(i<source.size() && source[i]!='\n') ++i;
+            } else if(source.substr(i,2)=="/*") {
+                auto const end=source.find("*/",i+2);
+                if(end==std::string_view::npos)
+                    throw std::invalid_argument("Unclosed script header comment");
+                i=end+2;
+            } else break;
+        }
+    };
+    auto read_identifier=[&](std::size_t& i) {
+        if(i>=source.size() || !identifier_start(source[i]))
+            throw std::invalid_argument("Expected a named engine module identifier");
+        auto const start=i++;
+        while(i<source.size() && identifier_part(source[i])) ++i;
+        return std::string(source.substr(start,i-start));
+    };
+    std::string result(source);
+    std::string bindings;
+    std::size_t cursor=0;
+    std::size_t import_count=0;
+    for(;;) {
+        skip_comments(cursor);
+        if(source.substr(cursor,6)!="import" ||
+           cursor+6>=source.size() ||
+           identifier_part(source[cursor+6]))
+            break;
+        auto const start=cursor;
+        cursor+=6;
+        skip_whitespace(cursor);
+        if(cursor>=source.size() || source[cursor]!='{')
+            throw std::invalid_argument(
+                "Only named imports from @northstar/engine are currently supported");
+        ++cursor;
+        unsigned names=0;
+        for(;;) {
+            skip_whitespace(cursor);
+            if(cursor>=source.size())
+                throw std::invalid_argument("Unterminated named engine import");
+            if(source[cursor]=='}') {
+                ++cursor;
+                if(!names) throw std::invalid_argument("Empty engine import");
+                break;
+            }
+            auto const imported=read_identifier(cursor);
+            static constexpr std::string_view allowed[]{
+                "Camera","Input","Events","Character","Player","Script",
+                 "Keys","GamepadButtons","Entity","Prefab","Scene","Physics","Session","UI","Logger"};
+            if(std::find(std::begin(allowed),std::end(allowed),imported)==std::end(allowed))
+                throw std::invalid_argument("Unknown @northstar/engine export: "+imported);
+            skip_whitespace(cursor);
+            std::string local=imported;
+            if(source.substr(cursor,2)=="as" &&
+               cursor+2<source.size() &&
+               !identifier_part(source[cursor+2])) {
+                cursor+=2;
+                skip_whitespace(cursor);
+                local=read_identifier(cursor);
+            }
+            bindings+="const "+local+" = globalThis.NorthStar.modules.engine."+
+                imported+";\n";
+            ++names;
+            if(names>32) throw std::invalid_argument("Too many engine imports");
+            skip_whitespace(cursor);
+            if(cursor<source.size() && source[cursor]==',') {
+                ++cursor;
+                skip_whitespace(cursor);
+                if(cursor<source.size() && source[cursor]=='}') {
+                    ++cursor;
+                    break;
+                }
+                continue;
+            }
+            if(cursor>=source.size() || source[cursor]!='}')
+                throw std::invalid_argument("Malformed named engine import");
+            ++cursor;
+            break;
+        }
+        skip_whitespace(cursor);
+        if(source.substr(cursor,4)!="from" ||
+           (cursor+4<source.size() && identifier_part(source[cursor+4])))
+            throw std::invalid_argument("Expected 'from' in engine import");
+        cursor+=4;
+        skip_whitespace(cursor);
+        if(cursor>=source.size() ||
+           (source[cursor]!='"' && source[cursor]!='\''))
+            throw std::invalid_argument("Expected quoted engine module specifier");
+        char const quote=source[cursor++];
+        auto const spec_start=cursor;
+        while(cursor<source.size() && source[cursor]!=quote) {
+            if(source[cursor]=='\\')
+                throw std::invalid_argument("Escaped engine module specifiers are unsupported");
+            ++cursor;
+        }
+        if(cursor>=source.size()) throw std::invalid_argument("Unterminated engine module specifier");
+        auto const spec=source.substr(spec_start,cursor-spec_start);
+        ++cursor;
+        if(spec!="@northstar/engine")
+            throw std::invalid_argument("Unsupported module specifier: "+std::string(spec));
+        while(cursor<source.size() && (source[cursor]==' ' || source[cursor]=='\t')) ++cursor;
+        if(cursor<source.size() && source[cursor]==';') ++cursor;
+        if(cursor<source.size() && source[cursor]!='\r' && source[cursor]!='\n')
+            throw std::invalid_argument("Unexpected characters after engine import");
+        for(std::size_t j=start;j<cursor;++j)
+            if(result[j]!='\r' && result[j]!='\n') result[j]=' ';
+        if(++import_count>32) throw std::invalid_argument("Too many engine import statements");
+    }
+    if(!import_count) return std::string(source);
+    return "(function(){\n\"use strict\";\n"+bindings+result+"\n})();";
+}
 }
 
 struct ScriptRuntime::State {
@@ -184,9 +318,12 @@ std::string ScriptRuntime::evaluate(std::string_view source, std::string_view or
         throw std::invalid_argument("Invalid scripting origin");
     // origin_utf8 must be NUL-terminated at the C ABI boundary.
     std::string file_name(origin);
+    auto const compiled=lower_engine_imports(source);
+    if(compiled.size()>state_->options.max_source_bytes)
+        throw std::length_error("Imported script exceeds JavaScript source limit");
     NorthStarScriptResult result{sizeof(NorthStarScriptResult), nullptr, 0};
-    if (!state_->api.evaluate(state_->context, source.data(),
-            static_cast<std::uint32_t>(source.size()), file_name.c_str(), &result))
+    if (!state_->api.evaluate(state_->context, compiled.data(),
+            static_cast<std::uint32_t>(compiled.size()), file_name.c_str(), &result))
         throw state_->module.error("JavaScript evaluation failed");
     if (result.size < sizeof(result) || !result.json_utf8 ||
         result.json_bytes > NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES * 4u)

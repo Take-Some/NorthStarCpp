@@ -1,6 +1,7 @@
 #include <algorithm>
 // Decoded asset thumbnail regression.
 #include "editor_asset_thumbnails.hpp"
+#include "editor_asset_material_source.hpp"
 #include <northstarcpp/shared_assets.hpp>
 #include <cstdint>
 #include <vector>
@@ -97,6 +98,37 @@ int main(int argc,char** argv) {
         auto materials=shared_assets::load_materials(assets,"materials/skydome.ymat");
         if(textures.size()!=5 || drawables.size()!=1 || materials.size()!=3)
             return 12;
+        // A native YDD preview must sample the exact YMAT/YTD albedo
+        // bindings that Player resolves, not merely color the mesh blue.
+        auto pistol=shared_assets::load_drawables(
+            assets,"models/weapon/pistol/pistol.ydd");
+        if(pistol.size()!=1 || pistol.front().meshes.size()!=8)return 42;
+        std::vector<MaterialDefinition> pistol_materials;
+        for(auto const& part:pistol.front().meshes) {
+            if(part.material.empty())return 43;
+            pistol_materials.push_back(load_material_definition(
+                assets,part.material));
+            if(pistol_materials.back().textures[0].rgba8.empty())return 44;
+        }
+        auto plain_pistol=preview_drawable(pistol.front(),256,256,.6f,.3f,1.f);
+        auto textured_pistol=preview_drawable(pistol.front(),256,256,.6f,.3f,1.f,
+                                             false,&pistol_materials);
+        if(!plain_pistol.valid() || !textured_pistol.valid() ||
+           plain_pistol.argb==textured_pistol.argb)return 45;
+        // The Qt material picker must understand BOTH YMAT representations.
+        // Imported skeletal/weapon libraries may contain unresolved source
+        // YTD references, but their materials and preview parameters must
+        // remain inspectable without a crashing modal error.
+        for(auto const& reference:{
+                "characters/abby/materials/abby.ymat@m00",
+                "materials/weapon_pistol.ymat@m00"}) {
+            auto const selected=northstarcpp::editor::loadMaterialPreviewSource(
+                std::filesystem::u8path(argv[1]),std::string(reference));
+            if(!selected.material || selected.material->name!="m00")
+                return 40;
+            auto visual=preview_material(*selected.material,selected.textures,128);
+            if(!visual.valid())return 41;
+        }
         std::vector<shared_assets::ResolvedAsset<shared_assets::Texture>> bindings;
         bindings.reserve(textures.size());
         for(auto const& tex:textures)

@@ -29,6 +29,17 @@ struct EditorCamera {
 // matching the authored cube proxy; depth order resolves occlusion.
 std::optional<float> intersect_actor_proxy(Ray ray,SceneObject const& object,
                                            std::uint32_t scene_version) noexcept;
+// The hit position is derived from the same narrowphase engine.collision
+// query used for selection, so drag placement respects elevated geometry.
+struct ActorSurfaceHit {
+    std::size_t index=0;
+    float distance=0.f;
+    Vector3 position{};
+};
+std::optional<ActorSurfaceHit> hit_actor_geometry(
+    Scene const& scene, Ray ray,
+    northstarcpp::CollisionService const& collision,
+    northstarcpp::GeometryService const& geometry);
 // Exact triangle picking for procedurally generated scene meshes.
 std::optional<std::size_t> pick_actor(Scene const& scene,Ray ray) noexcept;
 std::optional<std::size_t> pick_actor_geometry(

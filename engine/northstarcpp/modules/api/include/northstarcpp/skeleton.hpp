@@ -18,9 +18,20 @@ struct SkeletonJoint {
     int parent = -1;
     JointTransform bind;
 };
+// Author-controlled secondary rig behavior inferred from matching bind
+// hierarchies at import time, never reconstructed per animation frame.
+struct SecondaryPaletteConstraint {
+    std::uint32_t bone = 0;
+    std::uint32_t source_a = 0, source_b = 0;
+    float source_b_weight = 0.f; // [0,1], row-major affine palette blend
+};
 struct Skeleton {
     std::vector<SkeletonJoint> joints;
     std::vector<math::float4x4> inverse_bind;
+    // Bind-identical secondary rig nodes that must follow keyed primary joints.
+    // Stored once by the importer to avoid rebuilding maps during each frame.
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> mirrored_helpers;
+    std::vector<SecondaryPaletteConstraint> secondary_palette_constraints;
     float eye_height = 1.62f;
 };
 struct SkeletalClip {

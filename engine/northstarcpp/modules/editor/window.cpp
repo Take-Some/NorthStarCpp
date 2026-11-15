@@ -11,6 +11,8 @@
 #include <northstarcpp/scene_chunk_index.hpp>
 #include <northstarcpp/scene_navigation_cells.hpp>
 #include "crash_handler.hpp"
+#include "../shared/frame_profiler.hpp"
+#include "../shared/startup_report.hpp"
 #include "resource_ids.h"
 
 #include <northstarcpp/physics.hpp>
@@ -152,8 +154,7 @@ struct Options {
     bool smoke = false;
     bool check_scene = false;
     bool runtime_init_smoke = false;
-    bool abby = false;
-    bool abby_smoke = false;
+    bool character_smoke = false;
     bool fps = false;
     bool explore = false;
     bool fps_ui_smoke = false;
@@ -179,12 +180,8 @@ Options options()
             result.inspect_providers = true;
         else if (arg == L"--check-scene")
             result.check_scene = true;
-        else if (arg == L"--abby")
-            result.abby = true;
-        else if (arg == L"--abby-smoke") {
-            result.abby = true;
-            result.abby_smoke = true;
-        }
+        else if (arg == L"--character-smoke")
+            result.character_smoke = true;
         else if (arg == L"--runtime-init-smoke")
             result.runtime_init_smoke = true;
         else if (arg == L"--shared-assets" && i + 1 < count)
@@ -217,7 +214,7 @@ Options options()
             result.smoke_output = args[++i];
         else
             throw std::runtime_error("Usage: --scene FILE, or --archive FILE [--archive-data FILE] --scene VIRTUAL_PATH. "
-                "Options: --inspect-providers, --warp, --smoke, --check-scene, --fps, --explore, --abby, --abby-smoke, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
+                "Options: --inspect-providers, --warp, --smoke, --check-scene, --fps, --explore, --character-smoke, --smoke-output FILE, --new-scene FILE (editor), --check-shared-assets DIR, --shared-assets DIR, --asset-zones FILE.");
     }
     if ((!result.archive_path.empty() && result.scene_path.empty()) ||
         (!result.archive_data.empty() && result.archive_path.empty()))
@@ -245,6 +242,34 @@ bool same_asset_directory(fs::path const& a,fs::path const& b) {
     std::error_code ec;
     bool same=fs::equivalent(a,b,ec);
     return !ec && same;
+}
+
+fs::path discover_shared_assets(Options const& config, fs::path const& project_root) {
+    if (!config.shared_asset_root.empty()) {
+        if (!fs::is_directory(config.shared_asset_root))
+            throw std::runtime_error("Configured sharedAssets directory is missing");
+        return fs::absolute(config.shared_asset_root);
+    }
+    auto find_from=[](fs::path start) -> fs::path {
+        for (auto parent=std::move(start); !parent.empty();) {
+            auto const candidate=parent/"sharedAssets";
+            if (fs::is_directory(candidate)) return candidate;
+            auto const next=parent.parent_path();
+            if (next==parent) break;
+            parent=next;
+        }
+        return {};
+    };
+    if (!project_root.empty()) {
+        auto project=find_from(fs::absolute(project_root));
+        if (!project.empty()) return project;
+    }
+    std::array<wchar_t,32768> exe{};
+    auto const length=GetModuleFileNameW(nullptr,exe.data(),
+        static_cast<DWORD>(exe.size()));
+    if (length && length<exe.size())
+        return find_from(fs::path(exe.data()).parent_path());
+    return {};
 }
 
 Scene read_document(fs::path const& path)
@@ -286,6 +311,51 @@ double script_number(std::string const& value) {
     if (end!=value.size() || !std::isfinite(number))
         throw std::invalid_argument("Invalid scripting number");
     return number;
+}
+
+// Structured character descriptors are validated as JSON objects rather than
+// flattened by script_args(). The bridge never accepts arbitrary host paths.
+CharacterAssetSpec parse_script_character(std::string_view json) {
+    if(json.empty() || json.size()>NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES)
+        throw std::invalid_argument("Character descriptor exceeds scripting limit");
+    boost::property_tree::ptree array;
+    std::istringstream stream{std::string(json)};
+    boost::property_tree::read_json(stream,array);
+    if(array.size()!=1 || !array.front().first.empty())
+        throw std::invalid_argument("character.load(descriptor) expects one object");
+    auto const& definition=array.front().second;
+    auto path=[](std::string const& value)->std::string {
+        auto const input=fs::u8path(value);
+        if(value.empty() || value.size()>240 || input.is_absolute() ||
+           value.find(':')!=std::string::npos ||
+           value.find('\\')!=std::string::npos)
+            throw std::invalid_argument("Character asset must use a relative VFS path");
+        for(auto const& part:input)
+            if(part.empty() || part=="." || part=="..")
+                throw std::invalid_argument("Character asset path escapes its VFS");
+        return value;
+    };
+    CharacterAssetSpec descriptor;
+    descriptor.model=path(definition.get<std::string>("model"));
+    descriptor.skeleton=path(definition.get<std::string>("skeleton"));
+    descriptor.material=path(definition.get<std::string>("material"));
+    descriptor.textures=path(definition.get<std::string>("textures"));
+    auto const animations=definition.get_child_optional("animations");
+    if(!animations || animations->empty() || animations->size()>32)
+        throw std::invalid_argument("Character requires 1..32 named animation clips");
+    std::set<std::string> names;
+    for(auto const& [key,value]:*animations) {
+        if(!key.empty()) throw std::invalid_argument("Animations must be an array");
+        CharacterAnimationAsset item;
+        item.name=value.get<std::string>("name");
+        item.source=path(value.get<std::string>("source"));
+        item.clip=value.get<std::string>("clip");
+        if(item.name.empty() || item.name.size()>64 || item.clip.empty() ||
+           item.clip.size()>160 || !names.insert(item.name).second)
+            throw std::invalid_argument("Invalid or duplicate skeletal animation name");
+        descriptor.animations.push_back(std::move(item));
+    }
+    return descriptor;
 }
 
 // Projects may place their startup scene in a nested level/ directory.
@@ -406,17 +476,42 @@ std::string script_object_payload(SceneObject const& obj,std::size_t index,float
 }
 
 class App {
+private:
+    // Defined before the constructor because placeholder return-type
+    // deduction is not available until this template definition is seen.
+    template<class F>
+    decltype(auto) bootstrap_stage(char const* phase,F&& fn) {
+        if(startup_report_)
+            return startup_report_->measure(phase,std::forward<F>(fn));
+        return std::forward<F>(fn)();
+    }
 public:
-    explicit App(Options settings) : config(std::move(settings))
+    explicit App(Options settings, diagnostics::StartupReport* startup_report=nullptr)
+        : config(std::move(settings)), startup_report_(startup_report)
     {
+        auto const profile_frames = diagnostics::FrameProfiler::requested_frames();
+        if (profile_frames)
+            frame_profiler = std::make_unique<diagnostics::FrameProfiler>(profile_frames);
         file_path = config.scene_path;
-        if (config.new_document && fs::exists(file_path))
-            config.new_document = false;
-        if (!file_path.empty() && !config.new_document)
-            document.load(load_startup_scene());
-        else if (!config.smoke || !editor)
-            document.load(make_startup_scene());
+        bootstrap_stage("scene.load", [&] {
+            if (config.new_document && fs::exists(file_path))
+                config.new_document = false;
+            if (!file_path.empty() && !config.new_document)
+                document.load(load_startup_scene());
+            else if (!config.smoke || !editor)
+                document.load(make_startup_scene());
+        });
         dirty = config.new_document;
+        if(startup_report_) {
+            auto const snapshot=document.snapshot();
+            startup_report_->info("scene.summary",
+                "version="+std::to_string(snapshot.version)+
+                " objects="+std::to_string(snapshot.objects.size())+
+                " components="+std::to_string(snapshot.components.size())+
+                " cells="+std::to_string(snapshot.cells.size())+
+                " layers="+std::to_string(snapshot.layers.size()));
+        }
+        bootstrap_stage("script.discovery", [&] {
         if (!file_path.empty() &&
             !config.smoke && !config.fps_ui_smoke && !config.check_scene) {
             auto const root = config.archive_path.empty()
@@ -453,24 +548,14 @@ public:
                 }
             }
         }
+        });
+        if(startup_report_)
+            startup_report_->info("script.mode",
+                std::string("scripted=")+(scripted_game?"true":"false")+
+                " first_person="+(scripted_first_person?"true":"false"));
         if (!editor) {
-            if (!config.abby && !config.smoke && !config.check_scene && !config.fps_ui_smoke &&
-                config.archive_path.empty() && !file_path.empty()) {
-                auto const root = script_project_root(file_path);
-                auto const manifest = root / "northstarcpp.project.json";
-                if (fs::is_regular_file(manifest)) {
-                    boost::property_tree::ptree metadata;
-                    boost::property_tree::read_json(manifest.u8string(), metadata);
-                    config.abby = metadata.get<std::string>("player_character","") == "abby";
-                }
-            }
-            if (config.abby && !config.fps && !scripted_first_person) {
-                config.fps = true;
-                config.explore = true;
-            }
-            if (config.abby && scripted_game) scripted_first_person = true;
             auto initial_scene = document.snapshot();
-            if (config.fps) {
+            if (config.fps) bootstrap_stage("fps.assets", [&] {
                 // A FPS project can supply its data through engine.assets.
                 // Both source projects and exported games contain <scene>/assets/.
                 // Data is never read directly from disk by the gameplay subsystem.
@@ -480,41 +565,90 @@ public:
                         if (!fs::is_directory(asset_root))
                             throw std::runtime_error("FPS asset root is not a directory");
                         fps_assets = std::make_unique<AssetManager>();
-                        fps_assets->mount_directory("", asset_root);
+                        auto const base=script_project_root(file_path);
+                        fps_assets->mount_project_assets(base,
+                            discover_shared_assets(config,base));
                         if (!scripted_game && !config.explore) {
                             auto tuning = fps_assets->request_fps_tuning("gameplay/fps.json");
                             fps_shot = fps_assets->request_audio_clip("audio/shot.wav", AssetPriority::background);
                             fps_reload = fps_assets->request_audio_clip("audio/reload.wav", AssetPriority::background);
-                            fps_tuning = *tuning.get();
+                            try { fps_tuning = *tuning.get(); }
+                            catch(std::exception const& e) {
+                                bootstrap_warning("fps.assets",
+                                    std::string("Skipping invalid gameplay/fps.json: ")+e.what());
+                            }
                         }
-                        // Older FPS projects may omit camera.json; malformed present
-                        // content remains a hard error, not an unnoticed fallback.
+                        // Optional authoring camera presets do not prevent
+                        // otherwise valid FPS scenes from loading.
                         bool has_camera_asset = false;
                         try { (void)fps_assets->size("gameplay/camera.json"); has_camera_asset = true; }
                         catch (std::exception const&) {}
-                        if (has_camera_asset)
-                            fps_camera_settings = load_camera_settings(*fps_assets);
+                        if (has_camera_asset) {
+                            try { fps_camera_settings=load_camera_settings(*fps_assets); }
+                            catch(std::exception const& e) {
+                                bootstrap_warning("fps.assets",
+                                    std::string("Skipping invalid gameplay/camera.json: ")+e.what());
+                            }
+                        }
                     }
                 }
                 if (!scripted_first_person)
                     fps = std::make_unique<FpsArena>(initial_scene,
                         fps_tuning, config.explore);
-            }
-            preview = std::make_unique<PhysicsScene>(initial_scene);
-            initialize_asset_zones();
-            if (fps || scripted_first_person) {
+            });
+            bootstrap_stage("physics.provider", [&] {
+                preview=std::make_unique<PhysicsScene>(initial_scene);
+            });
+            if(startup_report_)
+                startup_report_->info("physics.provider",
+                    "selected="+preview->provider_name()+
+                    " version="+preview->provider_version());
+            bootstrap_stage("streaming.zones", [&] {
+                try {
+                    initialize_asset_zones();
+                } catch(std::exception const& e) {
+                    bootstrap_warning("streaming.zones",
+                        std::string("Skipping invalid streaming zone manifest: ")+e.what());
+                    asset_zones.reset();
+                    zone_assets.reset();
+                }
+            });
+            if(startup_report_)
+                startup_report_->info("streaming.zones",
+                    std::string("enabled=")+(asset_zones?"true":"false"));
+            if (fps || scripted_first_person) bootstrap_stage("camera.initialize", [&] {
                 fps_camera = std::make_unique<CameraDirector>(fps_camera_settings);
-                if (config.abby)
-                    fps_camera->set_mode(CameraMode::third_person,0.f);
+                // Camera mode is chosen by project scripts, not by the Player.
                 if (fps) update_fps_camera(0.f, false);
                 else update_script_camera(0.f);
-            }
-            update_asset_zones();
+            });
+            bootstrap_stage("streaming.update_initial", [&] {update_asset_zones();});
         }
-        rebuild_scene_world();
+        bootstrap_stage("scene.partition", [&] {rebuild_scene_world();});
+        if(startup_report_)
+            startup_report_->info("scene.partition",
+                std::string("enabled=")+(scene_world?"true":"false")+
+                " asset_store="+(scene_assets?scene_assets->provider_name():"none"));
         if (!editor && !config.smoke && !config.check_scene && !config.fps_ui_smoke &&
             !file_path.empty())
-            initialize_project_scripts();
+            bootstrap_stage("scripts.initialize", [&] {initialize_project_scripts();});
+        if(startup_report_) {
+            startup_report_->info("scripts.provider",
+                std::string("state=")+(script_runtime?"running":"inactive")+
+                (script_runtime?
+                    " selected="+script_runtime->provider_name()+
+                    " version="+script_runtime->provider_version():""));
+            startup_report_->info("ecs.provider",
+                std::string("state=")+(script_ecs?"running":"inactive")+
+                (script_ecs?" selected="+script_ecs->provider_name()+
+                    " entities="+std::to_string(script_ecs->size()):""));
+            startup_report_->info("assets.provider",
+                std::string("fps=")+(fps_assets?fps_assets->provider_name():"none")+
+                " zones="+(zone_assets?zone_assets->provider_name():"none")+
+                " scripts="+(script_assets?script_assets->provider_name():"none"));
+            startup_report_->info("audio.provider",
+                "initialization=deferred-until-first-play");
+        }
     }
 
     ~App() {
@@ -533,6 +667,7 @@ public:
 
     int run(HINSTANCE instance)
     {
+        bootstrap_stage("window.classes", [&] {
         WNDCLASSEXW type{};
         type.cbSize = sizeof(type);
         type.hInstance = instance;
@@ -550,17 +685,28 @@ public:
         type.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
         if (!RegisterClassExW(&type))
             throw std::runtime_error("Cannot register application window");
+        });
+        bootstrap_stage("window.create", [&] {
         window = CreateWindowExW(WS_EX_CONTROLPARENT, window_class,
             editor ? L"NorthStarCpp Editor" : L"NorthStarCpp Player",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
             1450, 870, nullptr, nullptr, instance, this);
         if (!window)
             throw std::runtime_error("Cannot create application window");
+        });
 
         try {
-            input = std::make_unique<InputDevice>(reinterpret_cast<uintptr_t>(window));
-            surface = child(viewport_class, L"", WS_CLIPSIBLINGS, 0);
-            if (editor) {
+            bootstrap_stage("input.provider", [&] {
+                input=std::make_unique<InputDevice>(reinterpret_cast<uintptr_t>(window));
+            });
+            if(startup_report_)
+                startup_report_->info("input.provider",
+                    "selected="+input->provider_name()+
+                    " version="+input->provider_version());
+            bootstrap_stage("window.surface", [&] {
+                surface=child(viewport_class, L"", WS_CLIPSIBLINGS, 0);
+            });
+            if (editor) bootstrap_stage("editor.controls", [&] {
                 restore_workspace();
                 create_editor_controls();
                 CheckMenuItem(GetMenu(window),menu_legacy_content,
@@ -575,18 +721,26 @@ public:
                 accelerators=CreateAcceleratorTableW(table,5);
                 if (!accelerators)
                     throw std::runtime_error("Cannot create editor keyboard shortcuts");
-            }
+            });
             if (fps)
-                create_fps_menu();
-            layout();
-            graphics = std::make_unique<Viewport>(surface, config.warp);
-            if (!file_path.empty()) {
+                bootstrap_stage("fps.menu", [&] {create_fps_menu();});
+            bootstrap_stage("window.layout", [&] {layout();});
+            bootstrap_stage("renderer.provider", [&] {
+                graphics=std::make_unique<Viewport>(surface,config.warp);
+            });
+            if(startup_report_)
+                startup_report_->info("renderer.provider",
+                    "selected="+graphics->renderer_provider_name()+
+                    " version="+graphics->renderer_provider_version()+
+                    " warp="+(config.warp?"true":"false"));
+            if (!file_path.empty()) bootstrap_stage("renderer.asset_mounts", [&] {
                 graphics->set_asset_sources(
                     config.archive_path.empty()?script_project_root(file_path):fs::path{},
-                    config.archive_path,config.archive_data);
-            }
-            if (config.abby) load_abby();
-            if (fps_assets) {
+                    config.archive_path,config.archive_data,
+                    discover_shared_assets(config,file_path.empty()
+                        ? fs::path{} : script_project_root(file_path)));
+            });
+            if (fps_assets) bootstrap_stage("renderer.skydome", [&] {
                 bool skydome_available = false;
                 try {
                     (void)fps_assets->size("models/skydome.ydd");
@@ -595,14 +749,21 @@ public:
                     // Older FPS projects contain no authored sky.
                 }
                 if (skydome_available) {
-                    auto sky = fps_assets->request_drawable_resources(
-                        "models/skydome.ydd@skydome_high", AssetPriority::critical).get();
-                    graphics->set_sky(*sky);
+                    try {
+                        auto sky = fps_assets->request_drawable_resources(
+                            "models/skydome.ydd@skydome_high", AssetPriority::critical).get();
+                        graphics->set_sky(*sky);
+                    } catch(std::exception const& e) {
+                        bootstrap_warning("renderer.skydome",
+                            std::string("Skipping invalid skydome asset: ")+e.what());
+                    }
                 }
-            }
-            refresh();
-            ShowWindow(window, SW_SHOWNORMAL);
-            UpdateWindow(window);
+            });
+            bootstrap_stage("window.show", [&] {
+                refresh();
+                ShowWindow(window,SW_SHOWNORMAL);
+                UpdateWindow(window);
+            });
             if (!script_window_title.empty())
                 SetWindowTextW(window,script_window_title.c_str());
             if (!editor && (fps || scripted_first_person)) {
@@ -610,12 +771,22 @@ public:
                 capture_fps_cursor();
                 update_fps_title();
             }
-            if (!SetTimer(window, frame_timer, 16, nullptr))
-                throw std::runtime_error("Cannot start application frame timer");
+            bootstrap_stage("frame.timer", [&] {
+                if (!SetTimer(window,frame_timer,16,nullptr))
+                    throw std::runtime_error("Cannot start application frame timer");
+            });
+            if(startup_report_)
+                startup_report_->info("frame.timer","interval_ms=16");
             if (!editor && !scripted_game && !config.smoke &&
                 !config.check_scene && !config.fps_ui_smoke)
-                play_start_sound();
-            if ((config.smoke || config.check_scene || config.fps_ui_smoke || config.abby_smoke) &&
+                bootstrap_stage("audio.start_sound", [&] {
+                    play_start_sound();
+                    if(startup_report_)
+                        startup_report_->info("audio.provider",
+                            std::string("state=")+(audio?"active":"unavailable")+
+                            (audio?" selected="+audio->provider_name():""));
+                });
+            if ((config.smoke || config.check_scene || config.fps_ui_smoke || config.character_smoke) &&
                 !PostMessageW(window, smoke_message, 0, 0))
                 throw std::runtime_error("Cannot start application smoke test");
         } catch (...) {
@@ -643,6 +814,10 @@ public:
     }
 
 private:
+    void bootstrap_warning(char const* phase,std::string const& message) const noexcept {
+        if(startup_report_)startup_report_->warning(phase,message);
+        else std::fprintf(stderr,"[WARN] [engine.assets] %s\n",message.c_str());
+    }
     static LRESULT CALLBACK viewport_procedure(HWND handle,UINT msg,
                                                  WPARAM wp,LPARAM lp)
     {
@@ -899,8 +1074,18 @@ private:
                 app->report(error.what());
                 return 0;
             }
-            app->report(error.what());
+            // A Win32 MessageBox runs a nested message pump. If a frame
+            // throws, stop dispatching WM_TIMER before opening the dialog:
+            // otherwise the same failing frame can recursively open dozens
+            // of modal errors and leave the Player unresponsive.
+            app->runtime_faulted = true;
+            KillTimer(handle, frame_timer);
             app->exit_status = 1;
+            if(app->startup_report_ && !app->startup_report_->completed()) {
+                app->startup_report_->failure("window.message",error.what());
+                app->startup_report_->complete("FAILED");
+            }
+            app->report(error.what());
             DestroyWindow(handle);
             return 0;
         }
@@ -1092,8 +1277,16 @@ private:
                 auto priority=AssetPriority::normal;
                 if (scene_asset_requests.size()<8)
                     priority=AssetPriority::critical;
-                scene_asset_requests.emplace(path,
-                    scene_assets->request_drawable_resources(path,priority));
+                try {
+                    scene_asset_requests.emplace(path,
+                        scene_assets->request_drawable_resources(path,priority));
+                } catch(std::exception const& e) {
+                    // A synchronous rejection must not block subsequent cells.
+                    scene_asset_failed.insert(path);
+                    std::fprintf(stderr,
+                        "[WARN] [engine.assets] Skipping streaming drawable '%s': %s\n",
+                        path.c_str(),e.what());
+                }
             }
         }
         for (auto it=scene_asset_requests.begin();it!=scene_asset_requests.end();) {
@@ -1107,7 +1300,9 @@ private:
                 ++it;
             } catch (std::exception const& error) {
                 scene_asset_failed.insert(it->first);
-                OutputDebugStringA(error.what());
+                std::fprintf(stderr,
+                    "[WARN] [engine.assets] Skipping streaming drawable '%s': %s\n",
+                    it->first.c_str(),error.what());
                 it=scene_asset_requests.erase(it);
             }
         }
@@ -1119,7 +1314,7 @@ private:
             return;
         Vector3 position{0.f,0.f,0.f};
         std::string room;
-        auto const scene = preview ? preview->scene() : document.snapshot();
+        auto const scene = preview ? preview->authored_scene() : document.snapshot();
         for (auto const& object : scene.objects)
             if (object.player) {
                 position = object.position;
@@ -1235,7 +1430,14 @@ private:
                     break;
                 }
         }
-        asset_zones->update({position.x, position.y, position.z});
+        try {
+            asset_zones->update({position.x, position.y, position.z});
+        } catch(std::exception const& e) {
+            std::fprintf(stderr,
+                "[WARN] [engine.assets] Disabling invalid streaming zone: %s\n",
+                e.what());
+            asset_zones.reset(); // Prevent a warning storm on later frames.
+        }
     }
 
     void update_fps_title()
@@ -1299,58 +1501,52 @@ private:
         update_fps_title();
     }
 
-    void load_abby()
+    void apply_script_character(Scene const& scene, float dt)
     {
-        AssetStore assets;
-        auto const project = file_path.empty() ? fs::path{} : script_project_root(file_path);
-        if (!project.empty() && fs::is_directory(project/"assets"/"models"/"abby")) {
-            assets.mount_directory("",project/"assets");
-            graphics->load_character(assets,"");
-            return;
-        }
-        auto common = config.shared_asset_root;
-        if (common.empty()) {
-            for (auto parent = project; !parent.empty(); parent = parent.parent_path()) {
-                if (fs::is_regular_file(parent/"sharedAssets/models/abby/abby.ydd")) {
-                    common = parent/"sharedAssets";
-                    break;
+        if(!graphics) return;
+        if(script_character_dirty) {
+            if(script_character) {
+                try {
+                    if(!script_assets)
+                        throw std::runtime_error("No mounted character asset store");
+                    graphics->load_character(*script_assets,*script_character);
+                } catch(std::exception const& e) {
+                    std::fprintf(stderr,
+                        "[WARN] [engine.assets] Skipping invalid scripted character: %s\n",
+                        e.what());
+                    script_character.reset();
+                    script_character_pose.reset();
+                    graphics->clear_character();
                 }
-                if (parent == parent.parent_path()) break;
+            } else {
+                graphics->clear_character();
             }
+            script_character_dirty=false;
         }
-        if (common.empty()) {
-            std::array<wchar_t,32768> executable{};
-            auto const length = GetModuleFileNameW(nullptr,executable.data(),
-                static_cast<DWORD>(executable.size()));
-            if (length && length < executable.size())
-                common = fs::path(executable.data()).parent_path().parent_path()/"sharedAssets";
-        }
-        if (!fs::is_directory(common))
-            throw std::runtime_error("Cannot locate Abby shared assets");
-        assets.mount_directory("",common);
-        graphics->load_character(assets,"");
-    }
-
-    void update_abby(Scene const& scene, float yaw, float dt)
-    {
-        if (!config.abby) return;
-        if (fps_camera && fps_camera->mode() == CameraMode::first_person) {
+        if(!script_character) return;
+        if(!script_character_pose) {
             graphics->hide_character();
             return;
         }
-        auto const player = std::find_if(scene.objects.begin(),scene.objects.end(),
-            [](auto const& object) { return object.player; });
-        if (player == scene.objects.end())
-            throw std::runtime_error("An Abby scene must have a player spawn");
-        auto const foot = player->position;
-        bool moving = false, airborne = false;
-        if (abby_previous && dt > 0.f) {
-            auto const dx = foot.x - abby_previous->x, dz = foot.z - abby_previous->z;
-            moving = std::hypot(dx,dz) > dt * .15f;
-            airborne = std::abs(foot.y - abby_previous->y) > dt * .35f;
+        auto const& pose=*script_character_pose;
+        if(pose.scene_index>=scene.objects.size()) {
+            std::fprintf(stderr,
+                "[WARN] [engine.assets] Skipping stale character pose index %zu\n",
+                pose.scene_index);
+            script_character_pose.reset();
+            graphics->hide_character();
+            return;
         }
-        abby_previous = foot;
-        graphics->pose_character(foot,yaw,dt,moving,airborne);
+        try {
+            graphics->pose_character(scene.objects[pose.scene_index].position,
+                pose.heading,dt,pose.animation);
+        } catch(std::exception const& e) {
+            std::fprintf(stderr,
+                "[WARN] [engine.assets] Skipping invalid character animation: %s\n",
+                e.what());
+            script_character_pose.reset();
+            graphics->hide_character();
+        }
     }
 
     void update_fps_camera(float dt, bool aiming)
@@ -1520,22 +1716,28 @@ private:
         case WM_TIMER:
             if (editor && content_browser)
                 content_browser->poll_thumbnails();
-            if (wparam == frame_timer && !config.smoke && !config.check_scene && !config.abby_smoke && graphics && !IsIconic(window))
-                frame();
+            if (wparam == frame_timer && !runtime_faulted &&
+                !error_dialog_active && !config.smoke && !config.check_scene &&
+                !config.character_smoke && graphics && !IsIconic(window)) {
+                if(startup_report_ && !startup_report_->completed()) {
+                    bootstrap_stage("frame.first", [&] {frame();});
+                    startup_report_->complete(startup_report_->warning_count()?
+                        "READY_WITH_WARNINGS":"READY");
+                } else frame();
+            }
             return 0;
         case smoke_message:
-            if (config.abby_smoke) {
-                auto const& scene = preview->scene();
-                auto const player = std::find_if(scene.objects.begin(),scene.objects.end(),
-                    [](auto const& object) { return object.player; });
-                if (player == scene.objects.end()) throw std::runtime_error("Missing Abby spawn");
-                auto const* camera = fps_camera ? &fps_pose : nullptr;
-                for (unsigned i = 0; i < 8; ++i) {
-                    graphics->pose_character(player->position,0.f,0.05f,i < 4,i >= 4);
+            if (config.character_smoke) {
+                if(!script_character || !script_character_pose)
+                    throw std::runtime_error("Project did not configure a skeletal character");
+                auto const& scene=preview->scene();
+                auto const* camera=fps_camera ? &fps_pose : nullptr;
+                for(unsigned i=0;i<8;++i) {
+                    apply_script_character(scene,0.05f);
                     graphics->draw(scene,-2,false,preview.get(),nullptr,false,camera,
                         scene_world.get(),false);
                 }
-                std::puts("Abby textured skeletal draw: PASS");
+                std::puts("Project-defined textured skeletal draw: PASS");
             } else if (config.fps_ui_smoke) {
                 if (!fps || !graphics || !fps_caption || !fps_buttons[0])
                     throw std::runtime_error("FPS menu was not initialized");
@@ -2407,11 +2609,12 @@ private:
     {
         if (file_path.empty())
             throw std::runtime_error("Save your scene in a project first");
-        auto root=fs::absolute(file_path).parent_path()/"assets";
+        auto const project=script_project_root(file_path);
+        auto root=project/"assets";
         if (!fs::is_directory(root))
             throw std::runtime_error("Project assets folder is missing");
         AssetManager assets;
-        assets.mount_directory("",root);
+        assets.mount_project_assets(project,discover_shared_assets(config,project));
         std::size_t references=0,missing=0;
         std::wstring missing_list;
         for(auto const& object:document.snapshot().objects) {
@@ -2917,7 +3120,62 @@ private:
 
 
 
+    void destroy_script_spawn(std::uint64_t id, std::uint64_t owner)
+    {
+        auto const owned=script_spawn_owners.find(id);
+        if (owned==script_spawn_owners.end() || owned->second!=owner)
+            throw std::out_of_range("Stale or foreign runtime scene entity");
+        auto const found=script_entity_indices.find(id);
+        if (found==script_entity_indices.end() || !preview ||
+            !preview->runtime_alive(found->second))
+            throw std::out_of_range("Runtime scene entity no longer exists");
+        auto const index=found->second;
+        for (auto const& [child_id, child_owner]:script_spawn_owners) {
+            if (child_id==id || !script_entity_indices.count(child_id)) continue;
+            auto const child_index=script_entity_indices.at(child_id);
+            if (preview->runtime_alive(child_index) &&
+                preview->scene().objects[child_index].node.parent==id)
+                throw std::runtime_error("Destroy runtime entity children before their parent");
+        }
+        preview->destroy_runtime(index);
+        auto const handle=script_spawn_handles.find(id);
+        if (handle!=script_spawn_handles.end() && script_ecs) {
+            script_ecs->erase(handle->second);
+            script_handle_ids.erase(handle->second);
+            script_spawn_handles.erase(handle);
+        }
+        script_entity_indices.erase(found);
+        script_spawn_owners.erase(owned);
+        script_object_colors.erase(index);
+        script_model_animations.erase(id);
+    }
+
+    void cleanup_script_spawns(std::uint64_t owner)
+    {
+        std::vector<std::pair<std::uint64_t,std::size_t>> ids;
+        for (auto const& [id, context]:script_spawn_owners) {
+            if (owner && owner!=context) continue;
+            std::size_t depth=0;
+            auto parent=preview->scene().objects[script_entity_indices.at(id)].node.parent;
+            while (parent && script_entity_indices.count(parent)) {
+                if (++depth>max_scene_objects)
+                    throw std::runtime_error("Runtime entity hierarchy contains a cycle");
+                parent=preview->scene().objects[script_entity_indices.at(parent)].node.parent;
+            }
+            ids.emplace_back(id,depth);
+        }
+        std::sort(ids.begin(),ids.end(),[](auto const& a,auto const& b) {
+            if (a.second!=b.second) return a.second>b.second;
+            return a.first>b.first;
+        });
+        for (auto const& [id,depth]:ids) {
+            (void)depth;
+            destroy_script_spawn(id,script_spawn_owners.at(id));
+        }
+    }
+
     void configure_script_bindings(ScriptRuntime& runtime) {
+        auto const script_owner=++script_context_epoch;
         for (auto const& entry : std::array<std::pair<char const*,LogLevel>,4>{{
                 {"debug",LogLevel::debug},{"info",LogLevel::info},
                 {"warn",LogLevel::warn},{"error",LogLevel::error}}}) {
@@ -2967,6 +3225,172 @@ private:
                 return std::to_string(script_noise->sample2(
                     script_number(args[0]),script_number(args[1])));
             });
+        runtime.bind("engine.scene","spawn",
+            [this,script_owner](std::string_view json) {
+                auto args=script_args(json);
+                if ((args.size()!=9 && args.size()!=10) || !preview || !script_ecs ||
+                    !preview->supports_runtime_entities())
+                    throw std::invalid_argument("scene.spawn(name,x,y,z,size,mass,color,asset,layer,parent)");
+                SceneObject object;
+                object.name=args[0];
+                if (object.name.empty() || object.name.size()>=NORTHSTARCPP_ECS_NAME_BYTES)
+                    throw std::invalid_argument("Invalid runtime entity name");
+                auto finite_coordinate=[](std::string const& input) {
+                    auto const v=script_number(input);
+                    if (std::abs(v)>1000000.)
+                        throw std::invalid_argument("Runtime position out of bounds");
+                    return static_cast<float>(v);
+                };
+                object.position={finite_coordinate(args[1]),finite_coordinate(args[2]),
+                                 finite_coordinate(args[3])};
+                object.size=static_cast<float>(script_number(args[4]));
+                object.mass=static_cast<float>(script_number(args[5]));
+                auto const color=script_number(args[6]);
+                if (color<0. || color>0xFFFFFFu || std::floor(color)!=color)
+                    throw std::invalid_argument("Invalid runtime RGB color");
+                object.color=static_cast<std::uint32_t>(color);
+                object.node.asset=args[7];
+                object.node.layer=args[8];
+                if (object.node.layer.empty() || object.node.layer.size()>96)
+                    throw std::invalid_argument("Invalid runtime entity layer");
+                if (args.size()==10 && args[9]!="0") {
+                    auto const parent=script_index(args[9]);
+                    auto const found=script_spawn_owners.find(parent);
+                    if (found==script_spawn_owners.end() || found->second!=script_owner ||
+                        !preview->runtime_alive(script_entity_indices.at(parent)))
+                        throw std::invalid_argument("Runtime parent must be a live entity in this script context");
+                    object.node.parent=parent;
+                }
+                if (!object.node.asset.empty()) {
+                    auto const& asset=object.node.asset;
+                    if (asset.size()>256 || asset.front()=='/' ||
+                        asset.find("..")!=std::string::npos ||
+                        asset.find('\\')!=std::string::npos ||
+                        asset.find(':')!=std::string::npos ||
+                        asset.size()<4 ||
+                        (asset.substr(asset.size()-4)!=".obj" &&
+                         asset.substr(asset.size()-4)!=".ydd" &&
+                         asset.substr(asset.size()-4)!=".ydr") ||
+                        (asset.compare(0,7,"models/")!=0 &&
+                         asset.compare(0,7,"assets/")!=0))
+                        throw std::invalid_argument(
+                            "Runtime model must be a VFS OBJ/YDD/YDR");
+                    if (!script_assets)
+                        throw std::runtime_error("Project VFS unavailable");
+                    (void)script_assets->size(asset);
+                }
+                if (!next_script_spawn_id)
+                    for (auto const& previous:preview->scene().objects)
+                        next_script_spawn_id=std::max(next_script_spawn_id,previous.node.id);
+                if (next_script_spawn_id==UINT64_MAX)
+                    throw std::runtime_error("Exhausted runtime entity IDs");
+                object.node.id=++next_script_spawn_id;
+                auto const index=preview->spawn_runtime(object);
+                try {
+                    auto const handle=script_ecs->create_runtime(object);
+                    script_entity_indices.emplace(object.node.id,index);
+                    script_handle_ids.emplace(handle,object.node.id);
+                    script_spawn_handles.emplace(object.node.id,handle);
+                    script_spawn_owners.emplace(object.node.id,script_owner);
+                } catch (...) {
+                    preview->destroy_runtime(index);
+                    throw;
+                }
+                return std::string("{\"id\":")+
+                    script_json_quote(std::to_string(object.node.id))+
+                    ",\"index\":"+std::to_string(index)+"}";
+            });
+        runtime.bind("engine.scene","destroy",
+            [this,script_owner](std::string_view json) {
+                auto args=script_args(json);
+                if (args.size()!=1)
+                    throw std::invalid_argument("scene.destroy(id)");
+                destroy_script_spawn(script_index(args[0]),script_owner);
+                return std::string("true");
+            });
+        runtime.bind("engine.scene","moveRuntime",
+            [this,script_owner](std::string_view json) {
+                auto args=script_args(json);
+                if (args.size()!=4 || !preview || !script_ecs)
+                    throw std::invalid_argument("scene.moveRuntime(id,x,y,z)");
+                auto const id=script_index(args[0]);
+                if (!script_spawn_owners.count(id) ||
+                    script_spawn_owners.at(id)!=script_owner)
+                    throw std::out_of_range("Stale runtime entity ID");
+                auto const index=script_entity_indices.at(id);
+                if (preview->scene().objects[index].mass!=0.f)
+                    throw std::invalid_argument("Dynamic bodies must use physics");
+                Vector3 p{static_cast<float>(script_number(args[1])),
+                          static_cast<float>(script_number(args[2])),
+                          static_cast<float>(script_number(args[3]))};
+                if (std::max({std::abs(p.x),std::abs(p.y),std::abs(p.z)})>1000000.f)
+                    throw std::invalid_argument("Runtime position out of bounds");
+                preview->move_static(index,p);
+                NsPosition position{p.x,p.y,p.z};
+                script_ecs->set_component(script_spawn_handles.at(id),
+                    NS_COMPONENT_POSITION,&position,sizeof(position));
+                return std::string("null");
+            });
+        runtime.bind("engine.prefab","read",[this](std::string_view json) {
+            auto args=script_args(json);
+            if (args.size()!=1 || !script_assets)
+                throw std::invalid_argument("prefab.read(path)");
+            auto const& path=args[0];
+            if (path.size()>256 || path.size()<17 || path.front()=='/' ||
+                path.compare(0,8,"prefabs/")!=0 ||
+                path.substr(path.size()-8)!=".nprefab" ||
+                path.find("..")!=std::string::npos ||
+                path.find('\\')!=std::string::npos ||
+                path.find(':')!=std::string::npos ||
+                path.find("//")!=std::string::npos)
+                throw std::invalid_argument("Prefab path must be under prefabs/*.nprefab");
+            if (script_assets->size(path)>1024*1024u)
+                throw std::length_error("Runtime prefab exceeds 1 MiB");
+            auto const bytes=script_assets->read(path);
+            Scene const prefab=parse_scene_data(
+                std::string(bytes.begin(),bytes.end()));
+            validate_scene(prefab);
+            if (prefab.version!=3 || prefab.objects.empty() ||
+                prefab.objects.size()>128 || !prefab.volumes.empty() ||
+                !prefab.portals.empty() || !prefab.components.empty() ||
+                !prefab.opaque_records.empty())
+                throw std::invalid_argument(
+                    "Runtime prefab requires 1..128 Scene V3 entities without external records");
+            std::uint64_t root_id=0;
+            std::string result="{\"objects\":[";
+            for (std::size_t i=0;i<prefab.objects.size();++i) {
+                auto const& obj=prefab.objects[i];
+                if (obj.player || !obj.node.script.empty() ||
+                    !obj.node.cell.empty() || !obj.node.room.empty() ||
+                    !obj.node.visible || !obj.node.collision ||
+                    obj.node.rotation.x!=0.f || obj.node.rotation.y!=0.f ||
+                    obj.node.rotation.z!=0.f ||
+                    obj.node.scale.x!=1.f || obj.node.scale.y!=1.f ||
+                    obj.node.scale.z!=1.f)
+                    throw std::invalid_argument(
+                        "Runtime prefab entity needs supported box collider and no scene cell");
+                if (!obj.node.parent) {
+                    if (root_id)
+                        throw std::invalid_argument("Runtime prefab has multiple roots");
+                    root_id=obj.node.id;
+                }
+                if (i) result+=',';
+                result+="{\"id\":"+script_json_quote(std::to_string(obj.node.id))+
+                    ",\"parent\":"+script_json_quote(std::to_string(obj.node.parent))+
+                    ",\"name\":"+script_json_quote(obj.name)+
+                    ",\"position\":{\"x\":"+std::to_string(obj.position.x)+
+                    ",\"y\":"+std::to_string(obj.position.y)+
+                    ",\"z\":"+std::to_string(obj.position.z)+"}"+
+                    ",\"size\":"+std::to_string(obj.size)+
+                    ",\"mass\":"+std::to_string(obj.mass)+
+                    ",\"color\":"+std::to_string(obj.color)+
+                    ",\"asset\":"+script_json_quote(obj.node.asset)+
+                    ",\"layer\":"+script_json_quote(obj.node.layer)+"}";
+            }
+            if (!root_id)
+                throw std::invalid_argument("Runtime prefab must have one root");
+            return result+"]}";
+        });
         runtime.bind("engine.scene","objectCount",
             [this](std::string_view json) {
                 if (!script_args(json).empty())
@@ -3018,6 +3442,11 @@ private:
             return std::string("{\"x\":")+std::to_string(script_mouse_dx)+
                 ",\"y\":"+std::to_string(script_mouse_dy)+"}";
         });
+        runtime.bind("engine.input","wheelDelta",[this](std::string_view json) {
+            if (!script_args(json).empty()) throw std::invalid_argument("input.wheelDelta()");
+            // One wheel notch is 120 input-provider units; keep precision for trackpads.
+            return std::to_string(static_cast<double>(script_wheel_vertical)/120.0);
+        });
         runtime.bind("engine.input","gamepad",[this](std::string_view json) {
             auto args=script_args(json);
             if(args.size()!=1) throw std::invalid_argument("input.gamepad(index)");
@@ -3032,6 +3461,56 @@ private:
                 ",\"rightY\":"+std::to_string(p.right_y)+
                 ",\"leftTrigger\":"+std::to_string(p.left_trigger)+
                 ",\"rightTrigger\":"+std::to_string(p.right_trigger)+"}";
+        });
+        runtime.bind("engine.camera","available",[this](std::string_view json) {
+            if (!script_args(json).empty())
+                throw std::invalid_argument("camera.available()");
+            return fps_camera ? std::string("true") : std::string("false");
+        });
+        runtime.bind("engine.camera","setMode",[this](std::string_view json) {
+            auto const args=script_args(json);
+            if (args.size()<1 || args.size()>2 || !fps_camera)
+                throw std::invalid_argument("camera.setMode(name,transitionSeconds=0.35)");
+            static const std::map<std::string,CameraMode> modes={
+                {"first_person",CameraMode::first_person},
+                {"third_person",CameraMode::third_person},
+                {"vehicle_chase",CameraMode::vehicle_chase},
+                {"orbit",CameraMode::orbit},
+                {"free",CameraMode::free},
+                {"cinematic",CameraMode::cinematic}};
+            auto const mode=modes.find(args[0]);
+            if (mode==modes.end()) throw std::invalid_argument("Unknown camera mode");
+            auto const seconds=args.size()==2 ? script_number(args[1]) : 0.35;
+            fps_camera->set_mode(mode->second,static_cast<float>(seconds));
+            return std::string("null");
+        });
+        runtime.bind("engine.camera","mode",[this](std::string_view json) {
+            if (!script_args(json).empty() || !fps_camera)
+                throw std::invalid_argument("camera.mode()");
+            switch (fps_camera->mode()) {
+            case CameraMode::first_person: return script_json_quote("first_person");
+            case CameraMode::third_person: return script_json_quote("third_person");
+            case CameraMode::vehicle_chase: return script_json_quote("vehicle_chase");
+            case CameraMode::orbit: return script_json_quote("orbit");
+            case CameraMode::free: return script_json_quote("free");
+            case CameraMode::cinematic: return script_json_quote("cinematic");
+            }
+            throw std::runtime_error("Invalid camera mode");
+        });
+        runtime.bind("engine.camera","setFollowDistance",
+            [this](std::string_view json) {
+                auto const args=script_args(json);
+                if (args.size()!=1 || !fps_camera)
+                    throw std::invalid_argument("camera.setFollowDistance(metres)");
+                auto settings=fps_camera->settings();
+                settings.third_person_distance=static_cast<float>(script_number(args[0]));
+                fps_camera->configure(settings);
+                return std::string("null");
+            });
+        runtime.bind("engine.camera","followDistance",[this](std::string_view json) {
+            if (!script_args(json).empty() || !fps_camera)
+                throw std::invalid_argument("camera.followDistance()");
+            return std::to_string(fps_camera->settings().third_person_distance);
         });
         runtime.bind("engine.camera","setAngles",[this](std::string_view json) {
             auto args=script_args(json);
@@ -3064,6 +3543,47 @@ private:
             auto zoom=script_number(args[0]);
             if (zoom<0 || zoom>1) throw std::invalid_argument("Zoom must be 0..1");
             fps_camera->set_zoom(static_cast<float>(zoom));
+            return std::string("null");
+        });
+        runtime.bind("engine.character","load",[this](std::string_view json) {
+            if(!script_assets || !scripted_game)
+                throw std::runtime_error("character.load requires an active scripted project");
+            auto spec=parse_script_character(json);
+            script_character=std::move(spec);
+            script_character_pose.reset();
+            script_character_dirty=true;
+            return std::string("null");
+        });
+        runtime.bind("engine.character","pose",[this](std::string_view json) {
+            auto const args=script_args(json);
+            if(args.size()!=3 || !script_character || !preview)
+                throw std::invalid_argument("character.pose(sceneIndex,heading,animation)");
+            auto const index=script_index(args[0]);
+            if(index>=preview->scene().objects.size())
+                throw std::out_of_range("Character scene index is invalid");
+            auto const yaw=script_number(args[1]);
+            if(std::abs(yaw)>1000000)
+                throw std::invalid_argument("Character heading out of range");
+            auto const& name=args[2];
+            auto const& clips=script_character->animations;
+            if(std::none_of(clips.begin(),clips.end(),
+               [&](auto const& clip){return clip.name==name;}))
+                throw std::invalid_argument("Character animation is not defined by project");
+            script_character_pose=CharacterPoseRequest{index,static_cast<float>(yaw),name};
+            return std::string("null");
+        });
+        runtime.bind("engine.character","hide",[this](std::string_view json) {
+            if(!script_args(json).empty())
+                throw std::invalid_argument("character.hide()");
+            script_character_pose.reset();
+            return std::string("null");
+        });
+        runtime.bind("engine.character","clear",[this](std::string_view json) {
+            if(!script_args(json).empty())
+                throw std::invalid_argument("character.clear()");
+            script_character.reset();
+            script_character_pose.reset();
+            script_character_dirty=true;
             return std::string("null");
         });
         runtime.bind("engine.player","move",[this](std::string_view json) {
@@ -3114,8 +3634,10 @@ private:
                         static_cast<float>(script_number(args[5]))};
             auto radius=script_number(args[6]);
             if (radius<=0 || radius>100) throw std::invalid_argument("Invalid sweep radius");
+            auto const ignore=args[7]=="-1"
+                ? static_cast<std::size_t>(-1) : script_index(args[7]);
             auto hit=preview->sweep_sphere(begin,end,static_cast<float>(radius),
-                                           script_index(args[7]));
+                                           ignore);
             if (!hit || hit->object_index==UINT32_MAX) return std::string("null");
             return std::string("{\"index\":")+std::to_string(hit->object_index)+
                 ",\"fraction\":"+std::to_string(hit->fraction)+"}";
@@ -3131,9 +3653,14 @@ private:
             for(auto i=start;i<objects.size() && i-start<count;++i) {
                 if(i!=start) result+=',';
                 auto const& obj=objects[i];
+                if (i>=preview->authored_object_count() && !preview->runtime_alive(i)) {
+                    result+="null";
+                    continue;
+                }
                 result+="{\"index\":"+std::to_string(i)+
                     ",\"name\":"+script_json_quote(obj.name)+
                     ",\"id\":"+script_json_quote(std::to_string(obj.node.id))+
+                    ",\"parent\":"+script_json_quote(std::to_string(obj.node.parent))+
                     ",\"script\":"+script_json_quote(obj.node.script)+
                     ",\"mass\":"+std::to_string(obj.mass)+
                     ",\"size\":"+std::to_string(obj.size)+
@@ -3170,6 +3697,40 @@ private:
             if(idx>=preview->scene().objects.size() || rgb>0xffffff)
                 throw std::invalid_argument("Scene object/color invalid");
             script_object_colors[idx]=static_cast<std::uint32_t>(rgb);
+            return std::string("null");
+        });
+        runtime.bind("engine.scene","setAnimation",[this](std::string_view json) {
+            auto args=script_args(json);
+            if(args.size()!=2 || !preview)
+                throw std::invalid_argument("scene.setAnimation(index,clip_reference)");
+            auto const index=script_index(args[0]);
+            auto const& objects=preview->scene().objects;
+            if(index>=objects.size() ||
+               (index>=preview->authored_object_count() &&
+                !preview->runtime_alive(index)))
+                throw std::out_of_range("Invalid or destroyed scene entity");
+            auto const& object=objects[index];
+            if(!object.node.id)
+                throw std::invalid_argument("Animation requires a stable scene entity ID");
+            auto const& model=object.node.asset;
+            auto const selector=model.find('@');
+            auto const native=model.substr(0,selector);
+            if(native.size()<5 ||
+               (native.compare(native.size()-4,4,".ydd")!=0 &&
+                native.compare(native.size()-4,4,".ydr")!=0))
+                throw std::invalid_argument("Animation requires a native YDD/YDR asset");
+            auto const& ref=args[1];
+            if(!ref.empty()) {
+                auto const sep=ref.rfind('@');
+                if(ref.size()>512 || sep==std::string::npos || sep<4 ||
+                   sep+1>=ref.size() || ref.substr(sep-4,4)!=".ycd" ||
+                   ref.find("..")!=std::string::npos ||
+                   ref.find('\\')!=std::string::npos ||
+                   ref.find(':')!=std::string::npos ||
+                   ref.find('\0')!=std::string::npos)
+                    throw std::invalid_argument("Invalid native YCD clip reference");
+                script_model_animations[object.node.id]=ref;
+            } else script_model_animations.erase(object.node.id);
             return std::string("null");
         });
         runtime.bind("engine.ui","setTitle",[this](std::string_view json) {
@@ -3436,6 +3997,85 @@ private:
     void load_script_files(ScriptRuntime& runtime) {
         if (!script_assets || !preview)
             throw std::runtime_error("Script asset VFS is not mounted");
+        // Engine-owned root scripts are resolved through the same VFS as
+        // project scripts and execute first in every script context.
+        runtime.evaluate_asset(*script_assets,"scripts/northstar/bootstrap.js");
+        // Install once per fresh JS context, including hot reload. The native
+        // host sends bounded JSON batches through ScriptRuntime::emit_event,
+        // which the V8 sidecar dispatches without recompiling JS per frame.
+        // Individual entity event semantics and listener ordering are unchanged.
+        runtime.evaluate(
+            "void engine.on('northstar._entityBatch', function(packet) {"
+            " for (const entity of packet.items) engine.emit(packet.event, entity);"
+            "});void 0;", "<engine-entity-batch-bridge>");
+        // Independent keyboard / gamepad enumeration modules must register
+        // before any script imports Keys or GamepadButtons from the SDK.
+        static constexpr std::array<std::string_view,4> input_scripts={{
+            "scripts/input/Keys.js",
+            "scripts/input/GamepadButtons.js",
+            "scripts/scene/Entity.js",
+            "scripts/scene/Prefab.js"
+        }};
+        for(auto name:input_scripts) {
+            auto const virtual_path=std::string(name);
+            if(config.archive_path.empty() && !script_source_root.empty()) {
+                auto const project_file=script_source_root/fs::u8path(virtual_path);
+                if(fs::exists(project_file))
+                    (void)validated_script_file(script_source_root,
+                        fs::u8path(virtual_path));
+            }
+            if(script_assets->size(virtual_path)>NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES)
+                throw std::length_error("Input SDK exceeds scripting source limit: "+virtual_path);
+            runtime.evaluate_asset(*script_assets,virtual_path);
+        }
+        // Ordered first-class root scripts: project-local files override the
+        // identical sharedAssets virtual paths. No hardcoded avatar assets or
+        // gameplay callbacks belong to the native host. All sources are
+        // validated and evaluated before optional scripts/main.js.
+        // Grouped SDK layout. The old flat virtual paths remain supported
+        // for project-authored overrides, including FAT/DB archive projects.
+        // No duplicate execution: exactly one implementation of each class
+        // is evaluated in the documented dependency order.
+        static constexpr std::array<std::pair<std::string_view,std::string_view>,9> root_scripts={{
+            {"scripts/character/Character.js", "scripts/Character.js"},
+            {"scripts/player/playerConfig.js", "scripts/playerConfig.js"},
+            {"scripts/player/playerActor.js", "scripts/playerActor.js"},
+            {"scripts/player/playerSession.js", "scripts/playerSession.js"},
+            {"scripts/camera/playerCamera.js", "scripts/playerCamera.js"},
+            {"scripts/camera/playerLook.js", "scripts/playerLook.js"},
+            {"scripts/player/playerMovement.js", "scripts/playerMovement.js"},
+            {"scripts/character/playerCharacter.js", "scripts/playerCharacter.js"},
+            {"scripts/player/playerInteraction.js", "scripts/playerInteraction.js"}
+        }};
+        for(auto const& [grouped,legacy]:root_scripts) {
+            auto const grouped_name=std::string(grouped);
+            auto const legacy_name=std::string(legacy);
+            auto const legacy_path=fs::u8path(legacy_name);
+            bool grouped_override=false;
+            if(config.archive_path.empty() && !script_source_root.empty()) {
+                auto const preferred=script_source_root/fs::u8path(grouped_name);
+                auto const fallback=script_source_root/legacy_path;
+                if(fs::exists(preferred))
+                    (void)validated_script_file(script_source_root,fs::u8path(grouped_name));
+                if(fs::exists(fallback))
+                    (void)validated_script_file(script_source_root,legacy_path);
+                grouped_override=fs::is_regular_file(preferred);
+            }
+            bool legacy_exists=false;
+            try {
+                (void)script_assets->size(legacy_name);
+                legacy_exists=true;
+            } catch(std::runtime_error const&) {
+                // The old path is not bundled by sharedAssets anymore.
+            }
+            // Source projects prefer their new grouped override; legacy
+            // project overrides remain functional even in packaged archives.
+            auto const name=legacy_exists && !grouped_override
+                ? legacy_name : grouped_name;
+            if(script_assets->size(name)>NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES)
+                throw std::length_error("Root script exceeds scripting source limit: "+name);
+            runtime.evaluate_asset(*script_assets,name);
+        }
         if (script_entry_exists) {
             if (config.archive_path.empty())
                 (void)validated_script_file(script_source_root,fs::path("scripts/main.js"));
@@ -3471,8 +4111,10 @@ private:
         auto flush=[&] {
             if (!count) return;
             batch+="]";
-            runtime.evaluate("for (const entity of "+batch+") engine.emit("+
-                script_json_quote(event)+",entity)", "<entity-events>");
+            // Keep payload bounded and execute callbacks inside the JS realm,
+            // but avoid one new Realm.eval compilation for every entity batch.
+            runtime.emit_event("northstar._entityBatch",
+                "{\"event\":"+script_json_quote(event)+",\"items\":"+batch+"}");
             batch="[";
             count=0;
         };
@@ -3512,6 +4154,9 @@ private:
             ? std::make_unique<SceneAnimationPlayer>(*script_animations)
             : nullptr;
         auto old_visuals=script_animation_visuals;
+        auto const old_character=script_character;
+        auto const old_character_pose=script_character_pose;
+        auto const old_character_dirty=script_character_dirty;
         try {
             script_entry_exists=fs::is_regular_file(script_source_root/"scripts"/"main.js");
             auto fresh=std::make_unique<ScriptRuntime>();
@@ -3522,10 +4167,20 @@ private:
             auto new_animations=script_animations
                 ? std::make_unique<SceneAnimationPlayer>(*script_animations)
                 : nullptr;
+            // The old context's stop callback can clear native character state.
+            // Capture the candidate's resources and pose before stopping the old
+            // context, then restore them for the next render frame.
+            auto new_character=script_character;
+            auto new_character_pose=script_character_pose;
             try {
                 notify_script_entities(*script_runtime,"entity.stop");
                 script_runtime->emit_event("stop");
             } catch (...) { /* old scripts cannot veto a successful reload */ }
+            cleanup_script_spawns(active_script_context_epoch);
+            active_script_context_epoch=script_context_epoch;
+            script_character=std::move(new_character);
+            script_character_pose=std::move(new_character_pose);
+            script_character_dirty=true;
             if (new_animations) *script_animations=std::move(*new_animations);
             script_animation_samples.clear();
             script_animation_visuals.clear();
@@ -3534,9 +4189,13 @@ private:
             if (script_logger)
                 script_logger->info("project.script","Project scripts hot reloaded");
         } catch (std::exception const& e) {
+            cleanup_script_spawns(script_context_epoch);
             if (old_animations && script_animations)
                 *script_animations=std::move(*old_animations);
             script_animation_visuals=std::move(old_visuals);
+            script_character=old_character;
+            script_character_pose=old_character_pose;
+            script_character_dirty=old_character_dirty;
             // A failed edit must not destroy the currently running context.
             OutputDebugStringA(e.what());
             std::fprintf(stderr,"Project script reload rejected: %s\n",e.what());
@@ -3546,6 +4205,15 @@ private:
     void stop_project_scripts() {
         script_audio_cache.clear();
         script_object_colors.clear();
+        script_character.reset();
+        script_character_pose.reset();
+        script_character_dirty=false;
+        if(graphics) {
+            try { graphics->clear_character(); }
+            catch(std::exception const& error) {
+                std::fprintf(stderr,"Character cleanup failed: %s\n",error.what());
+            }
+        }
         script_paused=false;
         script_move_x=script_move_z=0.f;
         if (script_runtime) {
@@ -3554,6 +4222,8 @@ private:
                 script_runtime->emit_event("stop");
             } catch (std::exception const&) {}
         }
+        cleanup_script_spawns(0);
+        active_script_context_epoch=0;
         script_runtime.reset();
         script_animations.reset();
         script_animation_samples.clear();
@@ -3573,7 +4243,11 @@ private:
         bool const archived=!config.archive_path.empty();
         auto const base=archived ? fs::path{} : script_project_root(file_path);
         script_assets=std::make_unique<AssetStore>();
+        auto const common=discover_shared_assets(config,base);
+        if (common.empty())
+            throw std::runtime_error("NorthStar sharedAssets is required for project scripts");
         if (archived) {
+            script_assets->mount_shared_assets(common);
             script_assets->mount_archive("",config.archive_path,
                 config.archive_data.empty() ? config.archive_path : config.archive_data);
             // Missing optional main.js is not a failure; attached entity scripts
@@ -3592,23 +4266,29 @@ private:
             if (fs::is_symlink(base/"scripts") ||
                 (script_entry_exists && fs::is_symlink(entry)))
                 throw std::runtime_error("Project script paths may not be symbolic links");
-            script_assets->mount_directory("",base);
+            script_assets->mount_project_assets(base,common);
             if (!fps_assets && fs::is_directory(base/"assets")) {
                 fps_assets=std::make_unique<AssetManager>();
-                fps_assets->mount_directory("",base/"assets");
+                fps_assets->mount_project_assets(base,common);
             }
         }
         auto const& scene=preview->scene();
         bool attached=false;
         for (auto const& object:scene.objects)
             if (!object.node.script.empty()) attached=true;
-        if (!script_entry_exists && !attached) {
+        if (!script_entry_exists && !attached && !fps_camera) {
+            // A scene without any game camera or attached scripts does not
+            // need a persistent V8 instance. All camera-enabled games still
+            // receive the engine default root script.
             script_assets.reset();
             return;
         }
         script_animations=std::make_unique<SceneAnimationPlayer>();
         script_ecs=std::make_unique<EcsWorld>();
         script_ecs->load(scene);
+        next_script_spawn_id=0;
+        script_spawn_handles.clear();
+        script_spawn_owners.clear();
         for (std::size_t i=0;i<scene.objects.size();++i)
             if (scene.objects[i].node.id) {
                 auto stable=scene.objects[i].node.id;
@@ -3620,6 +4300,30 @@ private:
             auto const entry=base/"scripts"/"main.js";
             script_file_stamps.emplace(fs::path("scripts/main.js"),
                 script_entry_exists ? fs::last_write_time(entry) : fs::file_time_type::min());
+            // Track ALL project root script overrides, including file creation
+            // and deletion. The hot-reload swap keeps the current context when
+            // a malformed author script fails to initialize.
+            static constexpr std::array<std::string_view,22> roots={{
+                "input/Keys.js", "input/GamepadButtons.js",
+                "scene/Entity.js", "scene/Prefab.js",
+                "character/Character.js", "Character.js",
+                "player/playerConfig.js", "playerConfig.js",
+                "player/playerActor.js", "playerActor.js",
+                "player/playerSession.js", "playerSession.js",
+                "camera/playerCamera.js", "playerCamera.js",
+                "camera/playerLook.js", "playerLook.js",
+                "player/playerMovement.js", "playerMovement.js",
+                "character/playerCharacter.js", "playerCharacter.js",
+                "player/playerInteraction.js", "playerInteraction.js"
+            }};
+            for(auto name:roots) {
+                auto const path=fs::path("scripts")/fs::u8path(name);
+                auto const absolute=base/path;
+                if(fs::is_symlink(absolute))
+                    throw std::runtime_error("Project root script override cannot be a symbolic link");
+                script_file_stamps.emplace(path,fs::is_regular_file(absolute) ?
+                    fs::last_write_time(absolute):fs::file_time_type::min());
+            }
         }
         for (auto const& object:scene.objects)
             if (!object.node.script.empty()) {
@@ -3646,6 +4350,7 @@ private:
         fresh->emit_event("start");
         notify_script_entities(*fresh,"entity.start");
         script_runtime=std::move(fresh);
+        active_script_context_epoch=script_context_epoch;
     }
 
     void advance_scene_animations(float dt) {
@@ -3692,11 +4397,16 @@ private:
 
     void frame()
     {
-        float seconds = static_cast<float>(frame_clock.restart_seconds());
+        // The sampled frame interval is always raw. Simulation is still
+        // clamped for physics stability, independently from profiling.
+        auto const raw_seconds = frame_clock.restart_seconds();
+        diagnostics::FrameProfileScope frame_profile(frame_profiler.get(), raw_seconds);
+        float seconds = static_cast<float>(raw_seconds);
         if (fps || scripted_first_person) seconds = std::clamp(seconds, 0.f, 0.05f);
         auto const state = input->poll();
         script_mouse_dx=state.mouse_dx;
         script_mouse_dy=state.mouse_dy;
+        script_wheel_vertical=state.focused ? state.wheel_vertical : 0;
         std::copy_n(std::begin(state.mouse_buttons),script_mouse_buttons.size(),
                     script_mouse_buttons.begin());
         std::copy_n(std::begin(state.gamepads),script_gamepads.size(),
@@ -3708,6 +4418,7 @@ private:
         if (scripted_game) {
             script_move_x=script_move_z=0.f; // no stale movement from prior frames
         }
+        frame_profile.measure(diagnostics::FrameStage::scripting, [&] {
         if (script_runtime) {
             std::copy_n(std::begin(state.keys),script_keys.size(),script_keys.begin());
             auto const scan_now=Clock::now();
@@ -3727,6 +4438,8 @@ private:
                 script_suspended=true;
             }
         }
+        });
+        frame_profile.measure(diagnostics::FrameStage::animation, [&] {
         if (script_animations && !script_suspended) {
             try { advance_scene_animations(seconds); }
             catch(std::exception const& error) {
@@ -3735,19 +4448,11 @@ private:
                 script_suspended=true;
             }
         }
+        });
         auto const down = [&state](unsigned code) {
             return code < NORTHSTARCPP_INPUT_MAX_KEYS && state.keys[code] != 0;
         };
         bool const foreground = GetForegroundWindow() == window && state.focused;
-        if (config.abby && fps_camera) {
-            bool const toggle = foreground && down(VK_F5);
-            if (toggle && !abby_camera_key) {
-                auto const mode = fps_camera->mode() == CameraMode::first_person
-                    ? CameraMode::third_person : CameraMode::first_person;
-                fps_camera->set_mode(mode,0.f);
-            }
-            abby_camera_key = toggle;
-        }
         float x = 0.f, z = 0.f;
         if (fps) {
             bool const pause_key = down(NORTHSTAR_INPUT_KEY_ESCAPE) ||
@@ -3833,35 +4538,46 @@ private:
                 float const forward=float(down_key('W'))-float(down_key('S'));
                 editor_camera.move(sideways*speed,vertical*speed,forward*speed);
             }
-            update_scene_world(seconds);
+            frame_profile.measure(diagnostics::FrameStage::scene_streaming, [&] { update_scene_world(seconds); });
             auto active_scene=gizmo_scene ? *gizmo_scene : document.snapshot();
             auto const overlay=editor ? std::optional<ViewportGizmo>(active_gizmo(active_scene)) :
                 std::optional<ViewportGizmo>{};
-            graphics->draw(active_scene, selected_index(), false,
+            frame_profile.measure(diagnostics::FrameStage::rendering, [&] { graphics->draw(active_scene, selected_index(), false,
                            nullptr,nullptr,false,editor ? &editor_camera.pose : nullptr,
                            scene_world.get(),true,show_streaming_overlay,
-                           overlay ? &*overlay : nullptr);
+                           overlay ? &*overlay : nullptr); });
             return;
         }
         if (scripted_first_person) {
             if (!script_paused && !script_suspended)
-                preview->step(seconds,script_move_x,script_move_z);
+                frame_profile.measure(diagnostics::FrameStage::physics, [&] { preview->step(seconds,script_move_x,script_move_z); });
             update_script_camera(script_paused ? 0.f : seconds);
             Scene visual=preview->scene();
             for (auto const& [index,color]:script_object_colors)
                 if (index<visual.objects.size()) visual.objects[index].color=color;
             apply_scene_animation_visuals(visual);
-            update_scene_world(seconds);
-            update_abby(visual,script_yaw,script_paused ? 0.f : seconds);
-            graphics->draw(visual,-2,false,preview.get(),nullptr,script_paused,
-                           fps_camera ? &fps_pose : nullptr,scene_world.get(),false);
+            for(auto const& [id,ref]:script_model_animations) {
+                auto found=std::find_if(visual.components.begin(),
+                    visual.components.end(),[&](auto const& component) {
+                        return component.entity_id==id &&
+                            component.type=="engine.model.animation" &&
+                            component.version==1;
+                    });
+                if(found!=visual.components.end())found->payload=ref;
+                else visual.components.push_back(
+                    {id,"engine.model.animation",1,ref});
+            }
+            frame_profile.measure(diagnostics::FrameStage::scene_streaming, [&] { update_scene_world(seconds); });
+            apply_script_character(visual,script_paused ? 0.f : seconds);
+            frame_profile.measure(diagnostics::FrameStage::rendering, [&] { graphics->draw(visual,-2,false,preview.get(),nullptr,script_paused,
+                           fps_camera ? &fps_pose : nullptr,scene_world.get(),false); });
         } else if (fps) {
             if (!fps_menu_visible && foreground && fps->alive()) {
                 fps->advance(seconds,preview->scene());
                 for (auto const index : fps->moving_indices())
                     preview->move_static(index, fps->moving_position(index));
                 auto const m = fps->movement(x,z);
-                preview->step(seconds,m.x,m.z);
+                frame_profile.measure(diagnostics::FrameStage::physics, [&] { preview->step(seconds,m.x,m.z); });
                 if (!config.explore && (state.mouse_buttons[0] ||
                     std::any_of(std::begin(state.gamepads),std::end(state.gamepads),
                         [](auto const& p) {return p.connected && p.right_trigger > 0.35f;})))
@@ -3879,25 +4595,26 @@ private:
                               foreground && !fps_menu_visible && state.mouse_buttons[1]);
             Scene visual = preview->scene();
             fps->tint(visual);
-            update_scene_world(seconds);
-            update_abby(visual,fps->yaw(),fps_menu_visible ? 0.f : seconds);
-            graphics->draw(visual,-2,false,preview.get(),fps.get(),fps_menu_visible,
+            frame_profile.measure(diagnostics::FrameStage::scene_streaming, [&] { update_scene_world(seconds); });
+            apply_script_character(visual,fps_menu_visible ? 0.f : seconds);
+            frame_profile.measure(diagnostics::FrameStage::rendering, [&] { graphics->draw(visual,-2,false,preview.get(),fps.get(),fps_menu_visible,
                            fps_camera ? &fps_pose : nullptr,scene_world.get(),
-                           !config.explore);
+                           !config.explore); });
             update_fps_title();
         } else {
-            preview->step(seconds,scripted_game ? script_move_x : x,
-                                   scripted_game ? script_move_z : z);
-            update_scene_world(seconds);
+            frame_profile.measure(diagnostics::FrameStage::physics, [&] { preview->step(seconds,scripted_game ? script_move_x : x,
+                                   scripted_game ? script_move_z : z); });
+            frame_profile.measure(diagnostics::FrameStage::scene_streaming, [&] { update_scene_world(seconds); });
             Scene visual=preview->scene();
             for (auto const& [index,color]:script_object_colors)
                 if (index<visual.objects.size()) visual.objects[index].color=color;
             apply_scene_animation_visuals(visual);
-            graphics->draw(visual,-2,false,preview.get(),
+            apply_script_character(visual,seconds);
+            frame_profile.measure(diagnostics::FrameStage::rendering, [&] { graphics->draw(visual,-2,false,preview.get(),
                            nullptr,false,nullptr,scene_world.get(),
-                           true,show_streaming_overlay && editor);
+                           true,show_streaming_overlay && editor); });
         }
-        update_asset_zones();
+        frame_profile.measure(diagnostics::FrameStage::asset_streaming, [&] { update_asset_zones(); });
     }
 
     void smoke()
@@ -3957,11 +4674,20 @@ private:
         message += L"\n";
         OutputDebugStringW(message.c_str());
         std::fprintf(stderr, "%s\n", error.c_str());
-        if (!config.smoke && !config.check_scene)
+        if (!config.smoke && !config.check_scene && !error_dialog_active) {
+            // Prevent recursively queued GUI/timer messages from generating
+            // nested copies of the same failure dialog.
+            error_dialog_active = true;
             MessageBoxW(window, message.c_str(), L"NorthStarCpp", MB_OK | MB_ICONERROR);
+            error_dialog_active = false;
+        }
     }
 
     Options config;
+    diagnostics::StartupReport* startup_report_=nullptr;
+    bool runtime_faulted = false;
+    mutable bool error_dialog_active = false;
+    std::unique_ptr<diagnostics::FrameProfiler> frame_profiler;
     std::unique_ptr<ScriptRuntime> script_runtime;
     std::unique_ptr<SceneAnimationPlayer> script_animations;
     std::vector<SceneAnimationSample> script_animation_samples;
@@ -3970,6 +4696,11 @@ private:
     std::unique_ptr<EcsWorld> script_ecs;
     std::unordered_map<std::uint64_t,std::size_t> script_entity_indices;
     std::unordered_map<NsEntity,std::uint64_t> script_handle_ids;
+    std::unordered_map<std::uint64_t,NsEntity> script_spawn_handles;
+    std::unordered_map<std::uint64_t,std::uint64_t> script_spawn_owners;
+    std::uint64_t next_script_spawn_id=0;
+    std::uint64_t script_context_epoch=0;
+    std::uint64_t active_script_context_epoch=0;
     fs::path script_source_root;
     std::map<fs::path,fs::file_time_type> script_file_stamps;
     Clock::time_point script_probe_last{};
@@ -3982,9 +4713,12 @@ private:
     float script_move_x=0.f, script_move_z=0.f;
     float script_yaw=0.f, script_pitch=0.f, script_eye_height=1.45f;
     float script_mouse_dx=0.f, script_mouse_dy=0.f;
+    std::int32_t script_wheel_vertical=0;
     std::array<std::uint8_t,5> script_mouse_buttons{};
     std::array<NorthStarInputGamepad,NORTHSTARCPP_INPUT_MAX_GAMEPADS> script_gamepads{};
     std::unordered_map<std::size_t,std::uint32_t> script_object_colors;
+    // Ephemeral per-entity YCD selection. The authored scene is unchanged.
+    std::unordered_map<std::uint64_t,std::string> script_model_animations;
     std::unordered_map<std::string,FpsAudioClip> script_audio_cache;
     bool script_logging_allowed = true;
     std::unique_ptr<Logger> script_logger;
@@ -4045,8 +4779,14 @@ private:
     FpsTuning fps_tuning;
     AssetRequest<FpsAudioClip> fps_shot, fps_reload;
     CameraSettings fps_camera_settings{};
-    std::optional<Vector3> abby_previous;
-    bool abby_camera_key = false;
+    struct CharacterPoseRequest {
+        std::size_t scene_index=0;
+        float heading=0.f;
+        std::string animation;
+    };
+    std::optional<CharacterAssetSpec> script_character;
+    std::optional<CharacterPoseRequest> script_character_pose;
+    bool script_character_dirty=false;
     std::unique_ptr<CameraDirector> fps_camera;
     CameraPose fps_pose{};
     HWND fps_caption = nullptr;
@@ -4075,29 +4815,81 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
     bool smoke = false;
     bool arguments_parsed = false;
     std::unique_ptr<northstarcpp::Logger> process_logger;
+    bool startup_sink_bound=false;
+    northstarcpp::diagnostics::StartupReport startup;
+    startup.info("process.begin",
+        std::string("host=")+(NORTHSTARCPP_EDITOR?"editor":"player")+
+        " pid="+std::to_string(GetCurrentProcessId())+" platform=Windows");
     try {
-        auto settings = northstarcpp::options();
+        auto settings = startup.measure("arguments.parse", [] {
+            return northstarcpp::options();
+        });
         arguments_parsed = true;
         smoke = settings.smoke || settings.check_scene || settings.runtime_init_smoke ||
-                settings.fps_ui_smoke || settings.abby_smoke || settings.check_shared_assets ||
+                settings.fps_ui_smoke || settings.character_smoke || settings.check_shared_assets ||
                 settings.inspect_providers;
-        // Test/validation runs should not create logs in the user's profile.
+        startup.info("arguments.summary",
+            std::string("scene=")+settings.scene_path.u8string()+
+            " archive="+settings.archive_path.u8string()+
+            " fps="+(settings.fps?"true":"false")+
+            " warp="+(settings.warp?"true":"false")+
+            " smoke="+(smoke?"true":"false")+
+            " packaged="+(settings.packaged_game?"true":"false"));
+        // Test/validation runs do not create log files unless explicitly
+        // redirected. The bootstrap report still goes to stderr in that case.
         if (!smoke || northstarcpp::application_log_directory_overridden()) {
             try {
-                auto const logging = northstarcpp::application_logger_configuration(
-                    NORTHSTARCPP_EDITOR ? "NorthStarCpp-Editor" : "NorthStarCpp-Player");
-                if (logging.enabled) {
+                startup.measure("logger.initialize", [&] {
+                    auto const logging=northstarcpp::application_logger_configuration(
+                        NORTHSTARCPP_EDITOR?"NorthStarCpp-Editor":"NorthStarCpp-Player");
+                    if(!logging.enabled) {
+                        startup.warning("logger.initialize",
+                            "engine.logger is disabled by bootstrap.json");
+                        return;
+                    }
                     northstarcpp::prepare_application_log_console(logging);
-                    process_logger = std::make_unique<northstarcpp::Logger>(logging.options);
-                    process_logger->info("engine", NORTHSTARCPP_EDITOR
-                        ? "NorthStarCpp editor starting" : "NorthStarCpp game player starting");
+                    process_logger=std::make_unique<northstarcpp::Logger>(logging.options);
+                    auto folder=logging.options.directory;
+                    if(folder.empty()) {
+                        std::array<wchar_t,32768> env{};
+                        auto length=GetEnvironmentVariableW(L"LOCALAPPDATA",
+                            env.data(),static_cast<DWORD>(env.size()));
+                        if(length==0 || length>=env.size()) {
+                            length=GetTempPathW(static_cast<DWORD>(env.size()),env.data());
+                            if(length==0 || length>=env.size())
+                                throw std::runtime_error("Cannot locate startup report directory");
+                        }
+                        folder=std::filesystem::path(env.data())/
+                            L"KaylasSystems"/L"NorthStarCpp"/L"Logs";
+                    }
+                    auto const stem=logging.options.session+"-"+
+                        std::to_string(GetCurrentProcessId());
+                    startup.set_report_path(folder/(stem+"-startup.json"));
+                });
+                if(process_logger) {
+                    startup.set_sink([&](auto severity,std::string const& text) {
+                        using Severity=northstarcpp::diagnostics::StartupReport::Severity;
+                        process_logger->write(severity==Severity::error?
+                            northstarcpp::LogLevel::error:
+                            severity==Severity::warning?northstarcpp::LogLevel::warn:
+                            northstarcpp::LogLevel::info,"engine.startup",text);
+                    });
+                    startup_sink_bound=true;
+                    startup.info("logger.provider",
+                        "selected="+process_logger->provider_name()+
+                        " version="+process_logger->provider_version()+
+                        " report="+startup.report_path().u8string());
                 }
             } catch (std::exception const& error) {
-                std::fprintf(stderr, "Logger initialization: %s\n", error.what());
+                startup.warning("logger.initialize",
+                    std::string("Fallback to stderr: ")+error.what());
                 OutputDebugStringA(error.what());
             }
+        } else {
+            startup.info("logger.initialize","smoke mode; stderr only");
         }
         if (settings.inspect_providers) {
+            startup.info("providers.inspect","read-only ABI negotiation");
             // Same ABI negotiation and provider precedence as the Qt Editor
             // inspector. This mode never opens a window or creates a GPU device.
             std::puts("Capability\tRequested\tProvider\tVersion\tABI\tSource\tStatus");
@@ -4108,6 +4900,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
                     provider.api_abi,provider.source.c_str(),
                     provider.available?"OK":provider.error.c_str());
             }
+            startup.complete("READY");
+            if(process_logger)process_logger->flush();
             return 0;
         }
         if (settings.check_shared_assets) {
@@ -4118,6 +4912,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
                 assets.resolved_materials, assets.resolved_textures, assets.unsupported_skeletons);
             for (auto const& reference : assets.missing_references)
                 std::printf("Missing asset: %s\n", reference.c_str());
+            startup.info("assets.inventory",
+                "materials="+std::to_string(assets.materials)+
+                " drawables="+std::to_string(assets.drawables)+
+                " textures="+std::to_string(assets.textures)+
+                " missing="+std::to_string(assets.missing_references.size()));
+            startup.complete(assets.missing_references.empty()?"READY":"READY_WITH_WARNINGS");
+            if(process_logger)process_logger->flush();
             return 0;
         }
 #if NORTHSTARCPP_EDITOR
@@ -4141,6 +4942,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
                               manager.parent_path().c_str(), SW_SHOWNORMAL));
             if (started <= 32)
                 throw std::runtime_error("Unable to start native Project Manager");
+            startup.info("editor.manager","launched="+manager.u8string());
+            startup.complete("READY");
+            if(process_logger)process_logger->flush();
             return 0;
         }
 #endif
@@ -4148,11 +4952,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
             // Exercise the REAL Player startup pipeline: physics, scene-v3
             // streaming mounts, zones and scripts. Unlike --check-scene,
             // this runs the App constructor but opens no window.
-            northstarcpp::App initialized(std::move(settings));
+            startup.measure("application.construct", [&] {
+                northstarcpp::App initialized(std::move(settings),&startup);
+            });
+            startup.complete(startup.warning_count()?"READY_WITH_WARNINGS":"READY");
+            if(process_logger)process_logger->flush();
             std::puts("Player runtime asset initialization: PASS");
             return 0;
         }
-        int const result = northstarcpp::App(std::move(settings)).run(instance);
+        auto app=startup.measure("application.construct", [&] {
+            return std::make_unique<northstarcpp::App>(std::move(settings),&startup);
+        });
+        int const result=app->run(instance);
+        if(!startup.completed())
+            startup.complete(result?"FAILED":
+                (startup.warning_count()?"READY_WITH_WARNINGS":"READY"));
         if (process_logger) {
             try {
                 if (result)
@@ -4175,12 +4989,40 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
                 if (logging.enabled) {
                     northstarcpp::prepare_application_log_console(logging);
                     process_logger=std::make_unique<northstarcpp::Logger>(logging.options);
+                    auto folder=logging.options.directory;
+                    if(folder.empty()) {
+                        std::array<wchar_t,32768> env{};
+                        auto length=GetEnvironmentVariableW(L"LOCALAPPDATA",
+                            env.data(),static_cast<DWORD>(env.size()));
+                        if(!length || length>=env.size()) {
+                            length=GetTempPathW(static_cast<DWORD>(env.size()),env.data());
+                            if(!length || length>=env.size())
+                                throw std::runtime_error("No bootstrap report directory");
+                        }
+                        folder=std::filesystem::path(env.data())/
+                            L"KaylasSystems"/L"NorthStarCpp"/L"Logs";
+                    }
+                    startup.set_report_path(folder/
+                        (logging.options.session+"-"+
+                            std::to_string(GetCurrentProcessId())+"-startup.json"));
                 }
             } catch(std::exception const& logging_error) {
                 std::fprintf(stderr,"Logger emergency initialization: %s\n",
                              logging_error.what());
             }
         }
+        if(process_logger && !startup_sink_bound) {
+            startup.set_sink([&](auto severity,std::string const& text) {
+                using Severity=northstarcpp::diagnostics::StartupReport::Severity;
+                process_logger->write(severity==Severity::error?
+                    northstarcpp::LogLevel::error:
+                    severity==Severity::warning?northstarcpp::LogLevel::warn:
+                    northstarcpp::LogLevel::info,"engine.startup",text);
+            });
+            startup_sink_bound=true;
+        }
+        startup.failure("bootstrap",error.what());
+        startup.complete("FAILED");
         if (process_logger) {
             try {
                 process_logger->fatal("engine", error.what());

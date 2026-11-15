@@ -169,5 +169,87 @@ int main()
     if (!collision || collision->object_index!=2 ||
         simulated.scene().objects[2].node.id!=3)
         return fail("Fast-travel collision restoration changed stable body IDs");
+    // Runtime entities must join the SAME provider world without resetting
+    // authored bodies, player movement, or World Partition source indices.
+    PhysicsScene runtime(authored);
+    if (!runtime.supports_runtime_entities())
+        return fail("Provider lacks incremental runtime entity ABI");
+    SceneObject spawned;
+    spawned.name="Script crate";
+    spawned.node.id=9001;
+    spawned.position={30.f,1.f,0.f};
+    spawned.size=2.f;
+    spawned.mass=0.f;
+    auto const index=runtime.spawn_runtime(spawned);
+    if (index!=authored.objects.size() || !runtime.runtime_alive(index) ||
+        runtime.authored_object_count()!=authored.objects.size() ||
+        runtime.authored_scene().objects.size()!=authored.objects.size())
+        return fail("Runtime spawn changed authored scene topology");
+    auto cast_spawned=[&]() {
+        return runtime.sweep_sphere({30.f,5.f,0.f},{30.f,2.f,0.f},0.2f);
+    };
+    auto spawned_hit=cast_spawned();
+    if (!spawned_hit || spawned_hit->object_index!=index)
+        return fail("Runtime-spawned static entity has no real collision");
+    SceneWorld runtime_streaming(authored);
+    runtime_streaming.update({10.f,0.f,0.f}, {}, {}, &runtime.authored_scene());
+    (void)runtime.sync_scene_residency(runtime_streaming,{10.f,0.f,0.f});
+    if (!cast_spawned())
+        return fail("WorldPartition accidentally evicted persistent runtime body");
+    runtime.move_static(index,{32.f,1.f,0.f});
+    if (cast_spawned() ||
+        !runtime.sweep_sphere({32.f,5.f,0.f},{32.f,2.f,0.f},0.2f))
+        return fail("Runtime transform did not update collision");
+    runtime.destroy_runtime(index);
+    if (runtime.runtime_alive(index) ||
+        runtime.sweep_sphere({32.f,5.f,0.f},{32.f,2.f,0.f},0.2f) ||
+        runtime.scene().objects[index].node.visible)
+        return fail("Runtime destroy left a collidable or visible body");
+    try {
+        runtime.destroy_runtime(index);
+        return fail("Stale runtime entity handle was accepted");
+    } catch (std::out_of_range const&) {}
+    spawned.node.id=9002;
+    spawned.name="Falling script crate";
+    spawned.position={32.f,5.f,5.f};
+    spawned.mass=2.f;
+    auto const dynamic_index=runtime.spawn_runtime(spawned);
+    if (dynamic_index<=index || !runtime.runtime_alive(dynamic_index))
+        return fail("Runtime body ID was reused");
+    simulate(runtime,30);
+    if (!(runtime.scene().objects[dynamic_index].position.y<4.5f))
+        return fail("Runtime dynamic physics body did not fall");
+    runtime.destroy_runtime(dynamic_index);
+    simulate(runtime,2);
+    if (runtime.scene().objects.size()!=dynamic_index+1 ||
+        runtime.authored_scene().objects.size()!=authored.objects.size())
+        return fail("Runtime deletion invalidated scene indices");
+    // Stress the provider-side append/remove path without world rebuilds.
+    // Entities are placed far apart, so the test measures lifecycle overhead
+    // without accidentally creating an O(n^2) contact-pair workload.
+    std::vector<std::size_t> bulk_indices;
+    bulk_indices.reserve(1000);
+    for (std::size_t n=0;n<1000;++n) {
+        SceneObject prop;
+        prop.name="Runtime prop";
+        prop.node.id=10000+n;
+        prop.position={200.f+static_cast<float>(n)*4.f,1.f,800.f};
+        prop.size=1.f;
+        auto const slot=runtime.spawn_runtime(prop);
+        if (slot!=dynamic_index+1+n)
+            return fail("Runtime bulk spawn reused an entity index");
+        bulk_indices.push_back(slot);
+    }
+    if (runtime.scene().objects.size()!=authored.objects.size()+1002u)
+        return fail("Runtime bulk spawn count mismatch");
+    simulate(runtime,2);
+    for (auto const slot:bulk_indices)
+        runtime.destroy_runtime(slot);
+    simulate(runtime,2);
+    for (auto const slot:bulk_indices)
+        if (runtime.runtime_alive(slot))
+            return fail("Runtime bulk deletion leaked an active physics slot");
+    if (runtime.authored_scene().objects.size()!=authored.objects.size())
+        return fail("Mass runtime deletion changed authored scene");
     return 0;
 }

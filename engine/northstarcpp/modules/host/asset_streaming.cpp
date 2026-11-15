@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 namespace northstarcpp::detail {
 
@@ -98,19 +99,38 @@ AssetStreamingStats AssetStreaming::stats()
 
 void AssetStreaming::trim()
 {
-    while (resident_bytes > budget || resident > 1024) {
-        auto oldest = records.end();
-        for (auto item = records.begin(); item != records.end(); ++item) {
-            auto const& record = item->second;
-            if (record->resident && record.use_count() == 1 &&
-                (oldest == records.end() || record->last_use < oldest->second->last_use))
-                oldest = item;
-        }
-        if (oldest == records.end())
-            return;
-        resident_bytes -= oldest->second->bytes;
+    // Cache pressure can evict hundreds of entries at once. Repeatedly
+    // scanning the entire records map for the oldest entry is quadratic.
+    // Gather unpinned, resident candidates and build an oldest-first heap.
+    // Heap construction is O(R), including when only one entry must be
+    // evicted, while each additional eviction costs O(log R).
+    // All updates to records and residency counters hold mutex.
+    if (resident_bytes <= budget && resident <= 1024)
+        return;
+
+    std::vector<Records::iterator> candidates;
+    candidates.reserve(resident);
+    for (auto item = records.begin(); item != records.end(); ++item) {
+        auto const& record = item->second;
+        if (record->resident && record.use_count() == 1)
+            candidates.push_back(item);
+    }
+    auto const newer_first = [](auto a, auto b) {
+        return a->second->last_use > b->second->last_use;
+    };
+    std::make_heap(candidates.begin(), candidates.end(), newer_first);
+
+    while (!candidates.empty() &&
+           (resident_bytes > budget || resident > 1024)) {
+        std::pop_heap(candidates.begin(), candidates.end(), newer_first);
+        auto item = candidates.back();
+        candidates.pop_back();
+        // A request may be retained by another thread while trimming.
+        if (item->second.use_count() != 1)
+            continue;
+        resident_bytes -= item->second->bytes;
         --resident;
-        records.erase(oldest);
+        records.erase(item);
     }
 }
 

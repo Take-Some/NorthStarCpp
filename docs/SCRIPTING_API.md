@@ -53,6 +53,36 @@ The previous root-CMake `NORTHSTARCPP_V8_ROOT` monolith path remains for
 toolchain-compatible monolithic V8 SDKs. It does not accept MSYS2 UCRT64's
 dynamic V8 import libraries; use the separate build for those.
 
+## Shared engine scripts and project VFS
+
+The engine loads the shared JavaScript bootstrap from
+`sharedAssets/scripts/northstar/bootstrap.js` before each project's
+`scripts/main.js`. Projects use `NorthStar.camera.createViewController(...)`
+for script-owned view selection and the native `engine.camera.setMode(...)` API
+for camera operations. The root helper uses V to toggle views with a smooth
+transition and the mouse wheel for third-person follow distance; native bindings
+supply `engine.input.wheelDelta()` and `engine.camera.followDistance()`.
+Projects can override the defaults. The engine itself never binds the
+first/third-person toggle key. The default mount precedence is `sharedAssets/-100`, project
+root `0`, and project `assets/+100`. See
+[VFS and sharedAssets](VFS_SHARED_ASSETS.md) for mount and script load order.
+
+### Input enumeration classes and IDE declarations
+
+The source classes in sharedAssets/scripts/input/Keys.js and
+sharedAssets/scripts/input/GamepadButtons.js own the actual values.
+Keyboard codes follow the engine.input Virtual-Key convention;
+gamepad buttons are XInput-compatible bitmasks.
+
+The IDE declarations in sharedAssets/scripts/types/northstar-engine.d.ts
+are GENERATED, not separately maintained. After editing either runtime class:
+
+    python tools/dev/generate_input_typings.py
+    python tools/dev/generate_input_typings.py --check
+
+CTest northstarcpp_input_typings_sync detects typing drift from the classes.
+CTest northstarcpp_input_enum_classes checks runtime values and independence.
+
 ## C++ integration
 
 ```cpp

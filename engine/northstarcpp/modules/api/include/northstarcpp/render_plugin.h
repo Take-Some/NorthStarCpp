@@ -19,7 +19,7 @@ typedef struct NorthStarRenderFrame {
     uint32_t count;
     int32_t selected; // -1 for no highlight
     float camera_x, camera_y, camera_z;
-    uint32_t verify_pixels; // nonzero requests a diagnostic readback
+    uint32_t verify_pixels; // 1=general GPU readback; 2=two-color material-UV QA
     uint32_t first_person; // FPS mode and HUD overlay
     float camera_yaw, camera_pitch; // radians; zero yaw faces +Z
     float weapon_recoil;           // visual animation, [0, 1.6]

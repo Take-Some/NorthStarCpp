@@ -4,6 +4,7 @@
 #include "asset_list_file.hpp"
 
 #include <set>
+#include <map>
 #include <algorithm>
 
 namespace northstarcpp::shared_assets {
@@ -26,6 +27,7 @@ static bool legacy_bc3_mislabeled_bc7(Texture const& texture) {
     auto const blocks=std::min<std::size_t>(mip.size/16,2048);
     if(blocks<32)return false;
     std::size_t invalidBC7=0,bc7ModeZero=0,constantBC3Alpha=0;
+    std::size_t legacyBC3Alpha=0;
     auto const* data=texture.data.data()+mip.offset;
     for(std::size_t i=0;i<blocks;++i) {
         auto const* block=data+16*i;
@@ -39,10 +41,18 @@ static bool legacy_bc3_mislabeled_bc7(Texture const& texture) {
         bool alphaIndicesZero=true;
         for(int j=2;j<8;++j)alphaIndicesZero &= block[j]==0;
         if(alphaHeader && alphaIndicesZero)++constantBC3Alpha;
+        // Legacy character BC3 uses a near-transparent 0/5 alpha ramp with
+        // fully saturated selectors. Both 16-byte BC3/BC7 block formats are
+        // structurally identical, but a zero first byte is invalid for BC7.
+        // Require 95% identical alpha-plane signatures; never infer from
+        // the texture filename or from a single black BC7 block.
+        bool saturatedIndices=true;
+        for(int j=2;j<8;++j)saturatedIndices &= block[j]==255;
+        if(block[0]==0 && block[1]==5 && saturatedIndices)++legacyBC3Alpha;
     }
-    return invalidBC7*8>=blocks &&
-           bc7ModeZero*2>=blocks &&
-           constantBC3Alpha*3>=blocks*2;
+    return (invalidBC7*8>=blocks && bc7ModeZero*2>=blocks &&
+            constantBC3Alpha*3>=blocks*2) ||
+           (invalidBC7*20>=blocks*19 && legacyBC3Alpha*20>=blocks*19);
 }
 
 static std::vector<Texture> parse_texture_dictionary(
@@ -77,7 +87,10 @@ static std::vector<Texture> parse_texture_dictionary(
     std::vector<Texture> result;
     std::set<std::string> seen;
     std::uint64_t expected_mip = 0;
-    std::uint64_t previous_end = 0;
+    // A texture dictionary may deduplicate identical encoded byte ranges.
+    // Distinct ranges must never overlap; exact aliases are safe and common
+    // in large character dictionaries (including legacy character atlases).
+    std::map<std::uint64_t,std::uint64_t> payload_ranges;
     for (std::size_t i = 0; i < file.entries; ++i) {
         auto const entry = table + entries + i * 64;
         auto const start = body.integer(entry + 8, 8);
@@ -91,11 +104,25 @@ static std::vector<Texture> parse_texture_dictionary(
         auto const count = body.integer(entry + 44, 4);
         auto const color_space = body.integer(entry + 48, 4);
         require(name_offset <= name_size && length <= name_size - name_offset &&
-            start >= previous_end && start <= payload_size && size <= payload_size - start &&
+            start <= payload_size && size <= payload_size - start &&
             width > 0 && width <= 16384 && height > 0 && height <= 16384 &&
             mip_start == expected_mip && mip_start <= mip_count && count > 0 && count <= 15 &&
             count <= mip_count - mip_start && (color_space == 1 || color_space == 2),
             "Invalid NETD texture entry");
+        require(size > 0, "Empty NETD payload range");
+        auto next=payload_ranges.lower_bound(start);
+        if(next!=payload_ranges.end() && next->first==start) {
+            require(next->second==size, "Conflicting NETD aliased range");
+        } else {
+            if(next!=payload_ranges.end())
+                require(start+size<=next->first, "Overlapping NETD payload ranges");
+            if(next!=payload_ranges.begin()) {
+                auto previous=std::prev(next);
+                require(previous->first+previous->second<=start,
+                        "Overlapping NETD payload ranges");
+            }
+            payload_ranges.emplace_hint(next,start,size);
+        }
         auto name = body.string(table + names + name_offset, length);
         validate_name(name);
         require(seen.insert(name).second, "Duplicate YTD texture name");
@@ -129,7 +156,6 @@ static std::vector<Texture> parse_texture_dictionary(
         if(legacy_bc3_mislabeled_bc7(texture))
             texture.format_id=103; // Correct effective GPU/software codec.
         expected_mip += count;
-        previous_end = start + size;
         result.push_back(std::move(texture));
     }
     require(expected_mip == mip_count, "Unclaimed NETD mip records");

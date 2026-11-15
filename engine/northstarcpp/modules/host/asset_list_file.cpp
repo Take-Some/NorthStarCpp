@@ -136,6 +136,33 @@ void validate_hash(std::uint16_t kind, Bytes const& file, std::vector<std::uint8
         "NEF8 body hash does not match");
 }
 
+// Both NEF8 header versions use the same raw DEFLATE payload contract.
+// Keep decompression limits and stream cleanup identical across versions.
+std::vector<std::uint8_t> inflate_body(Bytes const& file,
+    std::uint64_t offset, std::uint64_t compressed, std::uint64_t expanded,
+    char const* invalid_stream)
+{
+    std::vector<std::uint8_t> body(static_cast<std::size_t>(expanded));
+    z_stream stream{};
+    stream.next_in = const_cast<Bytef*>(file.at(offset, compressed));
+    stream.avail_in = static_cast<uInt>(compressed);
+    stream.next_out = body.data();
+    stream.avail_out = static_cast<uInt>(expanded);
+    require(inflateInit2(&stream, -MAX_WBITS) == Z_OK,
+        "Cannot initialize NEF8 decompression");
+
+    // Restore zlib state even if validation throws.
+    struct InflateCleanup {
+        z_stream& stream;
+        ~InflateCleanup() { inflateEnd(&stream); }
+    } cleanup{stream};
+
+    auto const status = inflate(&stream, Z_FINISH);
+    require(status == Z_STREAM_END && stream.total_in == compressed &&
+        stream.total_out == expanded, invalid_stream);
+    return body;
+}
+
 } // namespace
 
 static ListFile parse_list_file_v2(Bytes const& file)
@@ -159,18 +186,8 @@ static ListFile parse_list_file_v2(Bytes const& file)
     require(metadata_size <= 8 * 1024 * 1024 &&
         ((flags & 2u) != 0) == (metadata_size != 0), "Invalid NEF8 v2 metadata range");
     ListFile result{kind, static_cast<std::size_t>(entries), {}, {}};
-    result.body.resize(static_cast<std::size_t>(expanded));
-    z_stream stream{};
-    stream.next_in = const_cast<Bytef*>(file.at(offset, compressed));
-    stream.avail_in = static_cast<uInt>(compressed);
-    stream.next_out = result.body.data();
-    stream.avail_out = static_cast<uInt>(expanded);
-    require(inflateInit2(&stream, -MAX_WBITS) == Z_OK, "Cannot initialize NEF8 decompression");
-    auto const status = inflate(&stream, Z_FINISH);
-    auto const complete = status == Z_STREAM_END && stream.total_in == compressed &&
-        stream.total_out == expanded;
-    inflateEnd(&stream);
-    require(complete, "Invalid NEF8 v2 deflate stream or length");
+    result.body = inflate_body(file, offset, compressed, expanded,
+        "Invalid NEF8 v2 deflate stream or length");
     if (flags & 4u) {
         std::array<std::uint8_t, BLAKE3_OUT_LEN> digest{};
         blake3_hasher hash;
@@ -217,18 +234,8 @@ ListFile parse_list_file(std::vector<std::uint8_t> const& bytes)
         "Invalid NEF8 metadata range");
 
     ListFile result{kind, static_cast<std::size_t>(entries), {}, {}};
-    result.body.resize(static_cast<std::size_t>(expanded));
-    z_stream stream{};
-    stream.next_in = const_cast<Bytef*>(file.at(offset, compressed));
-    stream.avail_in = static_cast<uInt>(compressed);
-    stream.next_out = result.body.data();
-    stream.avail_out = static_cast<uInt>(expanded);
-    require(inflateInit2(&stream, -MAX_WBITS) == Z_OK, "Cannot initialize NEF8 decompression");
-    auto const status = inflate(&stream, Z_FINISH);
-    auto const complete = status == Z_STREAM_END && stream.total_in == compressed &&
-        stream.total_out == expanded;
-    inflateEnd(&stream);
-    require(complete, "Invalid NEF8 deflate stream or inflated length");
+    result.body = inflate_body(file, offset, compressed, expanded,
+        "Invalid NEF8 deflate stream or inflated length");
     validate_hash(kind, file, result.body);
     if (metadata_size != 0)
         result.metadata = parse_json(file.string(metadata_offset, metadata_size));

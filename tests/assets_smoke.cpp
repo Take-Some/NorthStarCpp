@@ -240,6 +240,39 @@ int main(int argc, char** argv)
         require(!scene.empty(), "Cannot read scene fixture");
         test_archives(assets, root, scene);
         test_chunked_archive(assets,root);
+        // One virtual namespace: project/assets shadows sharedAssets, while
+        // scripts/main.js is read from the project root and bootstrap from shared.
+        auto const common=root/"sharedAssets";
+        auto const project=root/"MyGame";
+        write(common/"textures/ui.txt","engine-texture");
+        write(common/"models/fallback.txt","engine-model");
+        write(common/"scripts/northstar/bootstrap.js","engine-bootstrap");
+        write(project/"assets/textures/ui.txt","project-texture");
+        write(project/"scripts/main.js","project-entry");
+        northstarcpp::AssetStore layered;
+        layered.mount_project_assets(project,common);
+        require(text(layered.read("textures/ui.txt"))=="project-texture",
+            "Project assets failed to override sharedAssets");
+        require(text(layered.read("models/fallback.txt"))=="engine-model",
+            "Missing engine asset fallback");
+        require(text(layered.read("scripts/northstar/bootstrap.js"))=="engine-bootstrap",
+            "Missing shared root script");
+        require(text(layered.read("scripts/main.js"))=="project-entry",
+            "Missing project script");
+        write(common/"models/player.ydd", "engine-player-model");
+        require(text(layered.read("models/player.ydd"))=="engine-player-model",
+            "Project missing model did not fall back to sharedAssets");
+        write(project/"assets/models/player.ydd", "project-player-model");
+        // New content must be visible after VFS remount (mounts are invalidated
+        // by design, while file creation without remount may use provider caches).
+        layered.unmount_directory("",project/"assets");
+        layered.mount_directory("",project/"assets",100);
+        require(text(layered.read("models/player.ydd"))=="project-player-model",
+            "Project models/player.ydd did not shadow sharedAssets");
+        northstarcpp::AssetStore alias_mount;
+        alias_mount.mount_project_assets(project,project/"assets");
+        require(text(alias_mount.read("models/player.ydd"))=="project-player-model",
+            "Shared-assets alias of project assets cannot be mounted");
         return 0;
     } catch (std::exception const& e) {
         std::cerr << e.what() << '\n';

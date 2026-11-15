@@ -1,6 +1,11 @@
 // NorthStarCpp
 // Author: Kayla Verner
 #include <northstarcpp/assets.hpp>
+#include <northstarcpp/mesh_asset.hpp>
+#include <northstarcpp/native_model.hpp>
+#include <northstarcpp/material.hpp>
+#include <northstarcpp/skeleton.hpp>
+
 
 #include <algorithm>
 #include <filesystem>
@@ -31,6 +36,128 @@ int main(int argc, char** argv)
             manager,"textures/skydome.ytd");
         auto const drawable_entries=northstarcpp::shared_assets::list_dictionary_entries(
             manager,"models/skydome.ydd");
+        // Project's original Pistol YDD, not the temporary hand-built OBJ.
+        auto const pistol_path=std::string("models/weapon/pistol/pistol.ydd");
+        auto const pistol_entries=northstarcpp::shared_assets::list_dictionary_entries(
+            manager,pistol_path);
+        require(!pistol_entries.empty(),"Pistol YDD has no drawable entries");
+        auto const pistol_drawables=northstarcpp::shared_assets::load_drawables(
+            manager,pistol_path);
+        require(pistol_drawables.size()==pistol_entries.size(),
+            "Pistol YDD drawable count does not match dictionary");
+        auto const pistol_mesh=northstarcpp::load_scene_mesh(manager,pistol_path);
+        require(pistol_mesh.indices.size()==21902u*3u &&
+                pistol_mesh.vertices.size()>10000,
+            "Runtime mesh dispatch failed to recover original pistol geometry");
+        require(pistol_mesh.sections.size()==8u,
+            "Native YDD mesh sections were flattened and lost their YMAT links");
+        std::size_t section_indices=0;
+        std::size_t textured_sections=0;
+        for(auto const& section:pistol_mesh.sections) {
+            require(section.first_index==section_indices && section.index_count%3==0,
+                "Native model section index range is not contiguous");
+            section_indices+=section.index_count;
+            if(!section.material_reference.empty()) {
+                require(section.material_reference.find(".ymat@")!=std::string::npos,
+                    "Native material is not a YMAT dictionary reference");
+                auto material=northstarcpp::load_material_definition(
+                    manager,section.material_reference);
+                require(!material.textures[0].rgba8.empty(),
+                    "Native Pistol YMAT was not resolved to YTD base color");
+                ++textured_sections;
+            }
+        }
+        require(section_indices==pistol_mesh.indices.size() && textured_sections>=4,
+            "Original pistol has missing material sections");
+        auto bundled=northstarcpp::load_native_model_resource(manager,pistol_path);
+        require(bundled.mesh.sections.size()==8 &&
+                bundled.mesh.indices.size()==pistol_mesh.indices.size() &&
+                bundled.materials.size()==4u &&
+                bundled.skeleton.has_value() &&
+                bundled.skeleton->joints.size()==62u &&
+                bundled.skeleton_reference==
+                    "models/weapon/pistol/pistol.skeleton.ymt",
+            "Pistol native dependency bundle is incomplete");
+        for(auto const& entry:bundled.materials)
+            require(!entry.second.textures[0].rgba8.empty(),
+                "Native bundle did not preserve decoded YTD albedo");
+        require(bundled.has_skin() && !bundled.vertex_skin.empty(),
+            "Original Pistol YDD skin weights are missing from native model");
+        northstarcpp::SkeletonPose rest_pose(*bundled.skeleton);
+        auto rest_model=northstarcpp::skin_native_model_cpu(
+            bundled,rest_pose.palette());
+        require(rest_model.vertices.size()==bundled.mesh.vertices.size() &&
+                rest_model.sections.size()==bundled.mesh.sections.size() &&
+                rest_model.indices.size()==bundled.mesh.indices.size(),
+            "CPU skinning lost native material geometry ranges");
+        float bind_error=0.f;
+        for(std::size_t i=0;i<rest_model.vertices.size();++i) {
+            auto const& a=rest_model.vertices[i].position;
+            auto const& b=bundled.mesh.vertices[i].position;
+            bind_error=std::max(bind_error,std::max({
+                std::abs(a.x-b.x),std::abs(a.y-b.y),std::abs(a.z-b.z)}));
+        }
+        require(bind_error<0.001f,
+            "Native Pistol 8-weight skinning does not reproduce YMT bind pose");
+        std::cout<<"Pistol native 8-influence skin: "<<bundled.vertex_skin.size()
+                 <<" vertices; bind error "<<bind_error<<"\n";
+        auto pistol_clips=northstarcpp::load_skeletal_clips(manager,
+            "animations/weapon/pistol/military-pistol.ycd",
+            {"idle","p-fire","p-reload"},*bundled.skeleton);
+        require(pistol_clips.size()==3u,
+            "Original Pistol YCD animation clips are unavailable");
+        float animated_delta=0.f;
+        for(auto const& clip:pistol_clips) {
+            northstarcpp::SkeletonPose animated(*bundled.skeleton);
+            animated.sample(*bundled.skeleton,clip,
+                0.5f*float(clip.frames-1)/clip.sample_rate,false);
+            auto deformed=northstarcpp::skin_native_model_cpu(
+                bundled,animated.palette());
+            require(deformed.indices==bundled.mesh.indices &&
+                    deformed.sections.size()==bundled.mesh.sections.size(),
+                "Native animation broke material section or triangle topology");
+            for(std::size_t i=0;i<deformed.vertices.size();++i) {
+                auto const& a=deformed.vertices[i].position;
+                auto const& b=bundled.mesh.vertices[i].position;
+                animated_delta=std::max(animated_delta,std::max({
+                    std::abs(a.x-b.x),std::abs(a.y-b.y),std::abs(a.z-b.z)}));
+            }
+        }
+        require(animated_delta>0.00001f,
+            "Original Pistol animation did not deform any skinned vertex");
+        std::cout<<"Pistol YCD three clips: max vertex delta "
+                 <<animated_delta<<"\n";
+
+
+        auto sky_model=northstarcpp::load_native_model_resource(
+            manager,"models/skydome.ydd@skydome_high");
+        require(sky_model.mesh.sections.size()==1u &&
+                !sky_model.skeleton.has_value(),
+            "Static YDD without a YMT companion should be allowed");
+
+        auto const skeleton=northstarcpp::load_skeleton(manager,
+            "models/weapon/pistol/pistol.skeleton.ymt");
+        require(!skeleton.joints.empty(),
+            "Pistol skeleton YMT did not load into the common skeleton runtime");
+        std::cout << "Native Pistol: " << textured_sections
+                  << " YMAT/YTD textured sections; "
+                  << skeleton.joints.size() << " YMT joints\n";
+
+        auto const selected_pistol=northstarcpp::load_scene_mesh(
+            manager,pistol_path+"@pistol");
+        require(selected_pistol.indices.size()==pistol_mesh.indices.size(),
+            "YDD dictionary selector changed triangle count");
+
+        for(auto const& entry:pistol_drawables) {
+            std::size_t triangles=0;
+            for(auto const& part:entry.meshes)
+                triangles+=part.indices.size()/3;
+            std::cout<<"Pistol original YDD drawable: "<<entry.name
+                     <<" mesh parts="<<entry.meshes.size()
+                     <<" triangles="<<triangles<<"\n";
+            require(triangles>0,"Original Pistol YDD drawable has no geometry");
+        }
+
         require(texture_entries.size()==5 && drawable_entries.size()==1,
             "NEF8 ListFile entries were truncated during enumeration");
         require(drawable_entries[0].name=="skydome_high",

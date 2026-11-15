@@ -19,6 +19,9 @@ int main(int argc,char** argv) {
         std::ofstream(root/"Assets"/"Meshes"/"npc.ydd").put('M');
         std::ofstream(root/"Assets"/"Textures"/"albedo.ytd").put('T');
         std::ofstream(root/"Assets"/"logic.ysc").put('S');
+        check(kind_from_extension(fs::path("MaterialFunctions/Color.material-function.json"))==
+              AssetKind::material_function,
+              "Material Function must be a first-class asset kind");
         AssetCatalog catalog;
         catalog.scan(root/"Assets");
         check(catalog.entries().size()==5,"Missing catalog assets");
@@ -44,6 +47,9 @@ int main(int argc,char** argv) {
         check(catalog.truncated() && catalog.entries().size()==2,
               "Bounded traversal failed");
         auto source=fs::path(argv[2]);
+        fs::create_directories(root/"Assets"/"characters"/"abby");
+        fs::copy_file(source/"characters/abby/abby.character.json",
+            root/"Assets/characters/abby/abby.character.json");
         fs::create_directories(root/"Assets"/"RealTextures");
         fs::create_directories(root/"Assets"/"RealModels");
         fs::create_directories(root/"Assets"/"RealMaterials");
@@ -57,6 +63,15 @@ int main(int argc,char** argv) {
             root/"Assets/RealModels/skydome.ydd",
             fs::copy_options::overwrite_existing);
         catalog.scan(root/"Assets");
+        auto const* character=catalog.find(
+            "characters/abby/abby.character.json");
+        check(character && character->kind==AssetKind::character &&
+              !character->directory &&
+              catalog.asset_reference(character->virtual_path)==
+                  "characters/abby/abby.character.json",
+              "Namespaced Character manifest missing or misclassified");
+        check(catalog.find("characters/abby")!=nullptr,
+              "Character namespace folder not visible");
         auto const* ytd=catalog.find("RealTextures/skydome.ytd");
         auto const* ydd=catalog.find("RealModels/skydome.ydd");
         auto const* ymat=catalog.find("RealMaterials/skydome.ymat");
@@ -100,8 +115,8 @@ int main(int argc,char** argv) {
         check(ytd_children==5,"All five skydome YTD entries must be visible");
         check(ydd_children==1,"Skydome YDD drawable must be visible");
         check(ymat_children==3,"All three skydome YMAT materials must be visible");
-        check(catalog.entries().size()==20,
-              "Catalog must include all YDD, YTD and YMAT virtual folders and children");
+        check(catalog.entries().size()==23,
+              "Catalog must include the character hierarchy and all virtual records");
         std::cout<<"Cross-platform asset catalog: PASS\n";
         return 0;
     } catch(std::exception const& e) {

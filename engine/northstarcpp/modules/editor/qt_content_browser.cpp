@@ -4,6 +4,8 @@
 #include <northstarcpp/assets.hpp>
 #include "editor_asset_thumbnails.hpp"
 #include "qt_asset_preview_dialog.hpp"
+#include "qt_prefab_preview.hpp"
+#include "editor_prefab_composition.hpp"
 #include "editor_asset_material_source.hpp"
 #include "qt_asset_card_delegate.hpp"
 
@@ -22,6 +24,8 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QImageReader>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QInputDialog>
 #include <QItemSelectionModel>
 #include <QLabel>
@@ -97,6 +101,9 @@ Palette asset_palette(AssetKind kind) {
     case AssetKind::texture:return {QColor("#4DBA87"),"TEX"};
     case AssetKind::audio:return {QColor("#D8A24E"),"WAV"};
     case AssetKind::scene:return {QColor("#70B7C6"),"LVL"};
+    case AssetKind::prefab:return {QColor("#55C29F"),"PFB"};
+    case AssetKind::character:return {QColor("#B38FD9"),"CHR"};
+    case AssetKind::material_function:return {QColor("#d08fd8"),"FUNC"};
     case AssetKind::script:return {QColor("#D97893"),"JS"};
     case AssetKind::animation:return {QColor("#7DBD68"),"ANIM"};
     case AssetKind::shader:return {QColor("#6FAFD7"),"HLSL"};
@@ -189,6 +196,44 @@ QImage directListFileThumbnail(fs::path const& root,std::string const& key,
 }
 QImage engineThumbnail(fs::path const& root,std::string const& key, AssetKind kind) {
     try {
+        if(kind==AssetKind::prefab) {
+            auto prefab=prefab_preview::load(root,key);
+            try {
+                // Render the entire native composition on this existing
+                // async thumbnail worker; one camera and shared Z buffer.
+                AssetManager assets;
+                assets.mount_directory("",root,100);
+                std::error_code ec;
+                for(auto current=root.parent_path();!current.empty();) {
+                    auto shared=current/"sharedAssets";
+                    if(fs::is_directory(shared,ec)) {
+                        assets.mount_shared_assets(shared);
+                        break;
+                    }
+                    auto upper=current.parent_path();
+                    if(upper==current)break;
+                    current=upper;
+                }
+                auto composition=prefab_preview::load_composition(
+                    prefab,assets);
+                if(!composition.drawable.meshes.empty()) {
+                    auto rendered=editor_tools::preview_drawable(
+                        composition.drawable,320,320,.62f,.27f,1.f,
+                        false,&composition.materials);
+                    if(rendered.valid()) {
+                        QImage image(reinterpret_cast<uchar const*>(
+                            rendered.argb.data()),rendered.width,
+                            rendered.height,rendered.width*4,
+                            QImage::Format_ARGB32);
+                        return image.copy();
+                    }
+                }
+            }catch(std::exception const&) {
+                // Preserve an accurate scene schematic if native assets
+                // cannot be resolved by an external engine.assets provider.
+            }
+            return prefab_preview::thumbnail(prefab);
+        }
         if(key.find('@')!=std::string::npos &&
            (kind==AssetKind::texture || kind==AssetKind::mesh ||
             kind==AssetKind::material)) {
@@ -297,7 +342,7 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     toolbar->addWidget(search_);
     types_=new QComboBox(this);
     for(auto const& item:{"All Assets","Meshes","Materials","Textures","Audio",
-                          "Scenes","Scripts","Animations","Shaders","Other"})
+                          "Scenes","Scripts","Animations","Shaders","Other","Prefabs","Characters","Material Functions"})
         types_->addItem(item);
     types_->setMinimumWidth(130);
     toolbar->addWidget(types_);
@@ -672,7 +717,7 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
             static QIcon const textureFolder(
                 QStringLiteral(":/northstar/icons/texturesFolder.png"));
             if(!textureFolder.isNull())return textureFolder;
-        } else if(extension==".ydd") {
+        } else if((extension==".ydd" || extension==".ydr")) {
             static QIcon const modelFolder(
                 QStringLiteral(":/northstar/icons/modelsFolder.png"));
             if(!modelFolder.isNull())return modelFolder;
@@ -686,6 +731,12 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
 }
 QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
     QString const type=QString::fromLatin1(kind_name(rec.kind));
+    if(rec.kind==AssetKind::prefab && !rec.directory) {
+        if(!rec.prefab_valid)return "Prefab - Invalid Scene V3";
+        return QString("Prefab - %1 actor%2")
+            .arg(rec.prefab_actor_count)
+            .arg(rec.prefab_actor_count==1?"":"s");
+    }
     if(rec.directory) {
         if(!rec.is_list_file())return "Folder";
         auto const extension=fs::path(rec.virtual_path).extension().u8string();
@@ -695,7 +746,7 @@ QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
                        child.container_path==rec.virtual_path;
             });
         auto const singular=extension==".ytd"?"texture":
-                            extension==".ydd"?"model":
+                            (extension==".ydd" || extension==".ydr")?"model":
                             extension==".ymat"?"material":"item";
         return QString::number(number)+" "+singular+
                (number==1?"":"s");
@@ -710,7 +761,7 @@ QColor QtContentBrowser::accentColor(AssetRecord const& rec) const {
     if(rec.directory && rec.is_list_file()) {
         auto const ext=fs::path(rec.virtual_path).extension().u8string();
         if(ext==".ytd")return asset_palette(AssetKind::texture).fill;
-        if(ext==".ydd")return asset_palette(AssetKind::mesh).fill;
+        if(ext==".ydd" || ext==".ydr")return asset_palette(AssetKind::mesh).fill;
         if(ext==".ymat")return asset_palette(AssetKind::material).fill;
     }
     return asset_palette(rec.directory?AssetKind::folder:rec.kind).fill;
@@ -735,6 +786,10 @@ void QtContentBrowser::populateItems() {
             case 6:desired=AssetKind::script;break;
             case 7:desired=AssetKind::animation;break;
             case 8:desired=AssetKind::shader;break;
+            case 9:desired=AssetKind::other;break;
+            case 10:desired=AssetKind::prefab;break;
+            case 11:desired=AssetKind::character;break;
+            case 12:desired=AssetKind::material_function;break;
             default:break;
             }
             if(rec.kind!=desired)continue;
@@ -791,7 +846,8 @@ void QtContentBrowser::queueThumbnail(QString const& path) {
             break;
         }
     if(!isImage(path) && k!=AssetKind::texture &&
-       k!=AssetKind::mesh && k!=AssetKind::material)return;
+       k!=AssetKind::mesh && k!=AssetKind::material &&
+       k!=AssetKind::prefab)return;
     auto const version=generation_;
     auto const base=root_;
     auto const* rec=catalog_.find(path.toUtf8().toStdString());
@@ -831,7 +887,8 @@ void QtContentBrowser::queueThumbnail(QString const& path) {
         try {
             auto const full=QDir(base).filePath(physical);
             auto const metadata=QFileInfo(full);
-            if(!metadata.isFile() || metadata.size()>128ll*1024*1024)
+            if(k!=AssetKind::prefab &&
+               (!metadata.isFile() || metadata.size()>128ll*1024*1024))
                 return QImage{};
             if(!embedded && isImage(physical)) {
                 QImageReader reader(full);
@@ -870,6 +927,79 @@ void QtContentBrowser::updateDetails() {
     }
     QString info=QString::fromLatin1(kind_name(kind))+"\nContent / "+selected;
     auto const* rec=catalog_.find(selected.toUtf8().toStdString());
+    if(rec && kind==AssetKind::prefab) {
+        try {
+            info+="\n"+prefab_preview::details(
+                prefab_preview::load(native(root_),selected.toUtf8().toStdString()));
+        } catch(std::exception const& e) {
+            info+="\nInvalid prefab: "+QString::fromUtf8(e.what());
+        }
+    }
+    if(rec && kind==AssetKind::material_function) {
+        try {
+            QFile function(qt(catalog_.backing_file(rec->virtual_path)));
+            if(!function.open(QIODevice::ReadOnly) ||
+               function.size()>32768)
+                throw std::runtime_error("Cannot read bounded Material Function");
+            QJsonParseError parse{};
+            auto doc=QJsonDocument::fromJson(function.readAll(),&parse);
+            if(parse.error!=QJsonParseError::NoError || !doc.isObject() ||
+               doc.object().value("schema").toString()!=
+                   "northstar.material-function.v1")
+                throw std::runtime_error("Invalid Material Function schema");
+            auto const object=doc.object();
+            info+="\nReusable Material Function";
+            info+="\nInputs:";
+            for(auto const& raw:object.value("inputs").toArray()) {
+                auto pin=raw.toObject();
+                info+="\n  "+pin.value("name").toString()+" : "+
+                      pin.value("type").toString();
+            }
+            info+="\nOutputs:";
+            for(auto const& raw:object.value("outputs").toArray()) {
+                auto pin=raw.toObject();
+                info+="\n  "+pin.value("name").toString()+" : "+
+                      pin.value("type").toString();
+            }
+            info+="\nNodes: "+QString::number(
+                object.value("nodes").toArray().size());
+        }catch(std::exception const& e) {
+            info+="\nInvalid Material Function: "+QString::fromUtf8(e.what());
+        }
+    }
+    if(rec && kind==AssetKind::character) {
+        try {
+            QFile manifest(qt(catalog_.backing_file(rec->virtual_path)));
+            if(!manifest.open(QIODevice::ReadOnly) ||
+               manifest.size()<2 || manifest.size()>32768)
+                throw std::runtime_error("Cannot read bounded character manifest");
+            QJsonParseError parse{};
+            auto document=QJsonDocument::fromJson(manifest.readAll(),&parse);
+            if(parse.error!=QJsonParseError::NoError || !document.isObject())
+                throw std::runtime_error("Malformed character manifest JSON");
+            auto descriptor=document.object();
+            auto const id=descriptor.value("id").toString();
+            if(descriptor.value("schema").toString()!="northstar.character.v1" ||
+               id!=parentVirtual(selected) ||
+               !safe_virtual_path(id.toUtf8().toStdString()))
+                throw std::runtime_error("Invalid character identity or schema");
+            QString model=descriptor.value("model").toString();
+            QString skeleton=descriptor.value("skeleton").toString();
+            if(!safe_virtual_path(model.toUtf8().toStdString()) ||
+               !safe_virtual_path(skeleton.toUtf8().toStdString()))
+                throw std::runtime_error("Invalid character model/rig reference");
+            info+="\nCharacter: "+id+"\nModel: "+model+
+                  "\nSkeleton: "+skeleton;
+            auto modelFile=catalog_.find(model.toUtf8().toStdString());
+            auto rigFile=catalog_.find(skeleton.toUtf8().toStdString());
+            info+=(modelFile && rigFile)?"\nResources: indexed":
+                "\nResources: model or skeleton missing";
+            info+="\nAnimations: "+QString::number(
+                descriptor.value("animations").toArray().size());
+        }catch(std::exception const& e) {
+            info+="\nInvalid character manifest: "+QString::fromUtf8(e.what());
+        }
+    }
     if(rec && rec->is_list_file()) {
         info+="\nNEF8 ListFile (virtual directory)";
         auto count=std::count_if(catalog_.entries().begin(),catalog_.entries().end(),
@@ -908,7 +1038,15 @@ void QtContentBrowser::createFolder() {
     if(!isSafeBasename(name)) {
         QMessageBox::warning(this,"Invalid Folder","Use a safe folder name.");return;
     }
-    auto target=QDir(root_).filePath(folder_.isEmpty()?name:folder_+"/"+name);
+    QString target;
+    try {
+        auto parent=folder_.isEmpty()?native(root_):
+            catalog_.resolve(folder_.toUtf8().toStdString());
+        target=qt(parent/native(name));
+    }catch(std::exception const& e) {
+        QMessageBox::warning(this,"New Folder",QString::fromUtf8(e.what()));
+        return;
+    }
     if(!QDir().mkpath(target))
         QMessageBox::warning(this,"Folder","Unable to create this folder.");
     else refresh();
@@ -929,8 +1067,15 @@ void QtContentBrowser::importFiles() {
     for(auto const& source:dialog.selectedFiles()) {
         auto file=QFileInfo(source);
         if(!file.isFile() || file.size()>512ll*1024*1024)continue;
-        auto dest=QDir(root_).filePath(folder_.isEmpty()?file.fileName():
-                                            folder_+"/"+file.fileName());
+        QString dest;
+        try {
+            auto parent=folder_.isEmpty()?native(root_):
+                catalog_.resolve(folder_.toUtf8().toStdString());
+            dest=qt(parent/native(file.fileName()));
+        }catch(std::exception const& e) {
+            QMessageBox::warning(this,"Import Files",QString::fromUtf8(e.what()));
+            break;
+        }
         if(QFileInfo::exists(dest)) {
             auto choice=QMessageBox::question(this,"Existing Asset",
                 "The asset "+file.fileName()+" already exists. Skip it?",
@@ -1022,7 +1167,7 @@ void QtContentBrowser::showMenu(QPoint point) {
     QMenu menu(this);
     auto selected=selectedPath();
     auto* open=menu.addAction("Preview / Browse");
-    auto* insert=menu.addAction("Add Mesh to Scene");
+    auto* insert=menu.addAction("Add to Scene");
     auto* copy=menu.addAction("Copy Asset Reference");
     menu.addSeparator();
     auto* create=menu.addAction("New Folder...");
@@ -1035,19 +1180,22 @@ void QtContentBrowser::showMenu(QPoint point) {
     open->setEnabled(!selected.isEmpty());
     auto const* chosen=catalog_.find(selected.toUtf8().toStdString());
     insert->setEnabled(chosen && !chosen->directory &&
-                       chosen->kind==AssetKind::mesh);
+        (chosen->kind==AssetKind::mesh || chosen->kind==AssetKind::prefab));
+    if(chosen && chosen->kind==AssetKind::prefab)
+        insert->setText("Instantiate Prefab in Scene");
     copy->setEnabled(!selected.isEmpty()&&!selectedIsDirectory());
-    rename->setEnabled(!selected.isEmpty());
+    rename->setEnabled(!selected.isEmpty() && selected!="prefabs");
     duplicate->setEnabled(!selected.isEmpty()&&!selectedIsDirectory());
     reveal->setEnabled(!selected.isEmpty());
-    remove->setEnabled(!selected.isEmpty());
+    remove->setEnabled(!selected.isEmpty() && selected!="prefabs");
     auto* selectedAction=menu.exec(point.isNull()?QCursor::pos():
                                            grid_->viewport()->mapToGlobal(point));
     if(selectedAction==open) {
         if(selectedIsDirectory())openFolder(selected);
         else if(!selected.isEmpty())openAssetPreview(selected);
     } else if(selectedAction==insert) {
-        if(chosen && chosen->kind==AssetKind::mesh)
+        if(chosen && (chosen->kind==AssetKind::mesh ||
+                      chosen->kind==AssetKind::prefab))
             emit assetActivated(QString::fromUtf8(chosen->asset_reference().c_str()));
     } else if(selectedAction==copy)copyReference();
     else if(selectedAction==create)createFolder();

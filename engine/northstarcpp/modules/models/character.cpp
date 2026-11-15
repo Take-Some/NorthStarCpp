@@ -1,5 +1,6 @@
 #include <northstarcpp/character.hpp>
 #include "asset_list_file.hpp"
+#include "character_asset_namespace.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -28,7 +29,8 @@ CharacterModel load_character_model(AssetStore const& assets, std::string const&
         bytes.integer(4,4) == 1 && bytes.integer(8,8) == 40, "Expected a skeletal YDD v4");
     auto const strings = bytes.integer(16,8);
     auto const start = bytes.integer(32,8);
-    auto const count = bytes.integer(52,4);
+    // Offset 52 stores the drawable LOD metadata; mesh count is at 56.
+    auto const count = bytes.integer(56,4);
     require(strings == 120 && start >= strings && start <= bytes.size() &&
         bytes.integer(104,8) == start && bytes.integer(112,8) == bytes.size() - start &&
         count > 0 && count <= 128 && bytes.integer(start,4) == count &&
@@ -47,6 +49,11 @@ CharacterModel load_character_model(AssetStore const& assets, std::string const&
         part.mesh.name = name_at(bytes, strings, start, bytes.integer(cursor,4));
         part.mesh.material = name_at(bytes, strings, start, bytes.integer(cursor+4,4));
         validate_reference(part.mesh.material);
+        // Legacy YDD imports embed materials/character_<id>.ymat@entry.
+        // Canonical characters/<id>/models/<id>.ydd stores its YMAT alongside
+        // the character. Rebase only when both paths match this convention.
+        part.mesh.material=detail::rebase_embedded_character_material(
+            path,part.mesh.material);
         auto const vertices = bytes.integer(cursor+8,4);
         auto const indices = bytes.integer(cursor+12,4);
         total_vertices += vertices;
@@ -92,8 +99,8 @@ CharacterModel load_character_model(AssetStore const& assets, std::string const&
         cursor += indices * 4;
         model.parts.push_back(std::move(part));
     }
-    require(cursor == bytes.size() && total_vertices == bytes.integer(56,4) &&
-        total_indices == bytes.integer(60,4), "Invalid skeletal YDD totals");
+    require(cursor == bytes.size() && total_vertices == bytes.integer(60,4) &&
+        total_indices == bytes.integer(64,4), "Invalid skeletal YDD totals");
     return model;
 }
 

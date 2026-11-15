@@ -8,7 +8,7 @@
 
 namespace northstarcpp::editor {
 enum class AssetKind {
-    folder, mesh, material, texture, audio, scene, script, animation, shader, other
+    folder, mesh, material, texture, audio, scene, script, animation, shader, other, prefab, character, material_function
 };
 struct AssetRecord {
     std::string virtual_path;  // UTF-8, '/' separated, root-relative
@@ -16,6 +16,13 @@ struct AssetRecord {
     AssetKind kind{AssetKind::other};
     bool directory=false;
     std::uintmax_t size=0;
+    // Parsed on the catalog's background indexing worker. Invalid prefab
+    // files stay visible but never masquerade as a valid scene template.
+    std::size_t prefab_actor_count=0;
+    bool prefab_valid=false;
+    // True for the separate project/prefabs collection. Ordinary .nprefab
+    // files inside assets/ retain their original Content-relative VFS paths.
+    bool external_prefab=false;
     // For NEF8 YDD/YTD the physical source dictionary is a virtual folder.
     // Its children are read-only virtual files, not filesystem paths.
     std::string container_path;

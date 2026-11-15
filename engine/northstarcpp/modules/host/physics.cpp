@@ -12,13 +12,18 @@
 #include <cmath>
 #include <stdexcept>
 #include <limits>
+#include <unordered_set>
 
 namespace northstarcpp {
 
 struct PhysicsScene::State {
-    explicit State(Scene const& source) : snapshot(source), poses(source.objects.size())
+    explicit State(Scene const& source)
+        : snapshot(source), authored_snapshot(source), poses(source.objects.size()),
+          authored_count(source.objects.size())
     {
         validate_scene(snapshot);
+        for (auto const& object : snapshot.objects)
+            if (object.node.id) used_ids.insert(object.node.id);
         ecs.load(snapshot);
         residency_api = module.query_extension<NorthStarPhysicsResidencyApi>(
             NORTHSTARCPP_PHYSICS_RESIDENCY_MODULE_ABI);
@@ -28,6 +33,16 @@ struct PhysicsScene::State {
             auto const* candidate = query ? query(NORTHSTARCPP_PHYSICS_RESIDENCY_ABI) : nullptr;
             if (candidate && valid_api(*candidate))
                 residency_api = candidate;
+        }
+        runtime_api = module.query_extension<NorthStarPhysicsRuntimeApi>(
+            NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI);
+        if (!runtime_api) {
+            auto const query = module.symbol<NorthStarPhysicsGetRuntimeApi>(
+                "northstar_physics_get_runtime_api");
+            auto const* candidate = query ? query(NORTHSTARCPP_PHYSICS_RUNTIME_ABI) : nullptr;
+            if (candidate && candidate->abi_version == NORTHSTARCPP_PHYSICS_RUNTIME_ABI &&
+                candidate->add_body && candidate->remove_body)
+                runtime_api = candidate;
         }
         resident_mask.assign(snapshot.objects.size(),1);
         std::vector<NorthStarRigidBody> bodies;
@@ -59,17 +74,26 @@ struct PhysicsScene::State {
                 throw module.error("Physics module returned an invalid pose");
         }
         for (std::size_t i = 0; i < poses.size(); ++i) {
+            if (i >= authored_count && !runtime_alive[i - authored_count])
+                continue;
             auto const& pose = poses[i];
             snapshot.objects[i].position = {pose.x, pose.y, pose.z};
+            if (i < authored_count)
+                authored_snapshot.objects[i].position = snapshot.objects[i].position;
         }
     }
 
     Scene snapshot;
+    Scene authored_snapshot;
+    std::size_t authored_count = 0;
+    std::vector<uint8_t> runtime_alive;
+    std::unordered_set<std::uint64_t> used_ids;
     std::vector<NorthStarBodyPose> poses;
     Module module{NORTHSTARCPP_CAPABILITY_PHYSICS};
     NorthStarPhysicsApi const& api = *module.query<NorthStarPhysicsApi>(NORTHSTARCPP_PHYSICS_ABI);
     EcsSceneRuntime ecs;
     NorthStarPhysicsResidencyApi const* residency_api = nullptr;
+    NorthStarPhysicsRuntimeApi const* runtime_api = nullptr;
     std::vector<uint8_t> resident_mask;
     void* world = nullptr;
 };
@@ -92,6 +116,86 @@ bool PhysicsScene::supports_scene_residency() const
 {
     return state->residency_api!=nullptr;
 }
+bool PhysicsScene::supports_runtime_entities() const
+{
+    return state->runtime_api != nullptr;
+}
+std::size_t PhysicsScene::authored_object_count() const { return state->authored_count; }
+Scene const& PhysicsScene::authored_scene() const { return state->authored_snapshot; }
+bool PhysicsScene::runtime_alive(std::size_t index) const
+{
+    return index >= state->authored_count &&
+        index - state->authored_count < state->runtime_alive.size() &&
+        state->runtime_alive[index - state->authored_count] != 0;
+}
+
+std::size_t PhysicsScene::spawn_runtime(SceneObject const& object)
+{
+    if (!state->runtime_api)
+        throw std::runtime_error("Active physics provider lacks runtime-body extension");
+    if (object.player || object.name.empty() || object.name.size() >= NORTHSTARCPP_ECS_NAME_BYTES ||
+        !object.node.id || object.node.cell.size() > 128 ||
+        !std::isfinite(object.position.x) || !std::isfinite(object.position.y) ||
+        !std::isfinite(object.position.z) || !std::isfinite(object.size) ||
+        !std::isfinite(object.mass) || object.size <= 0.f || object.size > 1000.f ||
+        object.mass < 0.f || object.mass > 1000000.f ||
+        std::max({std::abs(object.position.x),std::abs(object.position.y),
+                  std::abs(object.position.z)}) > 1000000.f ||
+        state->snapshot.objects.size() >= max_scene_objects)
+        throw std::invalid_argument("Invalid runtime scene entity");
+    if (state->used_ids.find(object.node.id)!=state->used_ids.end())
+        throw std::invalid_argument("Duplicate runtime entity stable ID");
+    // Allocate host snapshot storage first. On a provider failure, roll back.
+    auto const index = state->snapshot.objects.size();
+    state->snapshot.objects.push_back(object);
+    try {
+        state->poses.push_back({});
+        state->resident_mask.push_back(1);
+        state->runtime_alive.push_back(1);
+    } catch (...) {
+        state->snapshot.objects.pop_back();
+        if (state->poses.size() > index) state->poses.pop_back();
+        if (state->resident_mask.size() > index) state->resident_mask.pop_back();
+        if (state->runtime_alive.size() > index-state->authored_count)
+            state->runtime_alive.pop_back();
+        throw;
+    }
+    NorthStarRigidBody const body{
+        object.position.x, object.position.y, object.position.z,
+        object.size, object.mass, 0u};
+    uint32_t result = UINT32_MAX;
+    if (!state->runtime_api->add_body(state->world, &body, &result)) {
+        state->snapshot.objects.pop_back();
+        state->poses.pop_back();
+        state->resident_mask.pop_back();
+        state->runtime_alive.pop_back();
+        throw state->module.error("Cannot spawn runtime physics body");
+    }
+    if (result != index)
+        throw std::runtime_error("Runtime physics provider violated stable scene index contract");
+    state->used_ids.insert(object.node.id);
+    // Initialize only the new pose instead of reading every provider body.
+    // PhysicsScene::step updates all dynamic poses normally on the next tick.
+    state->poses[index] = {object.position.x, object.position.y, object.position.z,
+        {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f}};
+    return index;
+}
+
+void PhysicsScene::destroy_runtime(std::size_t index)
+{
+    if (!runtime_alive(index))
+        throw std::out_of_range("Runtime scene entity is stale or authored");
+    if (!state->runtime_api->remove_body(state->world,static_cast<uint32_t>(index)))
+        throw state->module.error("Cannot destroy runtime physics body");
+    state->runtime_alive[index-state->authored_count] = 0;
+    // Keep the slot but never render or query it: authored indices must remain
+    // stable, including during World Partition updates.
+    auto& dead = state->snapshot.objects[index];
+    dead.node.visible = false;
+    dead.node.collision = false;
+    dead.node.asset.clear();
+}
+
 std::size_t PhysicsScene::ecs_resident_entity_count() const
 {
     return state->ecs.size();
@@ -108,10 +212,12 @@ std::size_t PhysicsScene::sync_scene_residency(
         throw std::invalid_argument("Invalid protected position for collision streaming");
     auto const& objects=state->snapshot.objects;
     auto const& authored=scene_world.source().objects;
-    if (objects.size()!=authored.size() || objects.size()!=state->resident_mask.size())
+    if (objects.size()<authored.size() ||
+        state->authored_count!=authored.size() ||
+        objects.size()!=state->resident_mask.size())
         throw std::runtime_error("Collision streaming source indices do not match physics world");
     std::size_t changed=0;
-    for (std::size_t i=0;i<objects.size();++i) {
+    for (std::size_t i=0;i<authored.size();++i) {
         auto const& object=objects[i];
         auto const& node=authored[i].node;
         if (node.id!=object.node.id)
@@ -140,7 +246,7 @@ std::size_t PhysicsScene::sync_scene_residency(
             ++changed;
         }
     }
-    (void)state->ecs.reconcile_scene_residency(state->snapshot,scene_world);
+    (void)state->ecs.reconcile_scene_residency(state->authored_snapshot,scene_world);
     return changed;
 }
 
@@ -154,6 +260,7 @@ void PhysicsScene::apply_impulse(std::size_t index, Vector3 impulse)
 {
     auto const& objects=state->snapshot.objects;
     if (index>=objects.size() || objects[index].mass<=0.f || objects[index].player ||
+        (index>=state->authored_count && !runtime_alive(index)) ||
         !std::isfinite(impulse.x) || !std::isfinite(impulse.y) ||
         !std::isfinite(impulse.z) ||
         std::hypot(impulse.x,impulse.y,impulse.z)>100.f)
@@ -167,6 +274,7 @@ void PhysicsScene::apply_impulse(std::size_t index, Vector3 impulse)
 void PhysicsScene::move_static(std::size_t index, Vector3 position)
 {
     if (index >= state->snapshot.objects.size() ||
+        (index>=state->authored_count && !runtime_alive(index)) ||
         state->snapshot.objects[index].mass != 0.f ||
         !std::isfinite(position.x) || !std::isfinite(position.y) ||
         !std::isfinite(position.z))
@@ -187,7 +295,8 @@ std::optional<PhysicsCastHit> PhysicsScene::sweep_sphere(
         radius<=0.f || radius>2.f)
         throw std::invalid_argument("Invalid physics sphere cast");
     if (ignore_index!=static_cast<std::size_t>(-1) &&
-        ignore_index >= state->snapshot.objects.size())
+        (ignore_index >= state->snapshot.objects.size() ||
+         (ignore_index>=state->authored_count && !runtime_alive(ignore_index))))
         throw std::out_of_range("Invalid ignored physics body index");
     std::uint32_t const ignored=ignore_index==static_cast<std::size_t>(-1)
         ? UINT32_MAX : static_cast<std::uint32_t>(ignore_index);
@@ -236,7 +345,7 @@ void PhysicsScene::step(float seconds, float input_x, float input_z)
     if (!state->api.step(state->world, seconds, input_x, input_z))
         throw state->module.error("Cannot update physics world");
     state->read_poses();
-    state->ecs.sync_positions(state->snapshot);
+    state->ecs.sync_positions(state->authored_snapshot);
     state->ecs.step(std::min(seconds, 0.1f), 0.f, 0.f);
 }
 

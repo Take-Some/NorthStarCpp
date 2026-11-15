@@ -1,0 +1,60 @@
+{
+  "schema": "northstar.material-function.v1",
+  "name": "Soft Tint",
+  "inputs": [
+    {
+      "name": "color",
+      "type": "vector4"
+    },
+    {
+      "name": "mix",
+      "type": "scalar"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "vector4",
+      "node": "weighted"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "color_in",
+      "op": "function_input",
+      "name": "color"
+    },
+    {
+      "id": "mix_in",
+      "op": "function_input",
+      "name": "mix"
+    },
+    {
+      "id": "warm",
+      "op": "color",
+      "value": [
+        1,
+        0.8,
+        0.65,
+        1
+      ]
+    },
+    {
+      "id": "tinted",
+      "op": "function",
+      "path": "MaterialFunctions/MultiplyColor.material-function.json",
+      "output": "result",
+      "inputs": {
+        "color": "color_in",
+        "tint": "warm"
+      }
+    },
+    {
+      "id": "weighted",
+      "op": "lerp",
+      "a": "color_in",
+      "b": "tinted",
+      "t": "mix_in"
+    }
+  ]
+}

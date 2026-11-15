@@ -12,6 +12,7 @@
 #include <memory>
 class QDragEnterEvent;
 class QDropEvent;
+class QDragMoveEvent;
 class QMouseEvent;
 class QWheelEvent;
 class QKeyEvent;
@@ -47,11 +48,17 @@ public:
     float flySpeed() const noexcept {return fly_speed_;}
     editor_tools::EditorCamera const& camera() const noexcept {return camera_;}
     void setCameraPose(CameraPose pose);
+    // Preview Studio orbit; opt-in and isolated from the scene fly-camera.
+    void setOrbitMode(bool enabled,Vector3 target={0.f,1.f,0.f},
+                      float distance=4.2f);
+    void setOrbitAngles(float yaw,float pitch);
+    bool orbitMode() const noexcept {return orbit_mode_;}
+    float orbitDistance() const noexcept {return orbit_distance_;}
     void advanceFly(float elapsedSeconds);
 signals:
     void flySpeedChanged(float metersPerSecond);
     void selectionChanged(int index);
-    void assetDropped(QString path, QVector3D position);
+    void assetDropped(QString path, QVector3D position,int targetActor);
     void gizmoDelta(int mode,int axis,float delta);
     void gizmoModeRequested(int mode);
     void gizmoDragStarted();
@@ -69,12 +76,16 @@ protected:
     void keyReleaseEvent(QKeyEvent*) override;
     void focusOutEvent(QFocusEvent*) override;
     void dragEnterEvent(QDragEnterEvent*) override;
+    void dragMoveEvent(QDragMoveEvent*) override;
     void dropEvent(QDropEvent*) override;
 private:
     Scene const* scene_{};
     editor_tools::EditorCamera camera_;
     int selected_=-1, gizmo_=0, drag_axis_=-1;
     bool rotating_=false;
+    bool orbit_mode_=false;
+    float orbit_distance_=4.2f;
+    Vector3 orbit_target_{0.f,1.f,0.f};
     bool panning_=false;
     bool show_grid_=true;
     DrawMode draw_mode_=DrawMode::Shaded;
@@ -88,6 +99,7 @@ private:
     std::unique_ptr<GpuState> gpu_;
     std::filesystem::path asset_root_;
     bool gpu_dirty_=true;
+    void updateOrbitCamera();
     void ensureGpu();
     void drawGpu();
     QPoint previous_;

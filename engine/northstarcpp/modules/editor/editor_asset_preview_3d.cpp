@@ -48,11 +48,14 @@ void line(AssetPreviewImage& out,int x0,int y0,int x1,int y1,
 }
 AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                                    int width,int height,float yaw,float pitch,
-                                   float zoom,bool wireframe) {
+                                   float zoom,bool wireframe,
+                                   std::vector<MaterialDefinition> const* materials,
+                                   float key_light_intensity) {
     AssetPreviewImage out;
     if(width<64 || height<64 || width>1280 || height>1280 ||
        !std::isfinite(yaw) || !std::isfinite(pitch) ||
-       !std::isfinite(zoom))return out;
+       !std::isfinite(zoom) || !std::isfinite(key_light_intensity) ||
+       key_light_intensity<0.f || key_light_intensity>3.f)return out;
     out.width=width;out.height=height;
     out.argb.resize(std::size_t(width)*height);
     for(int y=0;y<height;++y)for(int x=0;x<width;++x) {
@@ -129,9 +132,25 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
     };
     std::size_t total_faces=0,mesh_number=0;
     for(auto const& mesh:drawable.meshes) {
-        auto const base=tint(mesh_number++);
+        auto const part_index=mesh_number++;
+        auto const* material=materials && part_index<materials->size()
+            ? &materials->at(part_index) : nullptr;
+        auto base=tint(part_index);
+        if(material) {
+            auto ch=[](float x) {
+                return std::clamp(static_cast<int>(std::lround(
+                    std::clamp(x,0.f,1.f)*255.f)),0,255);
+            };
+            base={ch(material->base_color[0]),
+                  ch(material->base_color[1]),
+                  ch(material->base_color[2])};
+        }
+        MaterialImage const* albedo=material ? &material->textures[0] : nullptr;
+        bool const textured=albedo && albedo->width>0 && albedo->height>0 &&
+            albedo->rgba8.size()==
+                std::size_t(albedo->width)*albedo->height*4u;
         for(std::size_t i=0;i+2<mesh.indices.size();i+=3) {
-            if(++total_faces>30000)break;
+            if(++total_faces>120000)break;
             auto a=mesh.indices[i],b=mesh.indices[i+1],c=mesh.indices[i+2];
             if(a>=mesh.vertices.size()||b>=mesh.vertices.size()||
                c>=mesh.vertices.size())continue;
@@ -164,8 +183,8 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 float const fill=std::max(0.f,-n[0]*.50f+n[1]*.30f);
                 float const spec=std::pow(std::max(0.f,
                     n[0]*.15f+n[1]*.35f+n[2]*.93f),24.f);
-                return std::clamp(.27f+.58f*directional+.15f*fill+.18f*spec,
-                                  .17f,1.25f);
+                return std::clamp(.22f+key_light_intensity*
+                    (.58f*directional+.15f*fill+.18f*spec),.13f,2.5f);
             };
             auto const p0=project(va.position,light(va));
             auto const p1=project(vb.position,light(vb));
@@ -186,10 +205,35 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 float const z=u*p0.inv_depth+v*p1.inv_depth+w*p2.inv_depth;
                 if(z<=depth[index])continue;
                 depth[index]=z;
-                // Camera-space positive 1/z interpolation keeps a smooth
-                // gradient across triangles and avoids flat placeholder meshes.
+                // Perspective-correct UV sampling uses the very same
+                // decoded YMAT/YTD base-color image as the runtime material
+                // pipeline. CPU preview does not execute PBR shaders.
                 float const shading=u*p0.light+v*p1.light+w*p2.light;
-                out.argb[index]=color(base,shading);
+                auto pixel_color=base;
+                if(textured && z>1.e-8f) {
+                    auto const a=u*p0.inv_depth/z;
+                    auto const b=v*p1.inv_depth/z;
+                    auto const c=w*p2.inv_depth/z;
+                    auto const tex_u=a*va.uv[0]+b*vb.uv[0]+c*vc.uv[0];
+                    auto const tex_v=a*va.uv[1]+b*vb.uv[1]+c*vc.uv[1];
+                    if(std::isfinite(tex_u) && std::isfinite(tex_v)) {
+                        auto wrap=[](float t) {return t-std::floor(t);};
+                        auto const tx=std::min(albedo->width-1,
+                            static_cast<std::uint32_t>(
+                                wrap(tex_u)*albedo->width));
+                        auto const ty=std::min(albedo->height-1,
+                            static_cast<std::uint32_t>(
+                                wrap(tex_v)*albedo->height));
+                        auto const offset=(std::size_t(ty)*albedo->width+tx)*4u;
+                        auto const& data=albedo->rgba8;
+                        pixel_color={
+                            static_cast<int>(data[offset])*base.r/255,
+                            static_cast<int>(data[offset+1])*base.g/255,
+                            static_cast<int>(data[offset+2])*base.b/255
+                        };
+                    }
+                }
+                out.argb[index]=color(pixel_color,shading);
             }
             if(wireframe) {
                 line(out,int(p0.x),int(p0.y),int(p1.x),int(p1.y),0xff86d9f0u);
@@ -197,7 +241,7 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 line(out,int(p2.x),int(p2.y),int(p0.x),int(p0.y),0xff86d9f0u);
             }
         }
-        if(total_faces>30000)break;
+        if(total_faces>120000)break;
     }
     // If drawable contains only points/lines, show their positions as lit
     // markers. This still represents the actual geometry, not a type icon.

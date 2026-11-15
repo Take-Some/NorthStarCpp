@@ -11,7 +11,7 @@ std::vector<DictionaryEntry> list_dictionary_entries(
     std::vector<std::uint8_t> const& source,std::string const& path) {
     using namespace detail;
     auto const ext=extension(path);
-    require(ext==".ytd" || ext==".ydd" || ext==".ymat",
+    require(ext==".ytd" || ext==".ydd" || ext==".ydr" || ext==".ymat",
             "Only NEF8 YTD/YDD/YMAT ListFiles are virtual dictionaries");
     auto file=parse_list_file(source); // size, deflate and hash checks
     std::vector<DictionaryEntry> output;
@@ -25,8 +25,20 @@ std::vector<DictionaryEntry> list_dictionary_entries(
             require(unique.insert(material.name).second,"Duplicate YMAT material");
             output.push_back({material.name,0});
         }
-    } else if(ext==".ydd") {
-        require(file.kind==2,"Expected YDD drawable dictionary");
+    } else if(ext==".ydd" || ext==".ydr") {
+        require(file.kind==2,"Expected native drawable dictionary");
+        if (!file.body.empty() && file.body.front()!='{') {
+            auto const parsed=load_drawables_from_bytes(source,path);
+            require(parsed.size()==file.entries,
+                "Native binary drawable entry count differs from NEF8 header");
+            for (auto const& drawable:parsed) {
+                validate_name(drawable.name);
+                require(unique.insert(drawable.name).second,
+                    "Duplicate binary drawable entry");
+                output.push_back({drawable.name,0});
+            }
+            return output;
+        }
         auto const body=parse_json(std::string(file.body.begin(),file.body.end()));
         require(body.get<std::string>("schema","")==
                     "newengine.ydd.drawable_dictionary.v1" &&

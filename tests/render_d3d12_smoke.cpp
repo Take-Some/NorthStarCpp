@@ -2,6 +2,7 @@
 #include <northstarcpp/module.h>
 #include <northstarcpp/render_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
+#include <northstarcpp/render_timing_api.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -60,6 +61,16 @@ int main(int argc,char** argv) {
         require(query_memory&&query_memory(2)==nullptr,"Memory ABI negotiation failed");
         auto memory_api=query_memory(NORTHSTARCPP_RENDER_MEMORY_ABI);
         require(memory_api&&memory_api->read,"Missing D3D12 GPU memory extension");
+        auto get_timing=reinterpret_cast<NorthStarRenderGetTimingApi>(
+            GetProcAddress(dll,"northstar_render_get_timing_api"));
+        require(get_timing&&get_timing(999)==nullptr,
+            "D3D12 timing ABI negotiation failed");
+        auto timing_api=get_timing(NORTHSTARCPP_RENDER_TIMING_ABI);
+        require(timing_api&&timing_api->read,"Missing D3D12 timing extension");
+        auto timing_extension=query(NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,NORTHSTARCPP_RENDER_TIMING_MODULE_ABI);
+        require(timing_extension&&timing_extension->api_size==sizeof(NorthStarRenderTimingApi),
+            "D3D12 timing is not available through plugin module query");
         WNDCLASSW wc{};
         wc.lpfnWndProc=DefWindowProcW;
         wc.hInstance=GetModuleHandleW(nullptr);
@@ -99,6 +110,18 @@ int main(int argc,char** argv) {
                 throw std::runtime_error(std::string(stage)+": "+error());
         };
         draw_checked("Native geometry/HUD/readback");
+        NorthStarRenderTimingStats timing{};
+        require(timing_api->read(renderer,&timing),"D3D12 timing readback failed");
+        require(timing.valid && timing.gpu_timestamp_frequency_hz &&
+                std::isfinite(timing.total_gpu_ms) && timing.total_gpu_ms>0.0,
+                "D3D12 GPU timestamps invalid");
+        double segments=timing.opaque_gpu_ms+timing.deferred_gpu_ms+
+                        timing.postfx_gpu_ms+timing.hud_gpu_ms;
+        require(std::abs(timing.total_gpu_ms-segments)<0.001,
+                "D3D12 GPU timestamp pass breakdown does not add up");
+        std::printf("D3D12 GPU timestamp ms: total %.4f opaque %.4f deferred %.4f postfx %.4f hud %.4f\n",
+                    timing.total_gpu_ms,timing.opaque_gpu_ms,timing.deferred_gpu_ms,
+                    timing.postfx_gpu_ms,timing.hud_gpu_ms);
         // HUD-only validation: no scene geometry or sky may mask a missing HUD.
         frame.cubes=nullptr;frame.count=0;
         require(mesh_api->set_triangles(renderer,nullptr,0),"Cannot clear geometry");

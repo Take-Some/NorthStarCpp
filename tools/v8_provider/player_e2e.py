@@ -33,8 +33,10 @@ def run(player: Path, provider: Path | None, project: Path,
         archive: Path | None = None, seconds: int = 35) -> dict[str, Any]:
     player = player.resolve(strict=True)
     project = project.resolve(strict=True)
-    scene = project / "main.nscene"
-    if not scene.is_file():
+    scene = next((candidate for candidate in
+                  (project / "main.nscn", project / "main.nscene")
+                  if candidate.is_file()), None)
+    if scene is None:
         raise RuntimeError("QA project startup scene missing")
     exe_dir = player.parent
     env = os.environ.copy()
@@ -53,7 +55,7 @@ def run(player: Path, provider: Path | None, project: Path,
         env["LOCALAPPDATA"] = str(appdata)
         if archive:
             cmd = [str(player), "--warp", "--fps", "--archive", str(archive.resolve(strict=True)),
-                   "--scene", "level/main.nscene"]
+                   "--scene", "level/" + scene.name]
             mode = "archive"
         else:
             cmd = [str(player), "--warp", "--fps", "--scene", str(scene)]

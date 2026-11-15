@@ -210,6 +210,27 @@ NsEntity EcsWorld::create(SceneObject const& object)
     return id;
 }
 
+NsEntity EcsWorld::create_runtime(SceneObject const& object)
+{
+    if (!object.node.id || object.player ||
+        object.name.empty() || object.name.size()>=NORTHSTARCPP_ECS_NAME_BYTES ||
+        !std::isfinite(object.position.x) || !std::isfinite(object.position.y) ||
+        !std::isfinite(object.position.z) || !std::isfinite(object.size) ||
+        !std::isfinite(object.mass) || object.size<=0.f || object.mass<0.f)
+        throw std::invalid_argument("Invalid transient ECS entity");
+    auto const* api=impl_->api;
+    auto id=api->create_entity(impl_->world);
+    require(id!=0,"Create runtime ECS entity",api);
+    try {
+        apply_record(api,impl_->world,id,object);
+        impl_->scene_nodes.emplace(id,object.node);
+    } catch (...) {
+        api->destroy_entity(impl_->world,id);
+        throw;
+    }
+    return id;
+}
+
 void EcsWorld::update(NsEntity id, SceneObject const& object)
 {
     auto current = snapshot();

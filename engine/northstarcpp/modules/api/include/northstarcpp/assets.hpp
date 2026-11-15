@@ -35,6 +35,10 @@ public:
                          std::filesystem::path const& data);
     // Shared content is a base VFS layer. Project mounts can override it.
     void mount_shared_assets(std::filesystem::path const& root);
+    // Default VFS overlay: sharedAssets (-100), project root (0),
+    // project/assets (+100). Project resources shadow engine defaults.
+    void mount_project_assets(std::filesystem::path const& project_root,
+                              std::filesystem::path const& shared_root = {});
     shared_assets::Material load_material(std::string const& reference) const;
     shared_assets::Drawable load_drawable(std::string const& reference) const;
     shared_assets::Texture load_texture(std::string const& reference) const;

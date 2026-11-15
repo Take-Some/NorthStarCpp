@@ -1,9 +1,16 @@
 // Modal Unreal-style NorthStar asset inspector. CPU decoding and mesh preview
 // work without a configured Vulkan device or running engine.assets provider.
 #include "qt_asset_preview_dialog.hpp"
+#include "qt_asset_warnings.hpp"
+#include "qt_prefab_preview.hpp"
+#include "qt_material_function_editor.hpp"
+#include "editor_prefab_composition.hpp"
 #include "editor_asset_thumbnails.hpp"
 #include "editor_asset_material_source.hpp"
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/assets.hpp>
+#include <northstarcpp/material.hpp>
+#include <northstarcpp/skeleton.hpp>
 
 #include <QtConcurrent/QtConcurrent>
 #include <QApplication>
@@ -41,6 +48,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
@@ -81,12 +89,19 @@ QImage readImage(fs::path const& path) {
 struct LoadedAsset {
     std::optional<shared_assets::Texture> texture;
     std::optional<shared_assets::Drawable> drawable;
+    std::vector<MaterialDefinition> drawable_materials;
     std::optional<shared_assets::Material> material;
     std::vector<shared_assets::ResolvedAsset<shared_assets::Texture>> material_textures;
     QImage image;
     QString message;
     QString details;
+    std::vector<AssetWarning> warnings;
     bool supported=false;
+};
+struct LoadedPrefab {
+    std::optional<Scene> prefab;
+    std::optional<prefab_preview::Composition> composition;
+    QString error;
 };
 
 LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
@@ -138,7 +153,9 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
                 }
             }
             for(auto const& missing:source.missing)
-                result.details+="\nMissing texture: "+qt(missing);
+                result.warnings.push_back({
+                    AssetWarningKind::Texture,qt(missing),
+                    "Referenced by this material but not found in the mounted assets."});
             result.material=std::move(source.material);
             result.material_textures=std::move(source.textures);
             result.supported=true;
@@ -181,6 +198,50 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
                     vertices+=part.vertices.size();
                     triangles+=part.indices.size()/3;
                 }
+                // Use the same native material and skeleton decoders as
+                // Player. Root may be sharedAssets or a project Content root.
+                AssetManager resources;
+                resources.mount_shared_assets(root);
+                std::unordered_map<std::string,MaterialDefinition> definitions;
+                std::size_t material_count=0;
+                result.drawable_materials.reserve(mesh.meshes.size());
+                for(auto const& part:mesh.meshes) {
+                    if(part.material.empty()) {
+                        result.drawable_materials.emplace_back();
+                        continue;
+                    }
+                    try {
+                        auto found=definitions.find(part.material);
+                        if(found==definitions.end())
+                            found=definitions.emplace(part.material,
+                                load_material_definition(resources,part.material)).first;
+                        result.drawable_materials.push_back(found->second);
+                        ++material_count;
+                    } catch(std::exception const& e) {
+                        // An absent material must be visible in the details
+                        // rather than silently flattened into an OBJ proxy.
+                        result.warnings.push_back({
+                            AssetWarningKind::Material,qt(part.material),qt(e.what())});
+                        result.drawable_materials.emplace_back();
+                    }
+                }
+                result.details+="\nNative YMAT/YTD sections: "+
+                    QString::number(material_count)+"/"+
+                    QString::number(mesh.meshes.size());
+                if(relative.size()>=4 &&
+                   (relative.compare(relative.size()-4,4,".ydd")==0 ||
+                    relative.compare(relative.size()-4,4,".ydr")==0)) {
+                    auto skeleton_path=fs::path(relative);
+                    skeleton_path.replace_extension(".skeleton.ymt");
+                    auto const skeleton_ref=skeleton_path.generic_u8string();
+                    try {
+                        auto skeleton=load_skeleton(resources,skeleton_ref);
+                        result.details+="\nSkeleton: "+qt(skeleton_ref)+
+                            "\nJoints: "+QString::number(skeleton.joints.size());
+                    } catch (std::exception const&) {
+                        result.details+="\nSkeleton: not attached";
+                    }
+                }
                 result.details+="\nEntry: "+qt(name)+
                     "\nMesh parts: "+QString::number(mesh.meshes.size())+
                     "\nVertices: "+QString::number(vertices)+
@@ -206,6 +267,21 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
         }
     } catch(std::exception const& e) {
         result.message=qt(e.what());
+        auto const at=reference.find('@');
+        auto const asset_path=reference.substr(0,at);
+        std::error_code missing_error;
+        bool const missing=!fs::exists(root/fs::u8path(asset_path),missing_error);
+        AssetWarningKind warning_kind=AssetWarningKind::Other;
+        if(kind==AssetKind::texture)
+            warning_kind=AssetWarningKind::Texture;
+        else if(kind==AssetKind::mesh)
+            warning_kind=AssetWarningKind::Model;
+        else if(kind==AssetKind::material)
+            warning_kind=AssetWarningKind::Material;
+        // Surface the underlying path and exception in a standalone
+        // warning card even when the preview never becomes available.
+        result.warnings.push_back({warning_kind,qt(reference),
+            (missing?"Resource file not found. ":"")+result.message});
     }
     return result;
 }
@@ -238,12 +314,15 @@ public:
         zoom_=1.f;offset_={};
         setProperty("previewReady",!displayed_.isNull());update();
     }
-    void setDrawable(shared_assets::Drawable drawable) {
+    void setDrawable(shared_assets::Drawable drawable,
+                     std::vector<MaterialDefinition> materials) {
         material_.reset();material_textures_.clear();
+        drawable_materials_=std::move(materials);
         drawable_=std::move(drawable);texture_.reset();external_={};
         zoom_=1.f;yaw_=0.62f;pitch_=0.27f;wireframe_=false;
         dirty_=true;
         setProperty("previewReady",true);
+        setProperty("previewRendered",false);
         update();
     }
     void setImage(QImage image) {
@@ -262,6 +341,12 @@ public:
         update();
     }
     void setWireframe(bool on) {wireframe_=on;dirty_=true;update();}
+    void setLightIntensity(float intensity) {
+        light_intensity_=std::clamp(intensity,0.f,3.f);
+        dirty_=true;
+        setProperty("previewRendered",false);
+        update();
+    }
     void reset() {
         zoom_=1.f;offset_={};yaw_=.62f;pitch_=.27f;
         dirty_=true;update();
@@ -299,7 +384,8 @@ protected:
             if(dirty_ || model_image_.size()!=QSize(dimension,dimension)) {
                 model_image_=imageFrom(editor_tools::preview_drawable(
                     *drawable_,dimension,dimension,yaw_,pitch_,
-                    std::clamp(zoom_,.35f,7.f),wireframe_));
+                    std::clamp(zoom_,.35f,7.f),wireframe_,
+                    &drawable_materials_,light_intensity_));
                 dirty_=false;
             }
             if(!model_image_.isNull()) {
@@ -373,9 +459,10 @@ private:
     std::optional<shared_assets::Drawable> drawable_;
     std::optional<shared_assets::Material> material_;
     std::vector<shared_assets::ResolvedAsset<shared_assets::Texture>> material_textures_;
+    std::vector<MaterialDefinition> drawable_materials_;
     QImage external_,displayed_,model_image_;
     int current_mip_=0;
-    float yaw_=.62f,pitch_=.27f,zoom_=1.f;
+    float yaw_=.62f,pitch_=.27f,zoom_=1.f,light_intensity_=1.f;
     QPointF offset_,last_;
     bool dragging_=false,wireframe_=false,dirty_=true;
 };
@@ -384,6 +471,160 @@ private:
 
 int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                           std::string const& asset_reference,AssetKind kind) {
+    if(kind==AssetKind::material_function)
+        return openMaterialFunctionEditor(parent,content_root,asset_reference);
+    // Prefab is a scene graph template, not a drawable or a plain scene.
+    // Show an isolated composition preview and its hierarchy summary.
+    if(kind==AssetKind::prefab) {
+        QDialog dialog(parent);
+        dialog.setObjectName("prefabPreviewDialog");
+        dialog.setWindowTitle("Prefab Preview - "+qt(asset_reference));
+        dialog.resize(890,650);
+        auto* layout=new QHBoxLayout(&dialog);
+        auto* preview=new AssetPreviewCanvas(&dialog);
+        preview->setObjectName("prefabPreviewCanvas");
+        preview->setMinimumSize(480,480);
+        layout->addWidget(preview,3);
+        auto* side=new QVBoxLayout;
+        auto* title=new QLabel(qt(asset_reference),&dialog);
+        title->setWordWrap(true);
+        title->setStyleSheet("font-weight:bold;font-size:16px");
+        side->addWidget(title);
+        auto* prefabWarnings=new AssetWarningPanel(&dialog);
+        side->addWidget(prefabWarnings);
+        auto* meta=new QLabel("Loading native prefab composition...",&dialog);
+        meta->setObjectName("prefabPreviewDetails");
+        meta->setWordWrap(true);
+        meta->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        side->addWidget(meta);
+        side->addStretch();
+        auto* wire=new QCheckBox("Wireframe",&dialog);
+        wire->setObjectName("prefabPreviewWireframe");
+        QObject::connect(wire,&QCheckBox::toggled,preview,
+            [preview](bool enabled){preview->setWireframe(enabled);});
+        side->addWidget(wire);
+        auto* light_label=new QLabel("Studio key light: 100%",&dialog);
+        side->addWidget(light_label);
+        auto* key_light=new QSlider(Qt::Horizontal,&dialog);
+        key_light->setObjectName("prefabPreviewKeyLight");
+        key_light->setRange(0,250);
+        key_light->setValue(100);
+        QObject::connect(key_light,&QSlider::valueChanged,preview,
+            [preview,light_label](int value) {
+                light_label->setText(QString("Studio key light: %1%").arg(value));
+                preview->setLightIntensity(float(value)*.01f);
+            });
+        side->addWidget(key_light);
+        auto* reset=new QPushButton("Fit / Reset",&dialog);
+        QObject::connect(reset,&QPushButton::clicked,preview,
+                         [preview]{preview->reset();});
+        side->addWidget(reset);
+        auto* close=new QPushButton("Close",&dialog);
+        QObject::connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);
+        side->addWidget(close);
+        layout->addLayout(side,1);
+        // Keep the GUI event loop responsive while resolving multi-YDD
+        // geometry and YMAT/YTD textures through engine.assets.
+        auto* watcher=new QFutureWatcher<LoadedPrefab>(&dialog);
+        QObject::connect(watcher,&QFutureWatcher<LoadedPrefab>::finished,
+                         &dialog,[watcher,preview,meta,prefabWarnings,
+                                  asset_reference] {
+            LoadedPrefab loaded;
+            try {loaded=watcher->result();}
+            catch(std::exception const& e) {loaded.error=qt(e.what());}
+            if(loaded.prefab && loaded.composition) {
+                auto const& prefab=*loaded.prefab;
+                auto& composition=*loaded.composition;
+                QString information=prefab_preview::details(prefab);
+                information+=QString("\n\n3D Composition\nVisible: %1\n"
+                                     "Native models: %2\nProxies: %3\n"
+                                     "Triangles: %4\nMaterial sections: %5\n"
+                                     "Missing models: %6")
+                    .arg(composition.visible_objects)
+                    .arg(composition.modeled_objects)
+                    .arg(composition.proxy_objects)
+                    .arg(composition.triangles)
+                    .arg(composition.drawable.meshes.size())
+                    .arg(composition.missing_assets);
+                std::vector<AssetWarning> issues;
+                for(auto const& issue:composition.warnings) {
+                    auto const message=qt(issue);
+                    if(message.startsWith("Missing model ")) {
+                        auto const path=message.mid(14).section(" for ",0,0);
+                        issues.push_back({AssetWarningKind::Model,path,message});
+                    }else if(message.startsWith("Missing material ")) {
+                        auto const path=message.mid(17).section(": ",0,0);
+                        issues.push_back({AssetWarningKind::Material,path,message});
+                    }else {
+                        issues.push_back({AssetWarningKind::Other,
+                            qt(asset_reference),message});
+                    }
+                }
+                if(!composition.drawable.meshes.empty()) {
+                    preview->setDrawable(std::move(composition.drawable),
+                                         std::move(composition.materials));
+                    preview->setProperty("previewMode","prefab-composition");
+                    preview->setProperty("prefabActorCount",
+                        static_cast<int>(prefab.objects.size()));
+                    information+=(prefab.objects.size()==1?
+                        "\n\n3D model: orbit with mouse, zoom with wheel":
+                        "\n\n3D composition: orbit with mouse, zoom with wheel");
+                    information+="\nNative YDD/YDR meshes and YMAT/YTD textures"
+                                 "\nSoftware studio lighting (not GPU PBR)";
+                }else {
+                    preview->setImage(prefab_preview::thumbnail(prefab,640));
+                    information+="\nNo visible 3D geometry";
+                }
+                meta->setText(information);
+                prefabWarnings->setWarnings(issues);
+                preview->setProperty("previewReady",true);
+            } else if(loaded.prefab) {
+                // Decoder/provider failures must not make a valid Scene V3
+                // appear corrupt: preserve a readable schematic fallback.
+                preview->setImage(prefab_preview::thumbnail(
+                    *loaded.prefab,640));
+                preview->setProperty("previewMode","prefab-schematic");
+                preview->setProperty("previewReady",true);
+                meta->setText(prefab_preview::details(*loaded.prefab)+
+                    "\n\n3D preview unavailable: "+loaded.error+
+                    "\nSchematic composition fallback");
+                prefabWarnings->setWarnings({
+                    {AssetWarningKind::Other,qt(asset_reference),loaded.error}});
+            } else {
+                meta->setText("Invalid Scene V3 prefab");
+                prefabWarnings->setWarnings({
+                    {AssetWarningKind::Prefab,qt(asset_reference),loaded.error}});
+                preview->setProperty("previewReady",false);
+            }
+            watcher->deleteLater();
+        });
+        watcher->setFuture(QtConcurrent::run([content_root,asset_reference] {
+            LoadedPrefab loaded;
+            try {
+                loaded.prefab=prefab_preview::load(content_root,
+                                                   asset_reference);
+                AssetManager assets;
+                assets.mount_directory("",content_root,100);
+                std::error_code ec;
+                for(auto current=content_root.parent_path();!current.empty();) {
+                    auto shared=current/"sharedAssets";
+                    if(fs::is_directory(shared,ec)) {
+                        assets.mount_shared_assets(shared);
+                        break;
+                    }
+                    auto parent=current.parent_path();
+                    if(parent==current)break;
+                    current=parent;
+                }
+                loaded.composition=prefab_preview::load_composition(
+                    *loaded.prefab,assets);
+            } catch(std::exception const& e) {
+                loaded.error=qt(e.what());
+            }
+            return loaded;
+        }));
+        return dialog.exec();
+    }
     QDialog dialog(parent);
     dialog.setObjectName("assetPreviewDialog");
     dialog.setWindowTitle("NorthStar Asset Preview — "+qt(asset_reference));
@@ -427,6 +668,8 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
     sidebar->setMinimumWidth(235);
     auto* right=new QVBoxLayout(sidebar);
     right->setContentsMargins(12,10,8,10);
+    auto* warnings=new AssetWarningPanel(sidebar);
+    right->addWidget(warnings);
     auto* caption=new QLabel("ASSET DETAILS");
     caption->setStyleSheet("color:#75bce3;font-weight:bold;font-size:12px");
     right->addWidget(caption);
@@ -474,10 +717,18 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
     // compressed ListFile. Closing it disconnects all UI callbacks safely.
     auto* watcher=new QFutureWatcher<LoadedAsset>(&dialog);
     QObject::connect(watcher,&QFutureWatcher<LoadedAsset>::finished,
-                     &dialog,[watcher,canvas,information,mip,wire,actual,status] {
+                     &dialog,[watcher,canvas,information,warnings,mip,wire,actual,status,kind,ref=qt(asset_reference)] {
         LoadedAsset value;
         try {value=watcher->result();}
-        catch(std::exception const& e){value.message=qt(e.what());}
+        catch(std::exception const& e){
+            value.message=qt(e.what());
+            auto const type=kind==AssetKind::texture?AssetWarningKind::Texture:
+                kind==AssetKind::mesh?AssetWarningKind::Model:
+                kind==AssetKind::material?AssetWarningKind::Material:
+                AssetWarningKind::Other;
+            value.warnings.push_back({type,ref,value.message});
+        }
+        warnings->setWarnings(value.warnings);
         information->setText(value.details);
         if(value.texture) {
             auto const count=value.texture->mips.size();
@@ -493,7 +744,8 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
             status->setText("Texture / Decoded");
         } else if(value.drawable) {
             wire->setEnabled(true);
-            canvas->setDrawable(std::move(*value.drawable));
+            canvas->setDrawable(std::move(*value.drawable),
+                                std::move(value.drawable_materials));
             status->setText("3D model / Orbit view");
         } else if(value.material) {
             canvas->setMaterial(std::move(*value.material),
@@ -504,9 +756,12 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
             actual->setEnabled(true);
             status->setText("Image / Decoded");
         } else {
-            if(!value.message.isEmpty())
+            // Diagnostic failures live only in the warning cards, not in
+            // metadata plain text. Unsupported types retain their hint.
+            if(value.warnings.empty()&&!value.message.isEmpty())
                 information->setText(value.details+"\n\n"+value.message);
-            status->setText("Preview unavailable");
+            status->setText(value.warnings.empty()?
+                "Preview unavailable":"Missing dependencies / Review warnings");
         }
         watcher->deleteLater();
     });

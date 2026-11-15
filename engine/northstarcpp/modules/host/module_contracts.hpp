@@ -12,6 +12,9 @@
 #include <northstarcpp/physics_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_surfaces_api.h>
+#include <northstarcpp/render_materials_api.h>
+#include <northstarcpp/render_skinning_api.h>
+#include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
@@ -34,6 +37,12 @@ inline bool valid_api(NorthStarPhysicsApi const& api)
         api.move_static && api.sweep_sphere && api.add_static_mesh;
 }
 
+inline bool valid_api(NorthStarPhysicsRuntimeApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_RUNTIME_ABI &&
+           api.add_body && api.remove_body;
+}
+
 inline bool valid_api(NorthStarPhysicsResidencyApi const& api)
 {
     return api.abi_version == NORTHSTARCPP_PHYSICS_RESIDENCY_ABI &&
@@ -53,6 +62,30 @@ inline bool valid_api(NorthStarRenderTrianglesApi const& api)
 inline bool valid_api(NorthStarRenderCharacterApi const& api)
 {
     return api.abi_version == NORTHSTARCPP_RENDER_CHARACTER_ABI && api.set_model && api.set_pose;
+}
+
+inline bool valid_api(NorthStarRenderMaterialsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_MATERIALS_ABI && api.set_batches;
+}
+
+inline bool valid_api(NorthStarRenderMaterialsApiV2 const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_MATERIALS_V2_ABI &&
+           api.set_batches_v2;
+}
+
+inline bool valid_api(NorthStarRenderSkinnedMaterialsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_SKINNED_MATERIALS_ABI &&
+           api.set_batches;
+}
+
+
+// Optional dynamic lighting provider introduced by Render Graph integration.
+inline bool valid_api(NorthStarRenderLightsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_LIGHTS_ABI && api.set_lights;
 }
 
 inline bool valid_api(NorthStarRenderSurfacesApi const& api)

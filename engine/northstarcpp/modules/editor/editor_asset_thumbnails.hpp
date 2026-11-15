@@ -1,6 +1,7 @@
 // NorthStar Editor: actual decoded texture/material/mesh thumbnails.
 #pragma once
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/material.hpp>
 #include <cstdint>
 #include <vector>
 namespace northstarcpp::editor_tools {
@@ -29,7 +30,9 @@ AssetPreviewImage preview_texture(
 AssetPreviewImage preview_drawable(
     shared_assets::Drawable const& drawable,int width=720,int height=720,
     float yaw=0.6f,float pitch=0.3f,float zoom=1.f,
-    bool wireframe=false);
+    bool wireframe=false,
+    std::vector<MaterialDefinition> const* materials=nullptr,
+    float key_light_intensity=1.f);
 // Studio-lit sphere with material parameters and decoded YTD bindings.
 // Editor approximation: does not execute shader source / Vulkan RenderGraph.
 AssetPreviewImage preview_material(

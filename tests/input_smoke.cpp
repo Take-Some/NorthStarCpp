@@ -35,6 +35,26 @@ int main(int argc, char** argv)
         auto typed = input.poll();
         if (typed.text_count != 1 || typed.text[0] != 'Z' ||
             input.poll().text_count != 0) return 10;
+        // Generic modifier messages must also update the left/right codes
+        // exported by scripts/input/Keys.js.
+        input.feed_message(WM_KEYDOWN, VK_SHIFT, static_cast<LPARAM>(0x2a << 16));
+        if (!input.poll().keys[VK_LSHIFT]) return 13;
+        input.feed_message(WM_KEYDOWN, VK_SHIFT, static_cast<LPARAM>(0x36 << 16));
+        if (!input.poll().keys[VK_RSHIFT]) return 14;
+        input.feed_message(WM_KEYUP, VK_SHIFT, static_cast<LPARAM>(0x2a << 16));
+        auto shifted=input.poll();
+        if (shifted.keys[VK_LSHIFT] || !shifted.keys[VK_RSHIFT] ||
+            !shifted.keys[VK_SHIFT]) return 15;
+        input.feed_message(WM_KEYUP, VK_SHIFT, static_cast<LPARAM>(0x36 << 16));
+        if (input.poll().keys[VK_SHIFT]) return 16;
+        input.feed_message(WM_KEYDOWN, VK_CONTROL, static_cast<LPARAM>(0x01000000));
+        if (!input.poll().keys[VK_RCONTROL]) return 17;
+        input.feed_message(WM_KEYUP, VK_CONTROL, static_cast<LPARAM>(0x01000000));
+        if (input.poll().keys[VK_RCONTROL]) return 18;
+        input.feed_message(WM_SYSKEYDOWN, VK_MENU, static_cast<LPARAM>(0x01000000));
+        if (!input.poll().keys[VK_RMENU]) return 19;
+        input.feed_message(WM_SYSKEYUP, VK_MENU, static_cast<LPARAM>(0x01000000));
+        if (input.poll().keys[VK_RMENU]) return 20;
         input.feed_message(WM_KEYDOWN, 'A', 0);
         input.feed_message(WM_KILLFOCUS, 0, 0);
         if (input.poll().keys['A'] || input.poll().focused) return 11;

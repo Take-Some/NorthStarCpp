@@ -25,7 +25,7 @@ This project implements an independent camera director compatible with NorthStar
 #include <northstarcpp/assets.hpp>
 
 northstarcpp::AssetManager assets;
-assets.mount_directory("", "MyGame/assets");
+assets.mount_project_assets("MyGame", "sharedAssets");
 auto settings = northstarcpp::load_camera_settings(assets);
 
 northstarcpp::CameraDirector director(settings);
@@ -44,7 +44,14 @@ Use `set_free_pose` and `set_cinematic_pose` for externally authored poses.
 The `load_camera_track` API reads camera rails from the VFS, e.g.
 `cinematics/intro.camera.json`. Call `director.set_track(track, true)`
 and switch to `CameraMode::cinematic` to play a looping rail.
-Use `seek_track` for timeline scrubbing. The modes are accessible to C++ integrators, but only first-person is wired to the FPS user-facing input.
+Use `seek_track` for timeline scrubbing. The native Player exposes `engine.camera.setMode/mode/followDistance/setFollowDistance`
+and `engine.input.wheelDelta()` to V8 scripts. The shared
+`NorthStar.camera.createViewController` in `sharedAssets` provides the default
+V-key first/third-person toggle with a 0.45-second transition, and third-person
+wheel dolly (1.5–12 metres, 0.7 metres per notch). Scroll up approaches the
+player, scroll down moves away, and first-person scroll is ignored. Distance is
+retained across mode changes. Projects can override keys and tuning in JS;
+no view-toggle key or wheel-to-distance policy is hardcoded in the engine.
 
 ## Game asset
 

@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include <cstdint>
 
 namespace {
 using namespace northstarcpp::module_provider;
@@ -98,11 +99,42 @@ struct Context {
         case WM_SETFOCUS: focused = true; break;
         case WM_KILLFOCUS: focused = false; clear(); break;
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
-            if (focused && wp < keys.size()) keys[wp] = 1;
+        case WM_KEYUP: case WM_SYSKEYUP: {
+            // Both generic and left/right modifier VK codes are part of the
+            // public Keys class. Win32 delivers generic VK_SHIFT/CONTROL/MENU
+            // with scan/extended information; populate their sided variants.
+            bool const pressed = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                && focused;
+            if (wp >= keys.size()) break;
+            keys[wp] = pressed ? 1u : 0u;
+            UINT side = 0;
+            if (wp == VK_SHIFT) {
+                auto const scan = static_cast<unsigned>(
+                    (static_cast<std::uintptr_t>(lp) >> 16) & 0xff);
+                if (scan == 0x2a) side = VK_LSHIFT;
+                else if (scan == 0x36) side = VK_RSHIFT;
+            } else if (wp == VK_CONTROL) {
+                side = (static_cast<std::uintptr_t>(lp) & 0x01000000u)
+                    ? VK_RCONTROL : VK_LCONTROL;
+            } else if (wp == VK_MENU) {
+                side = (static_cast<std::uintptr_t>(lp) & 0x01000000u)
+                    ? VK_RMENU : VK_LMENU;
+            }
+            if (side) {
+                keys[side] = pressed ? 1u : 0u;
+                if (!pressed) {
+                    // Releasing one modifier does not unset the generic key
+                    // while the other side is still held.
+                    UINT opposite = side == VK_LSHIFT ? VK_RSHIFT :
+                        side == VK_RSHIFT ? VK_LSHIFT :
+                        side == VK_LCONTROL ? VK_RCONTROL :
+                        side == VK_RCONTROL ? VK_LCONTROL :
+                        side == VK_LMENU ? VK_RMENU : VK_LMENU;
+                    keys[wp] = keys[opposite];
+                }
+            }
             break;
-        case WM_KEYUP: case WM_SYSKEYUP:
-            if (wp < keys.size()) keys[wp] = 0;
-            break;
+        }
         case WM_CHAR: {
             const auto ch = static_cast<uint32_t>(wp);
             if (ch >= 0xd800u && ch <= 0xdbffu) { lead_surrogate = ch; break; }

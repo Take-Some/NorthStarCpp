@@ -2,6 +2,8 @@
 // Reusable QtContentBrowser can be docked in a future Qt editor QMainWindow.
 #include "qt_content_browser.hpp"
 #include "qt_asset_card_delegate.hpp"
+#include "qt_prefab_preview.hpp"
+#include <northstarcpp/scene.hpp>
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -20,6 +22,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QSlider>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -51,6 +54,10 @@ int main(int argc,char** argv) {
         "Verify physical and virtual NEF8 folder artwork in grid, tree and details.");
     QCommandLineOption previewModalSmoke("preview-modal-smoke",
         "Also exercise real double-click modal preview of NEF8 texture/model.");
+    QCommandLineOption prefabCardsSmoke("prefab-cards-smoke",
+        "Verify project prefab card, original 3D preview and modal inspection.");
+    QCommandLineOption multiPrefabSmoke("prefab-composition-smoke",
+        "Verify native two-object Prefab composition, transforms and lighting.");
     QCommandLineOption screenshot("screenshot",
         "Save a screenshot after the asset catalog finishes indexing.","filename");
     parser.addOption(scene);
@@ -59,6 +66,8 @@ int main(int argc,char** argv) {
     parser.addOption(assetCardsSmoke);
     parser.addOption(folderIconsSmoke);
     parser.addOption(previewModalSmoke);
+    parser.addOption(prefabCardsSmoke);
+    parser.addOption(multiPrefabSmoke);
     parser.addOption(screenshot);
     parser.process(app);
     auto browser=std::make_unique<northstarcpp::editor::QtContentBrowser>();
@@ -117,13 +126,194 @@ int main(int argc,char** argv) {
     window.show();
 
     if(parser.isSet(smoke) || parser.isSet(folderIconsSmoke) ||
-       parser.isSet(assetCardsSmoke) || parser.isSet(screenshot)) {
+       parser.isSet(assetCardsSmoke) || parser.isSet(prefabCardsSmoke) ||
+       parser.isSet(multiPrefabSmoke) || parser.isSet(screenshot)) {
         QElapsedTimer elapsed;
         elapsed.start();
         while(elapsed.elapsed()<10000 &&
               view->recordCount()==0) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,50);
             QThread::msleep(10);
+        }
+        if(parser.isSet(multiPrefabSmoke)) {
+            namespace role=northstarcpp::editor::asset_card_roles;
+            namespace fs=std::filesystem;
+            auto const original=parser.value(content);
+            QTemporaryDir fixture(QDir::currentPath()+
+                "/northstar-prefab-composition-XXXXXX");
+            bool okay=fixture.isValid() &&
+                QDir().mkpath(fixture.path()+"/assets") &&
+                QDir().mkpath(fixture.path()+"/prefabs");
+            if(okay)try {
+                auto scene=northstarcpp::editor::prefab_preview::load(
+                    fs::u8path(original.toUtf8().toStdString()),
+                    "prefabs/pistol.nprefab");
+                auto child=scene.objects.front();
+                child.node.id=scene.objects.front().node.id+1;
+                child.node.parent=scene.objects.front().node.id;
+                child.name="Second native pistol";
+                child.position.x+=2.5f;
+                child.node.rotation.y=40.f;
+                child.node.scale.x=.85f;
+                child.node.scale.z=1.15f;
+                scene.objects.push_back(std::move(child));
+                northstarcpp::validate_scene(scene);
+                auto bytes=northstarcpp::serialize_scene_v3(scene);
+                QFile file(fixture.path()+"/prefabs/pistol_double.nprefab");
+                if(!file.open(QIODevice::WriteOnly) ||
+                   file.write(bytes.data(),bytes.size())!=
+                       static_cast<qint64>(bytes.size()))
+                    okay=false;
+                file.close();
+            }catch(std::exception const&) {okay=false;}
+            if(okay) {
+                view->setContentRoot(fixture.path()+"/assets");
+                // recordCount() may still return the previous project index
+                // while QtConcurrent scans the new sandbox. Wait for the
+                // actual new asset card instead, not a stale record count.
+                view->setSearchText("pistol_double.nprefab");
+                QElapsedTimer wait;wait.start();
+                while(wait.elapsed()<12000 && view->visibleCount()!=1) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                    QThread::msleep(10);
+                }
+                view->setSearchText("");
+                view->browseTo("prefabs");
+                auto* grid=view->findChild<QListView*>("assetGrid");
+                auto* model=grid?grid->model():nullptr;
+                QModelIndex selected;
+                if(model)for(int row=0;row<model->rowCount();++row) {
+                    auto index=model->index(row,0);
+                    if(index.data(role::title).toString()=="pistol_double.nprefab") {
+                        selected=index;
+                        break;
+                    }
+                }
+                okay=selected.isValid() &&
+                     selected.data(role::subtitle).toString() ==
+                         "Prefab - 2 actors";
+                if(okay) {
+                    QElapsedTimer thumbnails;thumbnails.start();
+                    while(thumbnails.elapsed()<18000 &&
+                         view->cachedThumbnail("prefabs/pistol_double.nprefab")
+                           .isNull()) {
+                        QCoreApplication::processEvents(
+                            QEventLoop::AllEvents,40);
+                        QThread::msleep(15);
+                    }
+                    okay=!view->cachedThumbnail(
+                        "prefabs/pistol_double.nprefab").isNull();
+                }
+                if(okay) {
+                    grid->setCurrentIndex(selected);
+                    bool seen=false,rendered=false,lighting=false;
+                    QElapsedTimer timeout;timeout.start();
+                    QTimer poll;poll.setInterval(35);
+                    QObject::connect(&poll,&QTimer::timeout,&window,[&] {
+                        auto* modal=qobject_cast<QDialog*>(
+                            QApplication::activeModalWidget());
+                        if(modal && modal->objectName()=="prefabPreviewDialog") {
+                            seen=true;
+                            auto* canvas=modal->findChild<QWidget*>(
+                                "prefabPreviewCanvas");
+                            auto* info=modal->findChild<QLabel*>(
+                                "prefabPreviewDetails");
+                            auto* slider=modal->findChild<QSlider*>(
+                                "prefabPreviewKeyLight");
+                            if(canvas && info && slider &&
+                               canvas->property("previewReady").toBool() &&
+                               canvas->property("previewRendered").toBool() &&
+                               canvas->property("prefabActorCount").toInt()==2 &&
+                               canvas->property("previewMode").toString()==
+                                   "prefab-composition" &&
+                               info->text().contains("Native models: 2") &&
+                               info->text().contains("Missing models: 0")) {
+                                rendered=true;
+                                QImage bright=canvas->grab().toImage();
+                                slider->setValue(0);
+                                QCoreApplication::processEvents(
+                                    QEventLoop::AllEvents,30);
+                                QImage dim=canvas->grab().toImage();
+                                lighting=!bright.isNull() && !dim.isNull() &&
+                                         bright!=dim;
+                                modal->accept();
+                            }
+                        }
+                        if(timeout.elapsed()>20000 && modal)modal->reject();
+                    });
+                    poll.start();
+                    bool invoked=QMetaObject::invokeMethod(grid,
+                        "doubleClicked",Qt::DirectConnection,
+                        Q_ARG(QModelIndex,selected));
+                    poll.stop();
+                    okay=invoked && seen && rendered && lighting;
+                }
+            }
+            std::cout<<"Native multi-object Prefab 3D Qt preview: "
+                     <<(okay?"PASS":"FAIL")<<"\n";
+            return okay?0:11;
+        }
+        if(parser.isSet(prefabCardsSmoke)) {
+            namespace role=northstarcpp::editor::asset_card_roles;
+            view->browseTo("prefabs");
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            auto* model=grid?grid->model():nullptr;
+            QModelIndex index;
+            if(model)for(int row=0;row<model->rowCount();++row) {
+                auto candidate=model->index(row,0);
+                if(candidate.data(role::title).toString()=="pistol.nprefab") {
+                    index=candidate;
+                    break;
+                }
+            }
+            bool okay=index.isValid();
+            if(okay) {
+                okay=index.data(role::subtitle).toString()=="Prefab - 1 actor" &&
+                     index.data(role::accent_color).value<QColor>()==
+                         QColor("#55C29F");
+            }
+            if(okay) {
+                QElapsedTimer wait;wait.start();
+                while(wait.elapsed()<15000 &&
+                      view->cachedThumbnail("prefabs/pistol.nprefab").isNull()) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                    QThread::msleep(15);
+                }
+                okay=!view->cachedThumbnail("prefabs/pistol.nprefab").isNull();
+            }
+            if(okay) {
+                grid->setCurrentIndex(index);
+                bool modalSeen=false,rendered=false;
+                QElapsedTimer wait;wait.start();
+                QTimer poll;
+                poll.setInterval(35);
+                QObject::connect(&poll,&QTimer::timeout,&window,[&] {
+                    auto* modal=qobject_cast<QDialog*>(
+                        QApplication::activeModalWidget());
+                    if(modal && modal->objectName()=="prefabPreviewDialog") {
+                        modalSeen=true;
+                        auto* canvas=modal->findChild<QWidget*>("prefabPreviewCanvas");
+                        auto* details=modal->findChild<QLabel*>("prefabPreviewDetails");
+                        if(canvas && details &&
+                           canvas->property("previewReady").toBool() &&
+                           canvas->property("previewRendered").toBool() &&
+                           details->text().contains("3D model: orbit") &&
+                           details->text().contains("Pistol")) {
+                            rendered=true;
+                            modal->accept();
+                        }
+                    }
+                    if(wait.elapsed()>15000 && modal)modal->reject();
+                });
+                poll.start();
+                bool invoked=QMetaObject::invokeMethod(grid,"doubleClicked",
+                    Qt::DirectConnection,Q_ARG(QModelIndex,index));
+                poll.stop();
+                okay=invoked && modalSeen && rendered;
+            }
+            std::cout<<"Prefab browser card and real original 3D preview: "
+                     <<(okay?"PASS":"FAIL")<<"\n";
+            return okay?0:7;
         }
         if(parser.isSet(assetCardsSmoke)) {
             namespace role=northstarcpp::editor::asset_card_roles;

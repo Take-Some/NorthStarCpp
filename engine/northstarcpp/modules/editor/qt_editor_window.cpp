@@ -1,6 +1,16 @@
 #include "qt_editor_window.hpp"
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
+#include "qt_prefab_preview.hpp"
+#include "editor_prefab.hpp"
+#include "qt_material_authoring.hpp"
+#include "qt_asset_warnings.hpp"
+#include "qt_material_instances.hpp"
+#include "qt_material_graph_editor.hpp"
+#include "qt_material_gpu_preview.hpp"
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
+#include <QAbstractItemView>
 #include <northstarcpp/editor_asset_catalog.hpp>
 #include <northstarcpp/scene_component_registry.hpp>
 #include <northstarcpp/geometry_scene.hpp>
@@ -10,10 +20,16 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QColorDialog>
+#include <QImage>
+#include <QPixmap>
 #include <QCryptographicHash>
 #include <QComboBox>
+#include <QIcon>
 #include <QProcess>
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QThread>
 #include <QTimer>
 #include <QPointer>
 #include <QRegularExpression>
@@ -52,6 +68,8 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTabWidget>
+#include <QSplitter>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
@@ -138,6 +156,36 @@ QString sceneCameraKey(fs::path const& file) {
 QString folderRoot(fs::path const& scene) {
     return qpath(scene.parent_path()/"assets");
 }
+fs::path sharedMaterialRoot() {
+    // Resolve the shared library relative to the installed editor or
+    // source development build without hardcoding a user's machine path.
+    auto parent=fs::u8path(
+        QCoreApplication::applicationDirPath().toUtf8().toStdString());
+    for(unsigned level=0;level<8;++level) {
+        auto const candidate=parent/"sharedAssets";
+        std::error_code ec;
+        if(fs::is_directory(candidate,ec) &&
+           !fs::is_symlink(candidate,ec))
+            return candidate;
+        if(parent==parent.parent_path())break;
+        parent=parent.parent_path();
+    }
+    return {};
+}
+bool availableMaterial(fs::path const& root,QString const& reference) {
+    if(root.empty() || !material_authoring::is_material(reference))return false;
+    try {
+        (void)material_authoring::resolve_existing(root,reference);
+        return true;
+    }catch(...) {return false;}
+}
+bool validateMaterialComponent(void*,std::uint32_t version,
+                               void const* payload,std::size_t size) {
+    if(version!=1 || !payload || size==0 || size>1024)return false;
+    std::string ref(static_cast<char const*>(payload),size);
+    return safe_virtual_path(ref) &&
+        material_authoring::is_material(from8(ref));
+}
 bool isMesh(QString const& path) {
     auto ext=QFileInfo(path).suffix().toLower();
     return QStringList{"ydd","obj","mesh","fbx","gltf","glb"}.contains(ext);
@@ -175,6 +223,9 @@ QtEditorWindow::QtEditorWindow(QWidget* parent):QMainWindow(parent) {
     scene_=make_startup_scene();
     editor_tools::promote_to_v3(scene_);
     register_geometry_primitive_component();
+    (void)register_scene_component_type({
+        editor_tools::actor_material_component_type,1,1,
+        validateMaterialComponent,nullptr});
     setupUi();
     restoreWorkspace();
     updateAll();
@@ -188,7 +239,7 @@ void QtEditorWindow::setupUi() {
 QMainWindow,QDockWidget {background:#151c26;color:#d6e4f2;}
 QDockWidget {titlebar-close-icon:none;titlebar-normal-icon:none;}
 QDockWidget::title {background:#263446;padding:6px 8px;border:1px solid #34485d;}
-QTreeWidget,QLineEdit,QDoubleSpinBox,QPlainTextEdit {
+QTreeWidget,QLineEdit,QDoubleSpinBox,QPlainTextEdit,QComboBox {
  background:#192331;border:1px solid #36495e;color:#e1ecf7;
  selection-background-color:#356588;border-radius:3px;padding:3px;
 }
@@ -275,6 +326,58 @@ QCheckBox {color:#dce7f5;}
     editMenu->addAction("Delete Object",QKeySequence::Delete,
                         this,&QtEditorWindow::deleteSelected);
     assetMenu->addAction("&New Material Descriptor...",[this]{createMaterial();});
+    assetMenu->addAction("New Material &Instance...",[this] {
+        if(file_.empty()) {
+            QMessageBox::information(this,"Project Required",
+                "Save or open a scene to create a material instance.");
+            return;
+        }
+        auto const root=native(folderRoot(file_));
+        QStringList parents;
+        for(auto const& ref:material_authoring::list_materials(root)) {
+            if(ref.endsWith(".material.json",Qt::CaseInsensitive) ||
+               material_authoring::is_material_instance(ref))
+                parents.push_back(ref);
+        }
+        if(parents.isEmpty()) {
+            QMessageBox::information(this,"Material Instance",
+                "Create a project material source before creating an instance.");
+            return;
+        }
+        bool accepted=false;
+        QString parent=QInputDialog::getItem(this,"New Material Instance",
+            "Parent material:",parents,0,false,&accepted);
+        if(!accepted || parent.isEmpty())return;
+        QString const name=QInputDialog::getText(this,"New Material Instance",
+            "Instance name (letters, numbers, _ or -):",
+            QLineEdit::Normal,"NewInstance",&accepted);
+        if(!accepted)return;
+        try {
+            QString ref=material_authoring::create_material_instance(root,parent,name);
+            browser_->refresh();
+            refreshMaterialChoices(true);
+            log("Created Material Instance: "+ref+" (inherits "+parent+")");
+            openMaterialEditor(ref);
+        }catch(std::exception const& e) {
+            QMessageBox::warning(this,"Material Instance",from8(e.what()));
+        }
+    });
+    assetMenu->addAction("&Material Editor...",[this] {
+        auto items=material_authoring::list_materials(native(folderRoot(file_)));
+        if(items.isEmpty()) {
+            QMessageBox::information(this,"Material Editor",
+                "No materials found. Create a material or drag a texture onto an actor.");
+            return;
+        }
+        QString selected=materialPicker_ && selection_>=0 ?
+            materialPicker_->currentData().toString():QString{};
+        bool accepted=false;
+        if(selected.isEmpty() || !items.contains(selected))
+            selected=QInputDialog::getItem(this,"Material Editor",
+                "Choose a material",items,0,false,&accepted);
+        else accepted=true;
+        if(accepted && !selected.isEmpty())openMaterialEditor(selected);
+    });
     auto* inspectSkeleton=assetMenu->addAction("Inspect Skeleton Rig...",[this] {
         const auto file=QFileDialog::getOpenFileName(this,
             "Open NorthStar Skeleton",{},"Skeleton Rig (*.skeleton.json *.json);;All Files (*)");
@@ -607,6 +710,53 @@ QCheckBox {color:#dce7f5;}
     assetPath_->setPlaceholderText("Project-relative mesh reference");
     form->addRow("Actor Name",objectName_);
     form->addRow("Asset Reference",assetPath_);
+    // Every selected scene actor has exactly one material slot, never a
+    // direct texture slot. The author selects a material from project content.
+    auto* materialField=new QWidget(details);
+    auto* materialLayout=new QHBoxLayout(materialField);
+    materialLayout->setContentsMargins(0,0,0,0);
+    materialPicker_=new QComboBox(materialField);
+    materialPicker_->setObjectName("actorMaterialPicker");
+    materialPicker_->setIconSize(QSize(52,52));
+    materialPicker_->setMinimumHeight(57);
+    materialPicker_->setMaxVisibleItems(11);
+    materialPicker_->setToolTip(
+        "Choose a material using its PBR sphere preview; "
+        "the actor receives a material reference, never a texture.");
+    materialPicker_->view()->setMinimumWidth(450);
+    connect(materialPicker_,QOverload<int>::of(&QComboBox::highlighted),
+        this,[this](int index) {
+            if(index>0)queueMaterialPreviews(index);
+        });
+    materialPicker_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    materialPicker_->setMinimumContentsLength(15);
+    materialPicker_->setToolTip("Assign an existing material asset to this actor");
+    materialLayout->addWidget(materialPicker_,1);
+    materialEditButton_=new QPushButton("Edit...",materialField);
+    materialEditButton_->setObjectName("editSelectedMaterial");
+    materialLayout->addWidget(materialEditButton_);
+    auto* refreshMaterials=new QPushButton("↻",materialField);
+    refreshMaterials->setObjectName("refreshMaterials");
+    refreshMaterials->setToolTip("Scan project content for available materials");
+    materialLayout->addWidget(refreshMaterials);
+    form->addRow("Материал",materialField);
+    connect(materialPicker_,QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,[this](int index) {
+            if(uiSync_ || index<0 || selection_<0 ||
+               std::size_t(selection_)>=scene_.objects.size())return;
+            auto const ref=materialPicker_->itemData(index).toString();
+            if(ref==from8(editor_tools::actor_material(scene_,std::size_t(selection_))))
+                return;
+            assignMaterial(selection_,ref);
+        });
+    connect(materialEditButton_,&QPushButton::clicked,this,[this] {
+        openMaterialEditor(materialPicker_->currentData().toString());
+    });
+    connect(refreshMaterials,&QPushButton::clicked,this,[this] {
+        refreshMaterialChoices(true);
+        updateInspector();
+    });
+
     form->addRow("Position X/Y/Z",triplet(details,px_,py_,pz_,-900000,900000));
     form->addRow("Rotation X/Y/Z",triplet(details,rx_,ry_,rz_,-360000,360000));
     form->addRow("Scale X/Y/Z",triplet(details,sx_,sy_,sz_,0.01,1000));
@@ -898,7 +1048,7 @@ QCheckBox {color:#dce7f5;}
     connect(viewport_,&QtEditorViewport::selectionChanged,this,
             &QtEditorWindow::chooseObject);
     connect(viewport_,&QtEditorViewport::assetDropped,this,
-            &QtEditorWindow::createActor);
+            &QtEditorWindow::handleAssetDrop);
     connect(viewport_,&QtEditorViewport::gizmoDragStarted,this,[this] {
         gizmoBefore_.reset();
         gizmoChanged_=false;
@@ -938,7 +1088,10 @@ QCheckBox {color:#dce7f5;}
     });
     connect(browser_,&QtContentBrowser::assetActivated,this,
             [this](QString ref){
-        if(isMesh(ref))createActor(ref,{0,0,0});
+        if(ref.endsWith(".nprefab",Qt::CaseInsensitive))
+            instantiatePrefab(ref,{0,0,0});
+        else if(isMesh(ref))createActor(ref,{0,0,0});
+        else if(material_authoring::is_material(ref))openMaterialEditor(ref);
         else log("Selected asset: "+ref);
     });
     connect(browser_,&QtContentBrowser::assetSelected,this,
@@ -1151,13 +1304,33 @@ void QtEditorWindow::updateInspector() {
     updateComponentInspector();
     bool valid=selection_>=0 && std::size_t(selection_)<scene_.objects.size();
     for(QWidget* w:std::initializer_list<QWidget*>{objectName_,assetPath_,
-                     px_,py_,pz_,rx_,ry_,rz_,sx_,sy_,sz_,size_,mass_,visible_,collision_})
+                     px_,py_,pz_,rx_,ry_,rz_,sx_,sy_,sz_,size_,mass_,
+                     visible_,collision_,materialPicker_})
         w->setEnabled(valid);
+    refreshMaterialChoices();
+    QSignalBlocker materialBlock(materialPicker_);
     if(!valid) {
         QSignalBlocker a(objectName_),b(assetPath_);
+        materialPicker_->setCurrentIndex(0);
+        materialEditButton_->setEnabled(false);
         objectName_->clear();assetPath_->clear();return;
     }
     auto const& o=scene_.objects[std::size_t(selection_)];
+    auto const material=from8(editor_tools::actor_material(
+        scene_,static_cast<std::size_t>(selection_)));
+    int materialIndex=materialPicker_->findData(material);
+    if(materialIndex<0 && !material.isEmpty()) {
+        materialPicker_->addItem("Missing: "+material,material);
+        materialIndex=materialPicker_->count()-1;
+    }
+    materialPicker_->setCurrentIndex(std::max(materialIndex,0));
+    // The selected actor may use a material far below the initial popup
+    // screen. Prioritize that sphere even when the project has many assets.
+    if(materialPicker_->currentIndex()>0)
+        queueMaterialPreviews(materialPicker_->currentIndex());
+    materialEditButton_->setEnabled(
+        material.endsWith(".material.json",Qt::CaseInsensitive) &&
+        cachedMaterials_.contains(material));
     QSignalBlocker a(objectName_),b(assetPath_);
     objectName_->setText(from8(o.name));
     assetPath_->setText(from8(o.node.asset));
@@ -1332,15 +1505,25 @@ void QtEditorWindow::updateDependencies() {
     dependencies_->clear();
     if(file_.empty())return;
     QDir root(folderRoot(file_));
-    for(auto const& object:scene_.objects) {
-        if(object.node.asset.empty())continue;
-        auto ref=from8(object.node.asset);
-        auto full=root.filePath(ref);
+    auto const shared=sharedMaterialRoot();
+    for(std::size_t i=0;i<scene_.objects.size();++i) {
+        auto const& object=scene_.objects[i];
+        if(!object.node.asset.empty()) {
+            auto const ref=from8(object.node.asset);
+            auto const found=QFileInfo::exists(root.filePath(ref));
+            auto* row=new QTreeWidgetItem(dependencies_,{
+                ref,found?"Available":"Missing"});
+            row->setForeground(1,QBrush(QColor(found?"#8bc98b":"#ed8a8a")));
+            row->setToolTip(0,"Mesh: "+from8(object.name));
+        }
+        auto const material=from8(editor_tools::actor_material(scene_,i));
+        if(material.isEmpty())continue;
+        auto const found=availableMaterial(native(folderRoot(file_)),material) ||
+                         availableMaterial(shared,material);
         auto* row=new QTreeWidgetItem(dependencies_,{
-            ref,QFileInfo::exists(full)?"Available":"Missing"});
-        row->setForeground(1,QBrush(QColor(QFileInfo::exists(full)?
-                                           "#8bc98b":"#ed8a8a")));
-        row->setToolTip(0,from8(object.name));
+            material,found?"Available Material":"Missing Material"});
+        row->setForeground(1,QBrush(QColor(found?"#8bc98b":"#ed8a8a")));
+        row->setToolTip(0,"Assigned material for: "+from8(object.name));
     }
     dependencies_->resizeColumnToContents(0);
 }
@@ -1403,6 +1586,34 @@ void QtEditorWindow::editScene(std::function<void(Scene&)> change,int selectedAf
         log("Edit rejected: "+from8(e.what()));
     }
 }
+void QtEditorWindow::instantiatePrefab(
+    QString const& reference,QVector3D position) {
+    if(file_.empty()) {
+        log("Open or save a project scene before inserting a prefab.");
+        return;
+    }
+    try {
+        // Decode and validate Scene V3 before the authoring transaction.
+        // Instantiation preserves all descendants, layers, components and
+        // relative transforms instead of placing a placeholder model.
+        auto const prefab=prefab_preview::load(
+            native(folderRoot(file_)),utf8(reference));
+        int created=-1;
+        editScene([&](Scene& target) {
+            editor_tools::promote_to_v3(target);
+            created=static_cast<int>(editor_tools::instantiate_prefab(
+                target,prefab,{position.x(),position.y(),position.z()}));
+        });
+        if(created>=0 && static_cast<std::size_t>(created)<scene_.objects.size()) {
+            chooseObject(created);
+            log(QString("Instantiated prefab %1 (%2 actors)")
+                .arg(reference).arg(prefab.objects.size()));
+        }
+    } catch(std::exception const& error) {
+        log("Prefab insertion rejected: "+from8(error.what()));
+    }
+}
+
 void QtEditorWindow::createActor(QString const& asset,QVector3D point) {
     if(!asset.isEmpty()) {
         if(!safe_virtual_path(utf8(asset))) {
@@ -1466,6 +1677,435 @@ void QtEditorWindow::createProceduralActor(
     });
     if(created>=0)chooseObject(created);
 }
+void QtEditorWindow::refreshMaterialChoices(bool force) {
+    if(!materialPicker_)return;
+    QString const root=file_.empty()?QString{}:folderRoot(file_);
+    if(!force && cachedMaterialRoot_==root && materialPicker_->count()>0)
+        return;
+    // Invalidates any in-flight worker result without blocking the UI.
+    const bool directoryChanged=cachedMaterialRoot_!=root;
+    if(force || directoryChanged) {
+        materialSpheres_.clear();
+        ++materialPreviewRevision_;
+    }
+    auto previous=materialPicker_->currentData().toString();
+    cachedMaterialRoot_=root;
+    auto const projectMaterials=file_.empty()?QStringList{}:
+        material_authoring::list_materials(native(root));
+    auto const sharedRoot=sharedMaterialRoot();
+    auto const sharedMaterials=sharedRoot.empty()?QStringList{}:
+        material_authoring::list_materials(sharedRoot);
+    cachedMaterials_=projectMaterials;
+    QSignalBlocker block(materialPicker_);
+    materialPicker_->clear();
+    materialPicker_->addItem("None",QString{});
+    static auto const defaultImage=
+        material_authoring::neutral_sphere_preview(96);
+    auto const placeholder=QIcon(QPixmap::fromImage(defaultImage));
+    auto addOption=[this,&placeholder](QString const& name,QString const& source) {
+        auto const loaded=materialSpheres_.value(name);
+        materialPicker_->addItem(loaded.isNull()?placeholder:
+            QIcon(QPixmap::fromImage(loaded)),source+" · "+name,name);
+        materialPicker_->setItemData(materialPicker_->count()-1,
+            source+" material: "+name+"\nStudio sphere shows texture and PBR settings",
+            Qt::ToolTipRole);
+    };
+    for(auto const& name:projectMaterials)addOption(name,"[Project]");
+    for(auto const& name:sharedMaterials) {
+        if(cachedMaterials_.contains(name))continue; // VFS project override
+        cachedMaterials_.push_back(name);
+        addOption(name,"[Shared]");
+    }
+    auto const matched=materialPicker_->findData(previous);
+    materialPicker_->setCurrentIndex(std::max(0,matched));
+    queueMaterialPreviews(matched>0?matched:1);
+}
+void QtEditorWindow::queueMaterialPreviews(int nearIndex) {
+    if(!materialPicker_ || file_.empty() || cachedMaterials_.empty())
+        return;
+    materialPreviewFocus_=std::clamp(nearIndex,1,
+        std::max(1,materialPicker_->count()-1));
+    if(materialPreviewBusy_)return;
+    // Async, bounded demand batches. No material parsing or texture decode
+    // occurs on the GUI thread when the dropdown is opened or searched.
+    QStringList work;
+    auto add=[&](int index) {
+        if(index<1 || index>=materialPicker_->count())return;
+        auto const ref=materialPicker_->itemData(index).toString();
+        if(!ref.isEmpty() && !materialSpheres_.contains(ref) &&
+           !work.contains(ref))
+            work.push_back(ref);
+    };
+    add(materialPreviewFocus_);
+    for(int d=1;d<=10;++d) {
+        add(materialPreviewFocus_+d);
+        add(materialPreviewFocus_-d);
+    }
+    // Populate the first screen even if no item was highlighted yet.
+    if(work.size()<12)
+        for(int i=1;i<materialPicker_->count() && i<=20;++i)add(i);
+    if(work.isEmpty())return;
+    materialPreviewBusy_=true;
+    auto const focus=materialPreviewFocus_;
+    auto const revision=materialPreviewRevision_;
+    auto const root=native(cachedMaterialRoot_);
+    auto const shared=sharedMaterialRoot();
+    auto* watcher=new QFutureWatcher<QVector<QPair<QString,QImage>>>(this);
+    connect(watcher,&QFutureWatcher<QVector<QPair<QString,QImage>>>::finished,
+            this,[this,watcher,revision,focus] {
+        auto const results=watcher->result();
+        watcher->deleteLater();
+        materialPreviewBusy_=false;
+        if(revision!=materialPreviewRevision_) {
+            queueMaterialPreviews(materialPreviewFocus_);
+            return;
+        }
+        QSignalBlocker guard(materialPicker_);
+        for(auto const& result:results) {
+            auto const& ref=result.first;
+            auto const& preview=result.second;
+            // Missing/unsupported material previews use a neutral studio
+            // sphere rather than restarting a failed decode indefinitely.
+            auto const image=preview.isNull()?
+                material_authoring::neutral_sphere_preview(96):preview;
+            materialSpheres_.insert(ref,image);
+            auto const index=materialPicker_->findData(ref);
+            if(index>=1)
+                materialPicker_->setItemIcon(index,
+                    QIcon(QPixmap::fromImage(image)));
+        }
+        if(materialPreviewFocus_!=focus)
+            queueMaterialPreviews(materialPreviewFocus_);
+    });
+    watcher->setFuture(QtConcurrent::run([root,shared,work] {
+        QVector<QPair<QString,QImage>> results;
+        results.reserve(work.size());
+        // Sequential per worker: native YMAT texture codecs have not been
+        // audited for concurrent decode across multiple workers.
+        for(auto const& ref:work) {
+            auto const& source=availableMaterial(root,ref)?root:shared;
+            results.push_back(qMakePair(ref,source.empty()?QImage{}:
+                material_authoring::sphere_preview(source,ref,96)));
+        }
+        return results;
+    }));
+}
+void QtEditorWindow::assignMaterial(int actor,QString const& reference) {
+    if(actor<0 || std::size_t(actor)>=scene_.objects.size())return;
+    if(!reference.isEmpty()) {
+        if(!material_authoring::is_material(reference)) {
+            log("Only materials may be assigned to scene objects");return;
+        }
+        auto const project=native(folderRoot(file_));
+        if(!availableMaterial(project,reference) &&
+           !availableMaterial(sharedMaterialRoot(),reference)) {
+            log("Material not found in project content or sharedAssets: "+reference);
+            return;
+        }
+    }
+    editScene([actor,reference](Scene& next) {
+        if(reference.isEmpty())editor_tools::clear_actor_material(
+            next,static_cast<std::size_t>(actor));
+        else editor_tools::assign_actor_material(next,
+            static_cast<std::size_t>(actor),utf8(reference));
+    },actor);
+    if(!reference.isEmpty())
+        log("Assigned material "+reference+" to actor "+
+            from8(scene_.objects[std::size_t(actor)].name));
+}
+void QtEditorWindow::handleAssetDrop(
+    QString const& reference,QVector3D position,int hitActor) {
+    if(!safe_virtual_path(utf8(reference))) {
+        log("Asset drop rejected: unsafe virtual path");return;
+    }
+    if(material_authoring::is_texture(reference)) {
+        if(hitActor<0 || std::size_t(hitActor)>=scene_.objects.size()) {
+            statusBar()->showMessage(
+                "Drop a texture onto an object to create and assign a material",5000);
+            return;
+        }
+        if(file_.empty()) {
+            log("Save the scene into a project before creating a material");return;
+        }
+        try {
+            auto const created=material_authoring::make_material_for_texture(
+                native(folderRoot(file_)),reference);
+            browser_->refresh();
+            refreshMaterialChoices(true);
+            assignMaterial(hitActor,created);
+            statusBar()->showMessage(
+                "Created "+created+" (Base Color: "+reference+")",6500);
+        }catch(std::exception const& e) {
+            log("Texture-to-material conversion failed: "+from8(e.what()));
+        }
+    } else if(material_authoring::is_material(reference)) {
+        if(hitActor<0 || std::size_t(hitActor)>=scene_.objects.size()) {
+            statusBar()->showMessage("Drop a material onto an existing actor",5000);
+            return;
+        }
+        assignMaterial(hitActor,reference);
+    } else if(reference.endsWith(".nprefab",Qt::CaseInsensitive)) {
+        instantiatePrefab(reference,position);
+    } else if(isMesh(reference)) {
+        // Surface coordinates are supplied by the engine.collision narrowphase.
+        createActor(reference,position);
+    } else {
+        statusBar()->showMessage(
+            "Drop a prefab or mesh to place it, or a material/texture onto an actor",5000);
+    }
+}
+void QtEditorWindow::openMaterialEditor(QString const& reference) {
+    if(file_.empty() || reference.isEmpty())return;
+    if(material_authoring::is_material_instance(reference)) {
+        try {
+            auto const root=native(folderRoot(file_));
+            if(!availableMaterial(root,reference)) {
+                QMessageBox::information(this,"Material Instance",
+                    "Shared Material Instances are read-only. Create a project-local instance.");
+                return;
+            }
+            if(material_authoring::edit_material_instance_dialog(
+                this,root,reference)) {
+                browser_->refresh();
+                viewport_->setAssetSources(file_.parent_path());
+                refreshMaterialChoices(true);
+                updateInspector();
+                viewport_->update();
+                log("Saved GPU Material Instance: "+reference);
+            }
+        }catch(std::exception const& e) {
+            QMessageBox::warning(this,"Material Instance",from8(e.what()));
+        }
+        return;
+    }
+    if(!reference.endsWith(".material.json",Qt::CaseInsensitive)) {
+        QMessageBox::information(this,"Material Editor",
+            "This is a compiled or external material. The native YMAT "
+            "asset cannot be edited as a JSON descriptor. "
+            "Edit its source material instead.");
+        return;
+    }
+    namespace ma=material_authoring;
+    try {
+        auto const root=native(folderRoot(file_));
+        if(!availableMaterial(root,reference)) {
+            QMessageBox::information(this,"Shared Material",
+                "This is a shared material asset. It is read-only here. "
+                "Create a project-local material to edit its properties.");
+            return;
+        }
+        QJsonObject original=ma::load_descriptor(root,reference);
+        QDialog dialog(this);
+        dialog.setObjectName("northstarMaterialEditor");
+        dialog.setWindowTitle("Material Editor — "+reference);
+        dialog.resize(1100,750);
+        auto* layout=new QVBoxLayout(&dialog);
+        auto* split=new QSplitter(Qt::Horizontal,&dialog);
+        auto* tabs=new QTabWidget(split);
+        tabs->setObjectName("materialEditorTabs");
+        auto* properties=new QWidget(tabs);
+        auto* surfaceLayout=new QVBoxLayout(properties);
+        auto* graphEditor=new MaterialGraphEditor(
+            original.value("graph").toObject(),tabs,root);
+        tabs->addTab(properties,"Surface");
+        tabs->addTab(graphEditor,"Material Graph");
+        auto* gpuPreview=new MaterialGpuPreview(root,split);
+        split->addWidget(tabs);
+        split->addWidget(gpuPreview);
+        split->setStretchFactor(0,3);
+        split->setStretchFactor(1,2);
+        layout->addWidget(split,1);
+        // Material Editor has its own workspace; do not reset preferred
+        // panel widths and active tab every time an asset is opened.
+        QSettings workspace("KaylasSystems","NorthStarQtEditor");
+        dialog.restoreGeometry(workspace.value(
+            "MaterialEditor/WindowGeometry").toByteArray());
+        split->restoreState(workspace.value(
+            "MaterialEditor/SplitterState").toByteArray());
+        tabs->setCurrentIndex(std::clamp(
+            workspace.value("MaterialEditor/ActiveTab",0).toInt(),0,1));
+        connect(&dialog,&QDialog::finished,&dialog,
+                [&dialog,split,tabs](int) {
+            QSettings state("KaylasSystems","NorthStarQtEditor");
+            state.setValue("MaterialEditor/WindowGeometry",dialog.saveGeometry());
+            state.setValue("MaterialEditor/SplitterState",split->saveState());
+            state.setValue("MaterialEditor/ActiveTab",tabs->currentIndex());
+        });
+        auto* form=new QFormLayout;
+        auto* title=new QLineEdit(original.value("name").toString(),&dialog);
+        title->setObjectName("materialName");
+        title->setReadOnly(true);
+        form->addRow("Material",title);
+        auto* shader=new QComboBox(&dialog);
+        shader->setObjectName("materialShader");
+        shader->addItems({"standard_lit","unlit"});
+        shader->setCurrentText(original.value("shader").toString());
+        form->addRow("Shader",shader);
+        auto* albedo=new QWidget(&dialog);
+        auto* colorLayout=new QHBoxLayout(albedo);
+        colorLayout->setContentsMargins(0,0,0,0);
+        auto* color=new QLineEdit(original.value("base_color").toString(),albedo);
+        color->setObjectName("materialBaseColor");
+        auto* chooseColor=new QPushButton("Choose...",albedo);
+        colorLayout->addWidget(color);
+        colorLayout->addWidget(chooseColor);
+        connect(chooseColor,&QPushButton::clicked,&dialog,[this,color,&dialog] {
+            auto const initial=QColor(color->text());
+            auto const next=QColorDialog::getColor(initial,&dialog,
+                "Choose Material Base Color",QColorDialog::DontUseNativeDialog);
+            if(next.isValid())color->setText(next.name());
+        });
+        form->addRow("Base Color",albedo);
+        auto number=[&](char const* key,QString const& title) {
+            auto* spin=new QDoubleSpinBox(&dialog);
+            spin->setObjectName("material_"+QString::fromUtf8(key));
+            spin->setRange(0,1);
+            spin->setDecimals(3);
+            spin->setSingleStep(.05);
+            spin->setValue(original.value(key).toDouble());
+            form->addRow(title,spin);
+            return spin;
+        };
+        auto* metallic=number("metallic","Metallic");
+        auto* roughness=number("roughness","Roughness");
+        auto const textureNames=ma::list_textures(root);
+        struct TextureField{char const* key;QComboBox* widget;};
+        std::vector<TextureField> textureFields;
+        for(auto const& [key,label]:std::initializer_list<std::pair<char const*,char const*>>{
+            {"base_color_texture","Base Color Texture"},
+            {"normal_texture","Normal Texture"},
+            {"roughness_texture","Roughness Texture"},
+            {"metallic_texture","Metallic Texture"},
+            {"emissive_texture","Emissive Texture"}}) {
+            auto* picker=new QComboBox(&dialog);
+            picker->setObjectName(QString("materialSlot_")+key);
+            picker->addItem("None",QString{});
+            for(auto const& name:textureNames)
+                picker->addItem(name,name);
+            auto const current=original.value(key).toString();
+            int selected=picker->findData(current);
+            if(selected<0 && !current.isEmpty()) {
+                picker->addItem("Missing: "+current,current);
+                selected=picker->count()-1;
+            }
+            picker->setCurrentIndex(std::max(selected,0));
+            form->addRow(label,picker);
+            textureFields.push_back({key,picker});
+        }
+        surfaceLayout->addLayout(form);
+        auto* preview=new QLabel(properties);
+        preview->setObjectName("materialTexturePreview");
+        preview->setMinimumHeight(140);
+        preview->setAlignment(Qt::AlignCenter);
+        preview->setStyleSheet("background:#18212d;border:1px solid #41546b;");
+        surfaceLayout->addWidget(preview);
+        auto* textureWarnings=new AssetWarningPanel(properties);
+        textureWarnings->setMaximumHeight(155);
+        surfaceLayout->addWidget(textureWarnings);
+        auto updatePreview=[root,preview,textureWarnings,base=textureFields.front().widget] {
+            auto const source=base->currentData().toString();
+            if(source.isEmpty()) {
+                textureWarnings->setWarnings({});
+                preview->setPixmap(QPixmap{});
+                preview->setText("No Base Color texture");return;
+            }
+            try {
+                auto path=ma::resolve_existing(root,source);
+                QImage image(qpath(path));
+                if(image.isNull()) {
+                    preview->setPixmap(QPixmap{});
+                    preview->setText("No image preview available");
+                    textureWarnings->setWarnings({
+                        {AssetWarningKind::Other,source,
+                         source.endsWith(".ytd",Qt::CaseInsensitive)?
+                         "YTD dictionary: select an entry in Content Browser":
+                         "The image decoder cannot preview this texture."}});
+                }else {
+                    textureWarnings->setWarnings({});
+                    preview->setText({});
+                    preview->setPixmap(QPixmap::fromImage(
+                        image.scaled(230,140,Qt::KeepAspectRatio,
+                                     Qt::SmoothTransformation)));
+                }
+            }catch(std::exception const& e) {
+                preview->setPixmap(QPixmap{});
+                preview->setText("No image preview available");
+                textureWarnings->setWarnings({
+                    {AssetWarningKind::Texture,source,from8(e.what())}});
+            }
+        };
+        connect(textureFields.front().widget,QOverload<int>::of(&QComboBox::currentIndexChanged),
+                &dialog,[updatePreview](int) {updatePreview();});
+        updatePreview();
+        // All controls feed a throttled, isolated material asset preview.
+        // The preview reuses engine.render and never overwrites project assets.
+        auto editedDescriptor=[&]() {
+            QJsonObject edited=original;
+            edited.insert("shader",shader->currentText());
+            edited.insert("base_color",color->text().trimmed());
+            edited.insert("metallic",metallic->value());
+            edited.insert("roughness",roughness->value());
+            for(auto const& item:textureFields)
+                edited.insert(item.key,item.widget->currentData().toString());
+            if(graphEditor->enabled())edited.insert("graph",graphEditor->graph());
+            else edited.remove("graph");
+            return edited;
+        };
+        auto updateGpu=[&](){gpuPreview->setMaterial(editedDescriptor());};
+        connect(graphEditor,&MaterialGraphEditor::graphChanged,
+                &dialog,updateGpu);
+        connect(gpuPreview,&MaterialGpuPreview::shaderDiagnostic,
+                graphEditor,&MaterialGraphEditor::showDiagnostic);
+        connect(shader,QOverload<int>::of(&QComboBox::currentIndexChanged),
+                &dialog,[updateGpu](int){updateGpu();});
+        connect(color,&QLineEdit::textChanged,&dialog,
+                [updateGpu](QString const&){updateGpu();});
+        connect(metallic,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                &dialog,[updateGpu](double){updateGpu();});
+        connect(roughness,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                &dialog,[updateGpu](double){updateGpu();});
+        for(auto const& item:textureFields)
+            connect(item.widget,QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    &dialog,[updateGpu](int){updateGpu();});
+        updateGpu();
+        QTimer::singleShot(0,&dialog,[gpuPreview]{gpuPreview->start();});
+        auto* buttons=new QDialogButtonBox(
+            QDialogButtonBox::Save|QDialogButtonBox::Cancel,&dialog);
+        layout->addWidget(buttons);
+        connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        connect(buttons->button(QDialogButtonBox::Save),&QPushButton::clicked,
+                &dialog,[&,root] {
+            QJsonObject edited=editedDescriptor();
+            QString graphError;
+            if(!graphEditor->validate(&graphError)) {
+                tabs->setCurrentWidget(graphEditor);
+                QMessageBox::warning(&dialog,"Material Graph rejected",graphError);
+                return;
+            }
+            if(graphEditor->enabled())edited.insert("graph",graphEditor->graph());
+            else edited.remove("graph");
+            try {
+                ma::save_descriptor(root,reference,edited);
+                dialog.accept();
+            }catch(std::exception const& e) {
+                QMessageBox::warning(&dialog,"Material rejected",from8(e.what()));
+            }
+        });
+        if(dialog.exec()==QDialog::Accepted) {
+            browser_->refresh();
+            // Re-resolve the VFS and invalidate cached material texels and
+            // GPU draws. The next editor frame uses the newly saved PBR
+            // factors/textures rather than the old cached material.
+            viewport_->setAssetSources(file_.parent_path());
+            refreshMaterialChoices(true);
+            updateInspector();
+            viewport_->update();
+            log("Saved and reloaded GPU material: "+reference);
+        }
+    }catch(std::exception const& e) {
+        QMessageBox::warning(this,"Material Editor",from8(e.what()));
+    }
+}
 void QtEditorWindow::createMaterial() {
     if(file_.empty()) {
         QMessageBox::information(this,"Project Required",
@@ -1504,8 +2144,10 @@ void QtEditorWindow::createMaterial() {
         log("Cannot create material descriptor");return;
     }
     browser_->refresh();
-    log("Created material authoring descriptor: "+material+
-        " (GPU material compiler not yet connected)");
+    refreshMaterialChoices(true);
+    updateInspector();
+    log("Created project material: "+material+
+        " (native renderer material compilation remains a separate step)");
 }
 bool QtEditorWindow::openScene(QString const& file) {
     try {
@@ -2022,6 +2664,212 @@ bool QtEditorWindow::runSmoke(QString const& base) {
            scene_.components.back().entity_id!=geometryId ||
            scene_.components.back().type!=geometry_primitive_component) {
             log("smoke: geometry NEF8 roundtrip failed");return false;
+        }
+        // Material is an asset reference, NOT a texture on a scene actor.
+        // Exercise the actual Content->Drop->Material->Inspector->Undo/Save path.
+        if(!dir.mkpath("assets/Textures"))return false;
+        QImage sampleTexture(16,16,QImage::Format_ARGB32);
+        sampleTexture.fill(QColor("#cf7b43"));
+        if(!sampleTexture.save(dir.filePath("assets/Textures/editor-smoke.png")))
+            return false;
+        chooseObject(actor);
+        handleAssetDrop("Textures/editor-smoke.png",{0,1,0},actor);
+        auto const createdMaterial=from8(editor_tools::actor_material(
+            scene_,std::size_t(actor)));
+        qWarning()<<"material smoke ref"<<createdMaterial
+                  <<"picker"<<materialPicker_->currentData().toString()
+                  <<"recognition"<<material_authoring::is_material(createdMaterial)
+                  <<"catalog"<<int(kind_from_extension(fs::path(utf8(createdMaterial))))
+                  <<"components"<<scene_.components.size()
+                  <<"file"<<QFileInfo::exists(
+                       QDir(folderRoot(file_)).filePath(createdMaterial));
+        if(!material_authoring::is_material(createdMaterial) ||
+           materialPicker_->currentData().toString()!=createdMaterial ||
+           kind_from_extension(fs::path(utf8(createdMaterial)))!=AssetKind::material) {
+            log(QString("smoke material failed: reference='%1', picker='%2', recognized=%3, kind=%4, components=%5")
+                .arg(createdMaterial,materialPicker_->currentData().toString())
+                .arg(material_authoring::is_material(createdMaterial))
+                .arg(int(kind_from_extension(fs::path(utf8(createdMaterial)))))
+                .arg(scene_.components.size()));
+            return false;
+        }
+        auto const contentRoot=native(folderRoot(file_));
+        auto descriptor=material_authoring::load_descriptor(contentRoot,createdMaterial);
+        if(descriptor.value("base_color_texture").toString()!="Textures/editor-smoke.png" ||
+           !QFileInfo::exists(QDir(folderRoot(file_)).filePath(createdMaterial))) {
+            log("smoke: texture was not bound to material Base Color");return false;
+        }
+        undo();
+        if(!editor_tools::actor_material(scene_,std::size_t(actor)).empty()) {
+            log("smoke: material assignment Undo failed");return false;
+        }
+        redo();
+        if(from8(editor_tools::actor_material(scene_,std::size_t(actor)))!=createdMaterial) {
+            log("smoke: material assignment Redo failed");return false;
+        }
+        if(!saveScene() || !openScene(sceneFile) ||
+           from8(editor_tools::actor_material(scene_,std::size_t(actor)))!=createdMaterial) {
+            log("smoke: material binding was not serialized");return false;
+        }
+        chooseObject(actor);
+        if(materialPicker_->currentData().toString()!=createdMaterial) {
+            log("smoke: inspector did not restore selected material");return false;
+        }
+        // Edit the material descriptor itself without modifying scene actor
+        // texture pointers (the actor has none). Read after atomic save.
+        bool materialEditorSaved=false;
+        QTimer::singleShot(0,this,[&materialEditorSaved] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if(!dialog || dialog->objectName()!="northstarMaterialEditor")return;
+            auto* rough=dialog->findChild<QDoubleSpinBox*>("material_roughness");
+            auto* buttons=dialog->findChild<QDialogButtonBox*>();
+            if(!rough || !buttons)return;
+            rough->setValue(.27);
+            materialEditorSaved=true;
+            buttons->button(QDialogButtonBox::Save)->click();
+        });
+        openMaterialEditor(createdMaterial);
+        descriptor=material_authoring::load_descriptor(contentRoot,createdMaterial);
+        if(!materialEditorSaved ||
+           std::abs(descriptor.value("roughness").toDouble()-0.27)>.0001) {
+            log("smoke: Material Editor modal save did not persist roughness");return false;
+        }
+        // Existing material selection uses the same scene component; only
+        // texture drops generate a new descriptor.
+        auto const anotherMaterial=material_authoring::make_material_for_texture(
+            contentRoot,"Textures/editor-smoke.png");
+        refreshMaterialChoices(true);
+        updateInspector();
+        auto const option=materialPicker_->findData(anotherMaterial);
+        if(option<1) {
+            log("smoke: material picker omitted existing material");return false;
+        }
+        materialPicker_->setCurrentIndex(option);
+        if(from8(editor_tools::actor_material(scene_,std::size_t(actor)))!=anotherMaterial) {
+            log("smoke: choosing material did not assign it");return false;
+        }
+        handleAssetDrop(createdMaterial,{0,1,0},actor);
+        if(from8(editor_tools::actor_material(scene_,std::size_t(actor)))!=createdMaterial) {
+            log("smoke: dropping existing material failed");return false;
+        }
+        materialPicker_->setCurrentIndex(0);
+        if(!editor_tools::actor_material(scene_,std::size_t(actor)).empty()) {
+            log("smoke: None material must clear binding");return false;
+        }
+        undo();
+        if(from8(editor_tools::actor_material(scene_,std::size_t(actor)))!=createdMaterial){
+            log("smoke: undo clear material failed");return false;
+        }
+        // Shared YMAT assets must appear alongside project descriptors.
+        // The picker never edits the original encoded resource.
+        auto const shared=sharedMaterialRoot();
+        if(!shared.empty() &&
+           availableMaterial(shared,"characters/abby/materials/abby.ymat")) {
+            refreshMaterialChoices(true);
+            updateInspector();
+            auto const index=materialPicker_->findData(
+                QString("characters/abby/materials/abby.ymat"));
+            if(index<1) {
+                log("smoke: shared YMAT missing from material picker");return false;
+            }
+            materialPicker_->setCurrentIndex(index);
+            if(editor_tools::actor_material(scene_,std::size_t(actor))!=
+               "characters/abby/materials/abby.ymat") {
+                log("smoke: shared YMAT selection did not persist");return false;
+            }
+            undo();
+            if(editor_tools::actor_material(scene_,std::size_t(actor))!=
+               utf8(createdMaterial)) {
+                log("smoke: shared material Undo failed");return false;
+            }
+        }
+
+        // Material picker regression: two PBR descriptors must produce
+        // visibly different studio spheres, and a texture-driven descriptor
+        // must actually sample its authored Base Color texture.
+        namespace ma=material_authoring;
+        auto const content=native(dir.filePath("assets"));
+        QJsonObject red{{"schema",1},{"name","Red"},{"shader","standard_lit"},
+            {"base_color","#d93630"},{"metallic",0.0},{"roughness",0.60},
+            {"base_color_texture",""}};
+        QJsonObject blue=red;
+        blue.insert("name","Blue");
+        blue.insert("base_color","#286adb");
+        ma::save_descriptor(content,"Materials/Red.material.json",red);
+        ma::save_descriptor(content,"Materials/Blue.material.json",blue);
+        auto const redSphere=ma::sphere_preview(
+            content,"Materials/Red.material.json",96);
+        auto const blueSphere=ma::sphere_preview(
+            content,"Materials/Blue.material.json",96);
+        if(redSphere.isNull() || blueSphere.isNull() ||
+           redSphere.size()!=QSize(96,96) ||
+           qRed(redSphere.pixel(48,48))<=qBlue(redSphere.pixel(48,48)) ||
+           qBlue(blueSphere.pixel(48,48))<=qRed(blueSphere.pixel(48,48)) ||
+           redSphere.pixel(48,48)==blueSphere.pixel(48,48) ||
+           redSphere.pixel(0,0)!=blueSphere.pixel(0,0)) {
+            log("smoke: sphere material PBR color preview mismatch");return false;
+        }
+        if(!dir.mkpath("assets/Textures"))return false;
+        QImage checker(64,64,QImage::Format_RGBA8888);
+        for(int y=0;y<64;++y)for(int x=0;x<64;++x)
+            checker.setPixelColor(x,y,
+                (((x/8)+(y/8))%2)==0?QColor("#ea9e24"):QColor("#2959b8"));
+        if(!checker.save(dir.filePath("assets/Textures/checker.png")))return false;
+        auto const textured=ma::make_material_for_texture(
+            content,"Textures/checker.png");
+        auto const textureSphere=ma::sphere_preview(content,textured,96);
+        if(textureSphere.isNull() || textureSphere.pixel(48,48)==
+           redSphere.pixel(48,48)) {
+            log("smoke: texture-driven material sphere preview missing");return false;
+        }
+        refreshMaterialChoices(true);
+        if(!materialPicker_ ||
+           materialPicker_->findData("Materials/Red.material.json")<0 ||
+           materialPicker_->findData("Materials/Blue.material.json")<0 ||
+           materialPicker_->findData(textured)<0) {
+            log("smoke: Inspector material picker lost project entries");return false;
+        }
+        int const materialActor=static_cast<int>(scene_.objects.size()-1);
+        chooseObject(materialActor);
+        assignMaterial(materialActor,"Materials/Red.material.json");
+        if(materialPicker_->currentData().toString()!="Materials/Red.material.json") {
+            log("smoke: Material picker does not follow selected scene actor");
+            return false;
+        }
+        auto const blueIndex=materialPicker_->findData(
+            "Materials/Blue.material.json");
+        materialPicker_->setCurrentIndex(blueIndex); // Actual Qt change signal.
+        if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
+           "Materials/Blue.material.json") {
+            log("smoke: Material picker did not assign asset");return false;
+        }
+        undo();
+        if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
+           "Materials/Red.material.json") {
+            log("smoke: Material choice Undo failed");return false;
+        }
+        redo();
+        if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
+           "Materials/Blue.material.json" ||
+           !saveScene() || !openScene(sceneFile) ||
+           editor_tools::actor_material(scene_,std::size_t(materialActor))!=
+           "Materials/Blue.material.json") {
+            log("smoke: Material choice NSCN save/load failed");return false;
+        }
+        // Verify async worker icon updates, not just the generated preview.
+        QElapsedTimer timer;
+        timer.start();
+        while(!materialSpheres_.contains("Materials/Blue.material.json") &&
+              timer.elapsed()<6500) {
+            QCoreApplication::processEvents();
+            QThread::msleep(10);
+        }
+        auto const entry=materialPicker_->findData(
+            "Materials/Blue.material.json");
+        if(!materialSpheres_.contains("Materials/Blue.material.json") ||
+           entry<1 || materialPicker_->itemIcon(entry).isNull()) {
+            log("smoke: async material sphere icon missing from picker");
+            return false;
         }
         return outlinerDock_ && detailsDock_ && contentDock_ && dependencyDock_ &&
                browser_ && viewport_;

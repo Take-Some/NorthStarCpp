@@ -26,6 +26,7 @@ struct Body {
     std::unique_ptr<btRigidBody> rigid;
     float half = 0.f;
     bool resident = true;
+    bool alive = true;
 };
 
 Body make_body(std::unique_ptr<btCollisionShape> shape, float mass, btVector3 const& center)
@@ -65,7 +66,7 @@ struct World {
         for (auto const& mesh : static_meshes)
             world.removeRigidBody(mesh.rigid.get());
         for (auto const& body : bodies)
-            if (body.resident)
+            if (body.alive && body.resident)
                 world.removeRigidBody(body.rigid.get());
         if (ground.rigid)
             world.removeRigidBody(ground.rigid.get());
@@ -73,6 +74,7 @@ struct World {
 
     void initialize(NorthStarRigidBody const* objects, uint32_t count)
     {
+        initial_body_count = count;
         if (count && !objects)
             throw std::runtime_error("Missing rigid bodies");
         bodies.reserve(count);
@@ -157,7 +159,8 @@ struct World {
 
     void apply_impulse(uint32_t index, float x, float y, float z)
     {
-        if(index>=bodies.size() || bodies[index].rigid.get()==player ||
+        if(index>=bodies.size() || !bodies[index].alive ||
+            bodies[index].rigid.get()==player ||
            bodies[index].rigid->isStaticOrKinematicObject() ||
            !std::isfinite(x)||!std::isfinite(y)||!std::isfinite(z) ||
            std::hypot(x,y,z)>100.f)
@@ -169,7 +172,8 @@ struct World {
 
     void move_static(uint32_t index, float x, float y, float z)
     {
-        if (index >= bodies.size() || !std::isfinite(x) || !std::isfinite(y) ||
+        if (index >= bodies.size() || !bodies[index].alive ||
+            !std::isfinite(x) || !std::isfinite(y) ||
             !std::isfinite(z) || !bodies[index].rigid->isStaticObject())
             throw std::runtime_error("Invalid Bullet static body relocation");
         auto& body = *bodies[index].rigid;
@@ -181,9 +185,46 @@ struct World {
             world.updateSingleAabb(&body);
     }
 
+    uint32_t add_runtime_body(NorthStarRigidBody const& object)
+    {
+        if (bodies.size() >= 16384u || object.player ||
+            !std::isfinite(object.x) || !std::isfinite(object.y) ||
+            !std::isfinite(object.z) || !std::isfinite(object.size) ||
+            !std::isfinite(object.mass) || object.size <= 0.f ||
+            object.size > 1000.f || object.mass < 0.f || object.mass > 1000000.f)
+            throw std::invalid_argument("Invalid Bullet runtime body");
+        auto const half = object.size * 0.5f;
+        auto next = make_body(std::make_unique<btBoxShape>(btVector3(half, half, half)),
+            object.mass, btVector3(object.x, object.y + half, object.z));
+        next.half = half;
+        auto const index = static_cast<uint32_t>(bodies.size());
+        next.rigid->setUserIndex(static_cast<int>(index));
+        if (object.mass > 0.f) {
+            next.rigid->setCcdMotionThreshold(half);
+            next.rigid->setCcdSweptSphereRadius(half * 0.8f);
+        }
+        bodies.push_back(std::move(next));
+        world.addRigidBody(bodies.back().rigid.get());
+        return index;
+    }
+
+    void remove_runtime_body(uint32_t index)
+    {
+        if (index < initial_body_count || index >= bodies.size() ||
+            !bodies[index].alive)
+            throw std::invalid_argument("Stale or authored Bullet body index");
+        auto& entry = bodies[index];
+        if (entry.resident) world.removeRigidBody(entry.rigid.get());
+        entry.alive = false;
+        entry.resident = false;
+        entry.rigid.reset();
+        entry.shape.reset();
+    }
+
     void set_static_resident(uint32_t index, bool resident)
     {
-        if (index>=bodies.size() || bodies[index].rigid.get()==player ||
+        if (index>=bodies.size() || !bodies[index].alive ||
+            bodies[index].rigid.get()==player ||
             !bodies[index].rigid->isStaticObject())
             throw std::invalid_argument("Only scene static bodies may change Bullet residency");
         auto& body=bodies[index];
@@ -195,7 +236,8 @@ struct World {
 
     int static_resident(uint32_t index) const
     {
-        if (index>=bodies.size() || bodies[index].rigid.get()==player ||
+        if (index>=bodies.size() || !bodies[index].alive ||
+            bodies[index].rigid.get()==player ||
             !bodies[index].rigid->isStaticObject()) return -1;
         return bodies[index].resident ? 1 : 0;
     }
@@ -238,7 +280,8 @@ struct World {
         for (float v:{sx,sy,sz,ex,ey,ez,radius})
             if (!std::isfinite(v))
                 throw std::invalid_argument("Invalid Bullet sphere query");
-        if(radius<=0.f||radius>2.f|| (ignored!=UINT32_MAX && ignored>=bodies.size()))
+        if(radius<=0.f||radius>2.f||
+            (ignored!=UINT32_MAX && (ignored>=bodies.size() || !bodies[ignored].alive)))
             throw std::invalid_argument("Invalid Bullet camera sweep radius/index");
         auto const* ignored_body = ignored==UINT32_MAX
             ? nullptr : bodies[ignored].rigid.get();
@@ -277,6 +320,11 @@ struct World {
             throw std::runtime_error("Invalid pose buffer");
         for (uint32_t i = 0; i < count; ++i) {
             auto const& body = bodies[i];
+            if (!body.alive) {
+                output[i] = {};
+                output[i].rotation[0] = output[i].rotation[4] = output[i].rotation[8] = 1.f;
+                continue;
+            }
             auto const& transform = body.rigid->getWorldTransform();
             auto const& center = transform.getOrigin();
             auto const& basis = transform.getBasis();
@@ -295,6 +343,7 @@ struct World {
     btDiscreteDynamicsWorld world{&dispatcher, &broadphase, &solver, &configuration};
     Body ground;
     std::vector<Body> bodies;
+    uint32_t initial_body_count = 0;
     std::vector<StaticMesh> static_meshes;
     btRigidBody* player = nullptr;
     double elapsed = 0.0;
@@ -377,6 +426,23 @@ int is_static_resident(void* world,uint32_t index)
 }
 const NorthStarPhysicsResidencyApi residency_api{
     NORTHSTARCPP_PHYSICS_RESIDENCY_ABI,set_static_resident,is_static_resident};
+int add_runtime_body(void* world, NorthStarRigidBody const* body, uint32_t* index)
+{
+    return guarded([&] {
+        if (!world || !body || !index)
+            throw std::invalid_argument("Invalid runtime body creation arguments");
+        *index = static_cast<World*>(world)->add_runtime_body(*body);
+    });
+}
+int remove_runtime_body(void* world, uint32_t index)
+{
+    return guarded([&] {
+        if (!world) throw std::invalid_argument("Missing runtime physics world");
+        static_cast<World*>(world)->remove_runtime_body(index);
+    });
+}
+const NorthStarPhysicsRuntimeApi runtime_api{
+    NORTHSTARCPP_PHYSICS_RUNTIME_ABI, add_runtime_body, remove_runtime_body};
 
 static_assert(BT_BULLET_VERSION == 325, "Update Bullet provider metadata for a new SDK");
 const NorthStarPhysicsApi api{create, destroy, step, read_poses, jump, move_static,
@@ -390,6 +456,12 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if (version == NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_PHYSICS, "Bullet", "3.25",
+            NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI, sizeof(runtime_api), &runtime_api, last_error};
+        return match(extension, host, capability, version);
+    }
     if (version == NORTHSTARCPP_PHYSICS_RESIDENCY_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_PHYSICS, "Bullet", "3.25",
@@ -405,4 +477,10 @@ NorthStarPhysicsResidencyApi const* northstar_physics_get_residency_api(
     uint32_t version)
 {
     return version==NORTHSTARCPP_PHYSICS_RESIDENCY_ABI ? &residency_api : nullptr;
+}
+
+extern "C" NORTHSTARCPP_MODULE_EXPORT
+NorthStarPhysicsRuntimeApi const* northstar_physics_get_runtime_api(uint32_t version)
+{
+    return version==NORTHSTARCPP_PHYSICS_RUNTIME_ABI ? &runtime_api : nullptr;
 }

@@ -77,16 +77,95 @@ target_include_directories(northstarcpp_ui INTERFACE
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/ui>"
     "$<INSTALL_INTERFACE:sdk/include/northstarcpp/ui>")
 northstarcpp_module(northstarcpp_render_d3d11 render d3d11 modules/render/d3d11/d3d11.cpp)
+target_sources(northstarcpp_render_d3d11 PRIVATE modules/render/d3d11/shader_compiler.cpp)
+target_sources(northstarcpp_render_d3d11 PRIVATE modules/render/d3d11/renderer_geometry.cpp)
+target_sources(northstarcpp_render_d3d11 PRIVATE
+    modules/render/d3d11/renderer_device.cpp
+    modules/render/d3d11/renderer_resources.cpp
+    modules/render/d3d11/renderer_hud.cpp
+    modules/render/d3d11/renderer_sky.cpp
+    modules/render/d3d11/renderer_characters.cpp
+    modules/render/d3d11/renderer_materials.cpp
+    modules/render/d3d11/renderer_surfaces.cpp
+    modules/render/d3d11/renderer_frame.cpp
+)
 target_link_libraries(northstarcpp_render_d3d11 PRIVATE northstarcpp_ui northstarcpp_math d3d11 dxgi d3dcompiler_47 dxguid)
 target_include_directories(northstarcpp_render_d3d11 PRIVATE "${northstarcpp_engine_sources}")
 target_compile_definitions(northstarcpp_render_d3d11 PRIVATE NORTHSTARCPP_STATIC_LIBRARIES)
 
 northstarcpp_module(northstarcpp_render_d3d12 render d3d12 modules/render/d3d12/d3d12.cpp)
+target_sources(northstarcpp_render_d3d12 PRIVATE modules/render/d3d12/shader_compiler.cpp)
+target_sources(northstarcpp_render_d3d12 PRIVATE modules/render/d3d12/renderer_geometry.cpp)
+target_sources(northstarcpp_render_d3d12 PRIVATE
+    modules/render/d3d12/renderer_device.cpp
+    modules/render/d3d12/renderer_resources.cpp
+    modules/render/d3d12/renderer_materials.cpp
+    modules/render/d3d12/renderer_scene.cpp
+    modules/render/d3d12/renderer_diagnostics.cpp
+    modules/render/d3d12/renderer_frame.cpp
+    modules/render/d3d12/renderer_resource_states.cpp
+    modules/render/d3d12/renderer_transient_alias.cpp
+    modules/render/d3d12/renderer_texture_pool.cpp
+    modules/render/d3d12/renderer_pass_barriers.cpp
+    modules/render/d3d12/renderer_pass_shadow.cpp
+    modules/render/d3d12/renderer_pass_gbuffer.cpp
+    modules/render/d3d12/renderer_pass_deferred.cpp
+    modules/render/d3d12/renderer_pass_postfx.cpp
+    modules/render/d3d12/renderer_pass_present.cpp
+)
 target_link_libraries(northstarcpp_render_d3d12 PRIVATE northstarcpp_ui northstarcpp_math d3d12 dxgi d3dcompiler_47 dxguid)
 target_include_directories(northstarcpp_render_d3d12 PRIVATE "${northstarcpp_engine_sources}")
 target_compile_definitions(northstarcpp_render_d3d12 PRIVATE NORTHSTARCPP_STATIC_LIBRARIES)
 
 if(BUILD_TESTING)
+    add_executable(northstarcpp_d3d11_material_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_d3d11_material_smoke.cpp")
+    target_include_directories(northstarcpp_d3d11_material_smoke PRIVATE
+        "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
+    target_link_options(northstarcpp_d3d11_material_smoke PRIVATE -static)
+    # One acceptance executable tests both plug-in render providers.
+    add_dependencies(northstarcpp_d3d11_material_smoke
+        northstarcpp_render_d3d11 northstarcpp_render_d3d12)
+    add_test(NAME northstarcpp_d3d11_material_warp
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d11_material_smoke>"
+                "$<TARGET_FILE:northstarcpp_render_d3d11>")
+    set_tests_properties(northstarcpp_d3d11_material_warp PROPERTIES TIMEOUT 40)
+    add_test(NAME northstarcpp_d3d12_material_warp
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d11_material_smoke>"
+                "$<TARGET_FILE:northstarcpp_render_d3d12>")
+    set_tests_properties(northstarcpp_d3d12_material_warp PROPERTIES TIMEOUT 45)
+    add_test(NAME northstarcpp_d3d12_material_hardware
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d11_material_smoke>"
+                "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_material_hardware PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 55)
+    add_test(NAME northstarcpp_d3d11_material_hardware
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d11_material_smoke>"
+                "$<TARGET_FILE:northstarcpp_render_d3d11>" --hardware)
+    set_tests_properties(northstarcpp_d3d11_material_hardware PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 55)
+
+
+    add_executable(northstarcpp_d3d12_transient_alias_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_d3d12_transient_alias_smoke.cpp"
+        modules/render/d3d12/renderer_transient_alias.cpp
+        modules/render/d3d12/renderer_resource_states.cpp)
+    target_compile_features(northstarcpp_d3d12_transient_alias_smoke PRIVATE cxx_std_17)
+    target_link_libraries(northstarcpp_d3d12_transient_alias_smoke PRIVATE d3d12 dxgi)
+    add_test(NAME northstarcpp_d3d12_transient_alias_placed
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d12_transient_alias_smoke>")
+    set_tests_properties(northstarcpp_d3d12_transient_alias_placed
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    add_executable(northstarcpp_d3d12_texture_pool_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_d3d12_texture_pool_smoke.cpp"
+        modules/render/d3d12/renderer_texture_pool.cpp
+        modules/render/d3d12/renderer_resource_states.cpp)
+    target_compile_features(northstarcpp_d3d12_texture_pool_smoke PRIVATE cxx_std_17)
+    target_link_libraries(northstarcpp_d3d12_texture_pool_smoke PRIVATE d3d12 dxgi)
+    add_test(NAME northstarcpp_d3d12_texture_pool
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d12_texture_pool_smoke>")
+    set_tests_properties(northstarcpp_d3d12_texture_pool PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 60)
     add_executable(northstarcpp_d3d12_smoke
         "${PROJECT_SOURCE_DIR}/tests/render_d3d12_smoke.cpp")
     target_include_directories(northstarcpp_d3d12_smoke PRIVATE "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
@@ -105,6 +184,180 @@ if(BUILD_TESTING)
         COMMAND "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
                 "$<TARGET_FILE:northstarcpp_render_d3d12>" --stress)
     set_tests_properties(northstarcpp_d3d12_warp_stress PROPERTIES TIMEOUT 120)
+
+    # Optional visual effects must be validated with real GPU command
+    # execution, not only HLSL compilation or CPU scene checks.
+    add_test(NAME northstarcpp_d3d12_postfx_shadow_warp
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>")
+    set_tests_properties(northstarcpp_d3d12_postfx_shadow_warp
+        PROPERTIES TIMEOUT 120)
+    add_test(NAME northstarcpp_d3d12_postfx_shadow_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_postfx_shadow_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+
+    add_test(NAME northstarcpp_d3d12_csm_hdr_warp
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>")
+    set_tests_properties(northstarcpp_d3d12_csm_hdr_warp
+        PROPERTIES TIMEOUT 140)
+    add_test(NAME northstarcpp_d3d12_csm_hdr_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_csm_hdr_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+
+    # Physically aliased G-buffer Normal / Bloom, validated with native GPU
+    # execution, readback and resize rather than CPU lifetime tests alone.
+    add_test(NAME northstarcpp_d3d12_transient_alias_warp
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>")
+    set_tests_properties(northstarcpp_d3d12_transient_alias_warp
+        PROPERTIES TIMEOUT 140)
+    add_test(NAME northstarcpp_d3d12_transient_alias_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_transient_alias_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+    add_test(NAME northstarcpp_d3d12_transient_alias_stress_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_HDR=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware --stress)
+    set_tests_properties(northstarcpp_d3d12_transient_alias_stress_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_test(NAME northstarcpp_d3d12_transient_alias_ldr_warp
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_DISABLE_FXAA=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>")
+    set_tests_properties(northstarcpp_d3d12_transient_alias_ldr_warp
+        PROPERTIES TIMEOUT 140)
+
+    # Resource-state acceptance for PostFX composition permutations.
+    add_test(NAME northstarcpp_d3d12_hdr_no_fxaa_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_HDR=1
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_ENABLE_PCSS=1
+            NORTHSTARCPP_DISABLE_FXAA=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_hdr_no_fxaa_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+    add_test(NAME northstarcpp_d3d12_bloom_no_fxaa_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_HDR=0
+            NORTHSTARCPP_ENABLE_BLOOM=1
+            NORTHSTARCPP_ENABLE_SHADOWS=1
+            NORTHSTARCPP_DISABLE_FXAA=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_bloom_no_fxaa_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+    add_test(NAME northstarcpp_d3d12_no_postfx_hardware
+        COMMAND "${CMAKE_COMMAND}" -E env
+            NORTHSTARCPP_ENABLE_HDR=0
+            NORTHSTARCPP_ENABLE_BLOOM=0
+            NORTHSTARCPP_ENABLE_SHADOWS=0
+            NORTHSTARCPP_DISABLE_FXAA=1
+            "$<TARGET_FILE:northstarcpp_d3d12_smoke>"
+            "$<TARGET_FILE:northstarcpp_render_d3d12>" --hardware)
+    set_tests_properties(northstarcpp_d3d12_no_postfx_hardware
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 100)
+endif()
+
+# Backend-independent scheduling contract and smoke coverage.
+if(BUILD_TESTING)
+    add_executable(northstarcpp_render_graph_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_graph_smoke.cpp")
+    target_compile_features(northstarcpp_render_graph_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_render_graph
+        COMMAND "$<TARGET_FILE:northstarcpp_render_graph_smoke>")
+    # Vulkan synchronization2 CPU contract is optional: the active runtime
+    # has D3D11/D3D12 providers but no Vulkan engine.render implementation.
+    find_path(NORTHSTARCPP_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+        PATHS "$ENV{VULKAN_SDK}/Include" "$ENV{VULKAN_SDK}/include"
+              "C:/msys64/mingw64/include" "C:/VulkanSDK/Include")
+    if(NORTHSTARCPP_VULKAN_INCLUDE_DIR)
+        add_executable(northstarcpp_render_graph_vulkan_sync_smoke
+            "${PROJECT_SOURCE_DIR}/tests/render_graph_vulkan_sync_smoke.cpp")
+        target_include_directories(northstarcpp_render_graph_vulkan_sync_smoke PRIVATE
+            "${NORTHSTARCPP_VULKAN_INCLUDE_DIR}")
+        target_compile_features(northstarcpp_render_graph_vulkan_sync_smoke PRIVATE cxx_std_17)
+        add_test(NAME northstarcpp_render_graph_vulkan_sync
+            COMMAND "$<TARGET_FILE:northstarcpp_render_graph_vulkan_sync_smoke>")
+    endif()
+    add_executable(northstarcpp_render_transient_resource_planner_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_transient_resource_planner_smoke.cpp")
+    target_compile_features(northstarcpp_render_transient_resource_planner_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_render_transient_resource_planner
+        COMMAND "$<TARGET_FILE:northstarcpp_render_transient_resource_planner_smoke>")
+
+    add_executable(northstarcpp_d3d12_pass_graph_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_d3d12_pass_graph_smoke.cpp")
+    target_compile_features(northstarcpp_d3d12_pass_graph_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_d3d12_pass_graph
+        COMMAND "$<TARGET_FILE:northstarcpp_d3d12_pass_graph_smoke>")
+
+    add_executable(northstarcpp_deferred_math_smoke
+        "${PROJECT_SOURCE_DIR}/tests/deferred_math_smoke.cpp")
+    target_compile_features(northstarcpp_deferred_math_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_deferred_math
+        COMMAND "$<TARGET_FILE:northstarcpp_deferred_math_smoke>")
+    add_executable(northstarcpp_render_tiled_lights_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_tiled_lights_smoke.cpp")
+    target_compile_features(northstarcpp_render_tiled_lights_smoke PRIVATE cxx_std_17)
+    target_include_directories(northstarcpp_render_tiled_lights_smoke PRIVATE
+        "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}")
+    target_link_libraries(northstarcpp_render_tiled_lights_smoke PRIVATE
+        northstarcpp_math)
+    add_test(NAME northstarcpp_render_tiled_lights
+        COMMAND "$<TARGET_FILE:northstarcpp_render_tiled_lights_smoke>")
+    add_executable(northstarcpp_render_cascaded_shadows_smoke
+        "${PROJECT_SOURCE_DIR}/tests/render_cascaded_shadows_smoke.cpp")
+    target_compile_features(northstarcpp_render_cascaded_shadows_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_render_cascaded_shadows
+        COMMAND "$<TARGET_FILE:northstarcpp_render_cascaded_shadows_smoke>")
 endif()
 
 northstarcpp_module(northstarcpp_audio_winmm audio winmm modules/audio/winmm/winmm.cpp)
@@ -197,7 +450,8 @@ target_compile_features(northstarcpp_models PUBLIC cxx_std_17)
 add_library(northstarcpp_animation STATIC
     modules/animation/animation.cpp
     modules/animation/camera_track.cpp
-    modules/animation/skeletal_animation.cpp)
+    modules/animation/skeletal_animation.cpp
+    modules/animation/character_facing.cpp)
 northstarcpp_unprefix_module_output(northstarcpp_animation)
 target_include_directories(northstarcpp_animation PUBLIC
     "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
@@ -215,6 +469,72 @@ if(BUILD_TESTING)
     add_test(NAME northstarcpp_skeletal_animation
         COMMAND "$<TARGET_FILE:northstarcpp_skeletal_animation_smoke>")
     set_tests_properties(northstarcpp_skeletal_animation PROPERTIES TIMEOUT 20)
+    add_executable(northstarcpp_character_facing_smoke
+        "${PROJECT_SOURCE_DIR}/tests/character_facing_smoke.cpp")
+    target_link_libraries(northstarcpp_character_facing_smoke PRIVATE
+        northstarcpp_animation northstarcpp_math)
+    target_link_options(northstarcpp_character_facing_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_character_facing
+        COMMAND "$<TARGET_FILE:northstarcpp_character_facing_smoke>")
+    set_tests_properties(northstarcpp_character_facing PROPERTIES TIMEOUT 20)
+
+    add_executable(northstarcpp_material_functions_smoke
+        "${PROJECT_SOURCE_DIR}/tests/material_functions_smoke.cpp")
+    target_link_libraries(northstarcpp_material_functions_smoke PRIVATE northstarcpp_runtime)
+    target_link_options(northstarcpp_material_functions_smoke PRIVATE -static)
+    add_dependencies(northstarcpp_material_functions_smoke
+        northstarcpp_assets_directory)
+    add_test(NAME northstarcpp_material_functions
+        COMMAND "${CMAKE_COMMAND}"
+        -E env
+            "NORTHSTARCPP_ASSETS_PLUGIN=$<TARGET_FILE:northstarcpp_assets_directory>"
+            "$<TARGET_FILE:northstarcpp_material_functions_smoke>"
+            "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/assets")
+    set_tests_properties(northstarcpp_material_functions PROPERTIES TIMEOUT 30)
+
+    add_executable(northstarcpp_material_graph_typed_smoke
+        "${PROJECT_SOURCE_DIR}/tests/material_graph_typed_smoke.cpp")
+    target_link_libraries(northstarcpp_material_graph_typed_smoke PRIVATE northstarcpp_runtime)
+    target_link_options(northstarcpp_material_graph_typed_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_material_graph_typed
+        COMMAND "$<TARGET_FILE:northstarcpp_material_graph_typed_smoke>")
+    set_tests_properties(northstarcpp_material_graph_typed PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        add_executable(northstarcpp_material_graph_hlsl_smoke
+            "${PROJECT_SOURCE_DIR}/tests/material_graph_hlsl_smoke.cpp")
+        target_include_directories(northstarcpp_material_graph_hlsl_smoke PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/modules/render/shared")
+        target_link_libraries(northstarcpp_material_graph_hlsl_smoke PRIVATE
+            northstarcpp_runtime d3dcompiler_47)
+        target_link_options(northstarcpp_material_graph_hlsl_smoke PRIVATE -static)
+        add_test(NAME northstarcpp_material_graph_hlsl
+            COMMAND "$<TARGET_FILE:northstarcpp_material_graph_hlsl_smoke>"
+                "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/assets")
+        set_tests_properties(northstarcpp_material_graph_hlsl PROPERTIES TIMEOUT 30)
+    endif()
+
+    add_executable(northstarcpp_material_resources_smoke
+        "${PROJECT_SOURCE_DIR}/tests/material_resources_smoke.cpp")
+    target_link_libraries(northstarcpp_material_resources_smoke PRIVATE
+        northstarcpp_runtime)
+    target_link_options(northstarcpp_material_resources_smoke PRIVATE -static)
+    add_dependencies(northstarcpp_material_resources_smoke
+        northstarcpp_assets_directory)
+    add_test(NAME northstarcpp_material_resources
+        COMMAND "${CMAKE_COMMAND}" -E env
+        "NORTHSTARCPP_ASSETS_PLUGIN=$<TARGET_FILE:northstarcpp_assets_directory>"
+        "$<TARGET_FILE:northstarcpp_material_resources_smoke>"
+        "${PROJECT_SOURCE_DIR}/sharedAssets")
+    set_tests_properties(northstarcpp_material_resources PROPERTIES TIMEOUT 50)
+    add_executable(northstarcpp_character_namespace_rebase_smoke
+        "${PROJECT_SOURCE_DIR}/tests/character_namespace_rebase_smoke.cpp")
+    target_include_directories(northstarcpp_character_namespace_rebase_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/models")
+    target_link_options(northstarcpp_character_namespace_rebase_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_character_namespace_rebase
+        COMMAND "$<TARGET_FILE:northstarcpp_character_namespace_rebase_smoke>")
+    set_tests_properties(northstarcpp_character_namespace_rebase PROPERTIES TIMEOUT 15)
+
     add_executable(northstarcpp_skeletal_asset_interop_smoke
         "${PROJECT_SOURCE_DIR}/tests/skeletal_asset_interop_smoke.cpp")
     target_link_libraries(northstarcpp_skeletal_asset_interop_smoke PRIVATE
@@ -228,6 +548,15 @@ if(BUILD_TESTING)
         "$<TARGET_FILE:northstarcpp_skeletal_asset_interop_smoke>"
         "${PROJECT_SOURCE_DIR}/sharedAssets")
     set_tests_properties(northstarcpp_skeletal_asset_interop PROPERTIES TIMEOUT 45)
+    # Real game pipeline: YMT + YDD + YCD + YMAT + YTD -> skinned renderer.
+    # WARP makes this a reproducible hardware-independent acceptance test.
+    add_test(NAME northstarcpp_project_character_warp
+        COMMAND "$<TARGET_FILE:northstarcpp_player>"
+        --warp --character-smoke --explore
+        --scene "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/main.nscn"
+        --shared-assets "${PROJECT_SOURCE_DIR}/sharedAssets")
+    set_tests_properties(northstarcpp_project_character_warp PROPERTIES TIMEOUT 110)
+
 
 endif()
 
@@ -260,7 +589,10 @@ target_sources(northstarcpp_runtime PRIVATE
     modules/host/perlin_service.cpp
     modules/host/geometry_service.cpp
     modules/host/provider_inspector.cpp
-    modules/host/geometry_scene.cpp)
+    modules/host/geometry_scene.cpp
+    modules/material/material.cpp
+    modules/material/material_graph.cpp
+    modules/material/material_functions.cpp)
 northstarcpp_unprefix_module_output(northstarcpp_runtime)
 target_include_directories(northstarcpp_runtime PUBLIC
     "$<BUILD_INTERFACE:${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}>"
@@ -268,6 +600,7 @@ target_include_directories(northstarcpp_runtime PUBLIC
 target_include_directories(northstarcpp_runtime PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/modules/host"
     "${CMAKE_CURRENT_SOURCE_DIR}/modules/shared"
+    "${NORTHSTARCPP_VENDOR_ROOT}/bcdec"
     "${northstarcpp_engine_sources}")
 northstarcpp_builtin_module(northstarcpp_runtime perlin improved modules/perlin/improved/improved.cpp)
 target_sources(northstarcpp_runtime PRIVATE
@@ -303,6 +636,9 @@ target_include_directories(northstarcpp_runtime SYSTEM PRIVATE "${NORTHSTARCPP_V
 target_link_libraries(northstarcpp_runtime PUBLIC northstarcpp_math
     northstarcpp_core northstarcpp_models northstarcpp_animation
     PRIVATE northstarcpp_blake3 "$<BUILD_INTERFACE:ZLIB::ZLIB>" "$<INSTALL_INTERFACE:NorthStarCpp::zlib>")
+if(WIN32)
+    target_link_libraries(northstarcpp_runtime PUBLIC windowscodecs ole32)
+endif()
 target_compile_features(northstarcpp_runtime PUBLIC cxx_std_17)
 
 if(BUILD_TESTING)
@@ -558,17 +894,63 @@ if(BUILD_TESTING)
     # Project gameplay rules are tested without requiring the V8 SDK.
     find_program(NORTHSTARCPP_NODE_EXECUTABLE NAMES node)
     if(NORTHSTARCPP_NODE_EXECUTABLE)
+        add_test(NAME northstarcpp_entity_event_batch
+            COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/entity_event_batch_smoke.cjs")
+        set_tests_properties(northstarcpp_entity_event_batch PROPERTIES TIMEOUT 15)
         add_test(NAME northstarcpp_project_gameplay_scripts
             COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
                 "${PROJECT_SOURCE_DIR}/tests/gameplay_scripts_smoke.cjs")
         set_tests_properties(northstarcpp_project_gameplay_scripts
             PROPERTIES TIMEOUT 15)
+        add_test(NAME northstarcpp_shared_camera_script
+            COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/gameplay_scripts_smoke.cjs" --camera-only)
+        set_tests_properties(northstarcpp_shared_camera_script
+            PROPERTIES TIMEOUT 15)
+        # Guard SDK editor autocomplete against changes in the canonical
+        # runtime enum classes; no handwritten duplicate key tables.
+        add_test(NAME northstarcpp_input_typings_sync
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/dev/generate_input_typings.py" --check)
+        set_tests_properties(northstarcpp_input_typings_sync
+            PROPERTIES TIMEOUT 15)
+        add_test(NAME northstarcpp_input_enum_classes
+            COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/input_enum_classes_smoke.cjs")
+        set_tests_properties(northstarcpp_input_enum_classes
+            PROPERTIES TIMEOUT 15)
+        add_test(NAME northstarcpp_scene_script_sdk
+            COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/scene_script_sdk_smoke.cjs")
+        set_tests_properties(northstarcpp_scene_script_sdk
+            PROPERTIES TIMEOUT 15)
+        add_test(NAME northstarcpp_declarative_player_scripts
+            COMMAND "${NORTHSTARCPP_NODE_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/gameplay_scripts_smoke.cjs" --player-only)
+        set_tests_properties(northstarcpp_declarative_player_scripts
+            PROPERTIES TIMEOUT 20)
+
     endif()
 
     add_executable(northstarcpp_scripting_smoke
         "${PROJECT_SOURCE_DIR}/tests/scripting_smoke.cpp")
     target_link_libraries(northstarcpp_scripting_smoke PRIVATE northstarcpp_runtime)
     target_link_options(northstarcpp_scripting_smoke PRIVATE -static)
+    if(TARGET northstarcpp_scripting_v8_sidecar)
+        add_executable(northstarcpp_v8_entity_event_abi_smoke
+            "${PROJECT_SOURCE_DIR}/tests/v8_entity_event_abi_smoke.cpp")
+        target_link_libraries(northstarcpp_v8_entity_event_abi_smoke PRIVATE
+            northstarcpp_runtime)
+        target_link_options(northstarcpp_v8_entity_event_abi_smoke PRIVATE -static)
+        add_dependencies(northstarcpp_v8_entity_event_abi_smoke
+            northstarcpp_scripting_v8_sidecar)
+        add_test(NAME northstarcpp_v8_entity_event_abi COMMAND
+            "${CMAKE_COMMAND}" -E env
+            "NORTHSTARCPP_SCRIPTING_PLUGIN=$<TARGET_FILE:northstarcpp_scripting_v8_sidecar>"
+            "$<TARGET_FILE:northstarcpp_v8_entity_event_abi_smoke>")
+        set_tests_properties(northstarcpp_v8_entity_event_abi PROPERTIES TIMEOUT 35)
+    endif()
     if(TARGET northstarcpp_scripting_v8_sidecar)
         add_dependencies(northstarcpp_scripting_smoke northstarcpp_scripting_v8_sidecar)
     endif()
@@ -712,6 +1094,7 @@ endif()
 add_library(northstarcpp_editor_tools STATIC
     modules/editor/editor_tools.cpp
     modules/editor/editor_prefab.cpp
+    modules/editor/editor_prefab_composition.cpp
     modules/editor/editor_camera.cpp
     modules/editor/editor_mesh_picking.cpp
     modules/editor/editor_asset_thumbnails.cpp
@@ -756,9 +1139,28 @@ add_library(northstarcpp_content_browser_qt STATIC
     modules/editor/qt_content_browser.cpp
     modules/editor/qt_asset_preview_dialog.hpp
     modules/editor/qt_asset_preview_dialog.cpp
+    modules/editor/qt_material_authoring.cpp
+    modules/editor/qt_material_instances.cpp
+    modules/editor/qt_material_function_editor.cpp
+    modules/editor/qt_asset_warnings.hpp
+    modules/editor/qt_asset_warnings.cpp
     modules/editor/editor_asset_material_source.hpp
     modules/editor/editor_asset_material_source.cpp)
 set_target_properties(northstarcpp_content_browser_qt PROPERTIES AUTOMOC ON)
+if(BUILD_TESTING)
+    add_executable(northstarcpp_qt_asset_warnings_smoke
+        "${PROJECT_SOURCE_DIR}/tests/qt_asset_warnings_smoke.cpp"
+        modules/editor/qt_asset_warnings.cpp)
+    target_include_directories(northstarcpp_qt_asset_warnings_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
+    target_link_libraries(northstarcpp_qt_asset_warnings_smoke PRIVATE Qt6::Widgets)
+    target_compile_features(northstarcpp_qt_asset_warnings_smoke PRIVATE cxx_std_17)
+    add_test(NAME northstarcpp_qt_asset_warnings
+        COMMAND "$<TARGET_FILE:northstarcpp_qt_asset_warnings_smoke>")
+    set_tests_properties(northstarcpp_qt_asset_warnings PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 35)
+endif()
+
 # Embed all four project folder icons into both standalone Asset Browser and
 # the integrated Editor dock. Installed builds do not need loose artwork.
 qt_add_resources(northstarcpp_content_browser_qt northstar_folder_icons
@@ -776,6 +1178,25 @@ target_link_libraries(northstarcpp_content_browser_qt PUBLIC
     Qt6::Widgets Qt6::Concurrent northstarcpp_asset_catalog
     PRIVATE northstarcpp_editor_tools)
 target_compile_features(northstarcpp_content_browser_qt PUBLIC cxx_std_17)
+if(BUILD_TESTING)
+    add_executable(northstarcpp_qt_asset_preview_warnings_smoke
+        "${PROJECT_SOURCE_DIR}/tests/qt_asset_preview_warnings_smoke.cpp")
+    target_include_directories(northstarcpp_qt_asset_preview_warnings_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
+    target_link_libraries(northstarcpp_qt_asset_preview_warnings_smoke PRIVATE
+        northstarcpp_content_browser_qt northstarcpp_editor_tools
+        northstarcpp_runtime Qt6::Widgets)
+    add_test(NAME northstarcpp_qt_asset_preview_warnings
+        COMMAND "$<TARGET_FILE:northstarcpp_qt_asset_preview_warnings_smoke>")
+    if(WIN32)
+        set_tests_properties(northstarcpp_qt_asset_preview_warnings PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=windows" TIMEOUT 45)
+    else()
+        set_tests_properties(northstarcpp_qt_asset_preview_warnings PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45)
+    endif()
+endif()
+
 
 add_executable(northstarcpp_asset_browser WIN32
     modules/editor/qt_asset_browser_main.cpp)
@@ -823,6 +1244,29 @@ if(BUILD_TESTING)
         COMMAND "$<TARGET_FILE:northstarcpp_asset_catalog_smoke>"
             "${PROJECT_BINARY_DIR}/asset_catalog_smoke"
             "${PROJECT_SOURCE_DIR}/sharedAssets")
+    add_executable(northstarcpp_prefab_browser_smoke
+        "${PROJECT_SOURCE_DIR}/tests/prefab_browser_smoke.cpp")
+    target_include_directories(northstarcpp_prefab_browser_smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/editor")
+    target_link_libraries(northstarcpp_prefab_browser_smoke PRIVATE
+        northstarcpp_asset_catalog northstarcpp_editor_tools Qt6::Gui)
+    add_test(NAME northstarcpp_prefab_browser
+        COMMAND "$<TARGET_FILE:northstarcpp_prefab_browser_smoke>"
+            "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform")
+    set_tests_properties(northstarcpp_prefab_browser
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    add_test(NAME northstarcpp_prefab_composition_qt
+        COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>"
+            --prefab-composition-smoke
+            --content "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/assets")
+    set_tests_properties(northstarcpp_prefab_composition_qt
+        PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(NAME northstarcpp_prefab_cards_qt
+        COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>"
+            --prefab-cards-smoke
+            --content "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/assets")
+    set_tests_properties(northstarcpp_prefab_cards_qt
+        PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
     add_test(NAME northstarcpp_content_browser_qt
         COMMAND "$<TARGET_FILE:${northstarcpp_browser_test_target}>" --smoke)
     add_test(NAME northstarcpp_asset_cards_qt
@@ -864,6 +1308,16 @@ add_executable(northstarcpp_editor_qt WIN32
     modules/editor/qt_editor_main.cpp
     modules/editor/qt_editor_window.hpp
     modules/editor/qt_editor_window.cpp
+    modules/editor/qt_material_authoring.hpp
+    modules/editor/qt_material_instances.hpp
+    modules/editor/qt_material_instance_dialog.cpp
+    modules/editor/qt_material_graph_editor.hpp
+    modules/editor/qt_material_graph_editor.cpp
+    modules/editor/qt_material_graph_clipboard.cpp
+    modules/editor/qt_material_graph_groups.cpp
+    modules/editor/qt_material_function_smoke.cpp
+    modules/editor/qt_material_gpu_preview.hpp
+    modules/editor/qt_material_gpu_preview.cpp
     modules/editor/qt_editor_viewport.hpp
     modules/editor/qt_editor_viewport.cpp)
 set_target_properties(northstarcpp_editor_qt PROPERTIES
@@ -886,6 +1340,17 @@ target_link_options(northstarcpp_editor_qt PRIVATE -static)
 # standalone Asset Browser executable to be rebuilt or replaced.
 install(TARGETS northstarcpp_editor_qt RUNTIME DESTINATION bin COMPONENT Runtime)
 if(BUILD_TESTING)
+    add_test(NAME northstarcpp_qt_material_instance_authoring
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --material-instance-smoke)
+    set_tests_properties(northstarcpp_qt_material_instance_authoring PROPERTIES
+        TIMEOUT 45)
+    add_test(NAME northstarcpp_qt_material_function_gpu
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --material-function-smoke)
+    set_tests_properties(northstarcpp_qt_material_function_gpu PROPERTIES TIMEOUT 75)
+    add_test(NAME northstarcpp_qt_material_graph_authoring
+        COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --material-graph-smoke)
+    set_tests_properties(northstarcpp_qt_material_graph_authoring PROPERTIES
+        TIMEOUT 45)
     add_test(NAME northstarcpp_qt_editor_authoring
         COMMAND "$<TARGET_FILE:northstarcpp_editor_qt>" --smoke)
     if(WIN32)
@@ -1017,6 +1482,19 @@ if(BUILD_TESTING)
     set_tests_properties(northstarcpp_bullet_residency northstarcpp_jolt_residency
         PROPERTIES TIMEOUT 45)
 
+    add_executable(northstarcpp_prefab_composition_smoke
+        "${PROJECT_SOURCE_DIR}/tests/prefab_composition_smoke.cpp")
+    target_link_libraries(northstarcpp_prefab_composition_smoke PRIVATE
+        northstarcpp_editor_tools)
+    add_dependencies(northstarcpp_prefab_composition_smoke
+        northstarcpp_assets_directory)
+    set_target_properties(northstarcpp_prefab_composition_smoke
+        PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
+    add_test(NAME northstarcpp_prefab_composition
+        COMMAND "$<TARGET_FILE:northstarcpp_prefab_composition_smoke>"
+            "${PROJECT_SOURCE_DIR}")
+    set_tests_properties(northstarcpp_prefab_composition
+        PROPERTIES TIMEOUT 50 WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
     add_executable(northstarcpp_editor_prefab_smoke
         "${PROJECT_SOURCE_DIR}/tests/editor_prefab_smoke.cpp")
     target_link_libraries(northstarcpp_editor_prefab_smoke PRIVATE northstarcpp_editor_tools)
@@ -1039,7 +1517,9 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     add_test(NAME northstarcpp_editor_camera_picking COMMAND northstarcpp_editor_camera_smoke)
     add_executable(northstarcpp_editor_asset_thumbnails_smoke
-        "${PROJECT_SOURCE_DIR}/tests/editor_asset_thumbnails_smoke.cpp")
+        "${PROJECT_SOURCE_DIR}/tests/editor_asset_thumbnails_smoke.cpp"
+        modules/editor/editor_asset_material_source.cpp
+        modules/editor/asset_catalog.cpp)
     target_link_libraries(northstarcpp_editor_asset_thumbnails_smoke PRIVATE northstarcpp_editor_tools)
     set_target_properties(northstarcpp_editor_asset_thumbnails_smoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
@@ -1161,6 +1641,44 @@ if(BUILD_TESTING)
         set_tests_properties(northstarcpp_logger_application_lifecycle
             PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
     endif()
+    # Pure C++ boot diagnostics, runnable without a game window or GPU.
+    add_executable(northstarcpp_startup_report_smoke
+        "${PROJECT_SOURCE_DIR}/tests/startup_report_smoke.cpp")
+    add_test(NAME northstarcpp_startup_report
+        COMMAND "$<TARGET_FILE:northstarcpp_startup_report_smoke>"
+            "${PROJECT_BINARY_DIR}/startup-report-qa.json")
+    set_tests_properties(northstarcpp_startup_report PROPERTIES TIMEOUT 20)
+
+    # Full native logger and Player startup reporting through both file sinks.
+    if(Python3_EXECUTABLE AND WIN32)
+        add_test(NAME northstarcpp_startup_report_runtime
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/startup_report_runtime_smoke.py"
+                "$<TARGET_FILE:northstarcpp_player>"
+                "${PROJECT_SOURCE_DIR}/Projects/NorthStarFirstPersonPlatform/main.nscn"
+                "${PROJECT_SOURCE_DIR}/sharedAssets")
+        set_tests_properties(northstarcpp_startup_report_runtime
+            PROPERTIES TIMEOUT 105)
+    endif()
+
+    # CPU frame metrics: optional diagnostics, never part of the provider ABI.
+    add_executable(northstarcpp_frame_profiler_smoke
+        "${PROJECT_SOURCE_DIR}/tests/frame_profiler_smoke.cpp")
+    add_test(NAME northstarcpp_frame_profiler
+        COMMAND northstarcpp_frame_profiler_smoke)
+    set_tests_properties(northstarcpp_frame_profiler PROPERTIES TIMEOUT 30)
+
+    # Standalone cache regression: no plugin DLL, GPU or runtime linkage needed.
+    add_executable(northstarcpp_asset_streaming_internal_smoke
+        "${PROJECT_SOURCE_DIR}/tests/asset_streaming_internal_smoke.cpp"
+        modules/host/asset_streaming.cpp)
+    target_include_directories(northstarcpp_asset_streaming_internal_smoke PRIVATE
+        "${PROJECT_SOURCE_DIR}/engine/northstarcpp/modules/api/include")
+    target_link_options(northstarcpp_asset_streaming_internal_smoke PRIVATE -static)
+    add_test(NAME northstarcpp_asset_streaming_internal
+        COMMAND northstarcpp_asset_streaming_internal_smoke)
+    set_tests_properties(northstarcpp_asset_streaming_internal PROPERTIES TIMEOUT 30)
+
     add_executable(northstarcpp_assets_smoke "${PROJECT_SOURCE_DIR}/tests/assets_smoke.cpp")
     target_link_libraries(northstarcpp_assets_smoke PRIVATE northstarcpp_runtime)
     target_link_options(northstarcpp_assets_smoke PRIVATE -static)
@@ -1325,6 +1843,24 @@ if(BUILD_TESTING)
     add_test(NAME northstarcpp_camera_d3d11
         COMMAND northstarcpp_camera_render_smoke "${PROJECT_SOURCE_DIR}/sharedAssets")
     set_tests_properties(northstarcpp_camera_d3d11 PROPERTIES TIMEOUT 45)
+    if(Python3_EXECUTABLE)
+        add_executable(northstarcpp_optional_asset_recovery_smoke
+            "${PROJECT_SOURCE_DIR}/tests/optional_asset_recovery_smoke.cpp")
+        target_include_directories(northstarcpp_optional_asset_recovery_smoke PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/modules/viewport")
+        target_link_libraries(northstarcpp_optional_asset_recovery_smoke PRIVATE
+            northstarcpp_viewport user32)
+        add_dependencies(northstarcpp_optional_asset_recovery_smoke
+            northstarcpp_render_d3d11 northstarcpp_assets_directory)
+        set_target_properties(northstarcpp_optional_asset_recovery_smoke PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
+        add_test(NAME northstarcpp_optional_asset_recovery
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/optional_asset_recovery_smoke.py"
+                "$<TARGET_FILE:northstarcpp_optional_asset_recovery_smoke>"
+                "${PROJECT_SOURCE_DIR}/sharedAssets")
+        set_tests_properties(northstarcpp_optional_asset_recovery PROPERTIES TIMEOUT 60)
+    endif()
     if(EXISTS "${PROJECT_SOURCE_DIR}/Projects/NorthStar_FPS_Test/assets/textures/world_surfaces_runtime.ytd")
         add_test(NAME northstarcpp_world_surfaces_gpu
             COMMAND northstarcpp_camera_render_smoke
@@ -1435,6 +1971,24 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/tests/player_bundled_scripting_smoke.py"
                 "$<TARGET_FILE:northstarcpp_player>")
         set_tests_properties(northstarcpp_player_bundled_scripting
+            PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        add_test(NAME northstarcpp_player_scene_runtime
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/player_scene_runtime_smoke.py"
+                "$<TARGET_FILE:northstarcpp_player>")
+        set_tests_properties(northstarcpp_player_scene_runtime
+            PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        add_test(NAME northstarcpp_player_prefab_runtime
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/player_prefab_runtime_smoke.py"
+                "$<TARGET_FILE:northstarcpp_player>")
+        set_tests_properties(northstarcpp_player_prefab_runtime
+            PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        add_test(NAME northstarcpp_player_pistol_runtime
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/player_pistol_runtime_smoke.py"
+                "$<TARGET_FILE:northstarcpp_player>")
+        set_tests_properties(northstarcpp_player_pistol_runtime
             PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     endif()
     # Qt Editor hands an actual saved NSCN to the standalone Game Player.

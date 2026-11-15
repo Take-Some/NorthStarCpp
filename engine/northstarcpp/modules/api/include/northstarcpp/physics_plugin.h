@@ -67,3 +67,17 @@ typedef struct NorthStarPhysicsResidencyApi {
 } NorthStarPhysicsResidencyApi;
 typedef const NorthStarPhysicsResidencyApi*
     (*NorthStarPhysicsGetResidencyApi)(uint32_t requested_version);
+
+
+// Optional runtime rigid-body lifecycle extension. Stable, append-only body
+// indices; removal leaves a tombstone until the world is destroyed. Legacy
+// NORTHSTARCPP_PHYSICS_ABI 4 function tables remain unchanged.
+#define NORTHSTARCPP_PHYSICS_RUNTIME_ABI 1u
+#define NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI 0x50485202u
+typedef struct NorthStarPhysicsRuntimeApi {
+    uint32_t abi_version;
+    int (*add_body)(void* world, const NorthStarRigidBody* body, uint32_t* index);
+    int (*remove_body)(void* world, uint32_t index);
+} NorthStarPhysicsRuntimeApi;
+typedef const NorthStarPhysicsRuntimeApi*
+    (*NorthStarPhysicsGetRuntimeApi)(uint32_t requested_version);

@@ -41,6 +41,15 @@ public:
     void move_static(std::size_t index, Vector3 position);
     // Provider-neutral dynamic-body interaction (Bullet / Jolt).
     void apply_impulse(std::size_t index, Vector3 impulse);
+    // Transient script-owned entities use an append-only physics index.
+    // The provider must support the optional runtime extension; existing
+    // authored bodies retain their indices throughout Play mode.
+    bool supports_runtime_entities() const;
+    std::size_t spawn_runtime(SceneObject const& object);
+    void destroy_runtime(std::size_t index);
+    bool runtime_alive(std::size_t index) const;
+    std::size_t authored_object_count() const;
+    Scene const& authored_scene() const;
     // Reconcile streamed static collision bodies via optional provider API.
     // If the loaded provider lacks the extension, all original collisions
     // remain resident. Terrain and dynamic bodies are never evicted here.

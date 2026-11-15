@@ -38,6 +38,15 @@ void create_volume(Scene& scene, std::size_t selected_index);
 void create_portal(Scene& scene, std::size_t selected_index);
 std::string hierarchy_label(Scene const& scene, std::size_t index);
 
+// Authored material assignments live in the versioned scene component stream,
+// not in renderer-private memory. This preserves them across editor/player
+// scene saves, Undo/Redo, provider changes and unknown ECS component plugins.
+inline constexpr char actor_material_component_type[]="northstarcpp.editor.material";
+void assign_actor_material(Scene& scene,std::size_t actor,
+                           std::string const& virtual_material);
+std::string actor_material(Scene const& scene,std::size_t actor);
+void clear_actor_material(Scene& scene,std::size_t actor);
+
 // Snapshots are restored via EcsWorld::load, not through a Flecs-specific API.
 // Keep bounded history to prevent unbounded editor memory consumption.
 class History {

@@ -6,6 +6,8 @@
 #include <boost/property_tree/xml_parser.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <string_view>
 #include <cmath>
 #include <locale>
 #include <map>
@@ -64,6 +66,93 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
 {
     auto const ext = extension(path);
     require(ext == ".ymat", "Materials must use the native .ymat format");
+    // Both original YMAT families are native engine resources:
+    // kind 4  = XML world/material library (v1),
+    // kind 30 = JSON character/weapon material library (v1).
+    // The editor/material importer must not reject character YMAT just
+    // because its representation differs from the world-material format.
+    if(file.kind == 30) {
+        auto const doc = parse_json(std::string(file.body.begin(),file.body.end()));
+        require(doc.get<std::string>("schema","")=="northstar.ymat.v1",
+                "Unsupported character/weapon YMAT schema");
+        auto const& records=doc.get_child("materials");
+        require(records.size()==file.entries,
+                "Character/weapon YMAT entry count differs from NEF8 header");
+        std::vector<Material> result;
+        result.reserve(records.size());
+        std::set<std::string> names;
+        static const std::map<std::string,unsigned> arities{
+            {"float",1},{"float2",2},{"float3",3},{"float4",4},{"color",4}};
+        for(auto const& entry:records) {
+            require(entry.first.empty(),"Invalid YMAT materials array");
+            auto const& value=entry.second;
+            Material material;
+            material.name=value.get<std::string>("name");
+            validate_name(material.name);
+            require(names.insert(material.name).second,
+                    "Duplicate character/weapon YMAT material name");
+            material.shader=value.get<std::string>("shader");
+            require(!material.shader.empty(),"Character YMAT shader is required");
+            material.blend=value.get<std::string>("blend","opaque");
+            require(material.blend=="opaque" || material.blend=="masked" ||
+                    material.blend=="alpha","Unsupported character YMAT blend");
+            material.two_sided=value.get<bool>("two_sided",false);
+            material.alpha_cutoff=value.get<float>("alpha_cutoff",
+                material.blend=="masked" ? 0.5f :
+                material.blend=="alpha" ? 0.15f : 0.f);
+            require(std::isfinite(material.alpha_cutoff) &&
+                    material.alpha_cutoff>=0.f && material.alpha_cutoff<=1.f,
+                    "Invalid character YMAT alpha cutoff");
+            std::set<std::string> slots;
+            if(auto textures=value.get_child_optional("textures"))
+                for(auto const& item:*textures) {
+                    require(item.first.empty(),"Invalid character YMAT texture array");
+                    TextureBinding binding{
+                        item.second.get<std::string>("slot"),
+                        item.second.get<std::string>("ref")};
+                    validate_name(binding.slot);
+                    validate_reference(binding.reference);
+                    auto const at=binding.reference.find('@');
+                    require(extension(binding.reference.substr(0,at))==".ytd" &&
+                            slots.insert(binding.slot).second,
+                            "Invalid or duplicate character YMAT texture slot");
+                    // Validate the author's required flag without turning
+                    // optional references into different material types.
+                    (void)item.second.get<bool>("required",true);
+                    material.textures.push_back(std::move(binding));
+                }
+            std::set<std::string> parameter_names;
+            if(auto params=value.get_child_optional("params"))
+                for(auto const& item:*params) {
+                    require(item.first.empty(),"Invalid character YMAT parameter array");
+                    MaterialParameter param;
+                    param.name=item.second.get<std::string>("name");
+                    param.type=item.second.get<std::string>("type");
+                    validate_name(param.name);
+                    require(parameter_names.insert(param.name).second,
+                            "Duplicate character YMAT parameter");
+                    auto const arity=arities.find(param.type);
+                    require(arity!=arities.end(),"Unsupported character YMAT parameter type");
+                    auto const& encoded=item.second.get_child("value");
+                    if(encoded.empty()) {
+                        param.values.push_back(encoded.get_value<float>());
+                    } else {
+                        for(auto const& component:encoded) {
+                            require(component.first.empty(),
+                                    "Character YMAT parameter must be an array");
+                            param.values.push_back(component.second.get_value<float>());
+                        }
+                    }
+                    require(param.values.size()==arity->second &&
+                            std::all_of(param.values.begin(),param.values.end(),
+                                [](float number){return std::isfinite(number);}),
+                            "Invalid character YMAT parameter values");
+                    material.parameters.push_back(std::move(param));
+                }
+            result.push_back(std::move(material));
+        }
+        return result;
+    }
     auto const kind = file.metadata.get<std::string>("content_kind", "");
     require(file.kind == 4 && kind == "material_library",
         "Expected a native YMAT material library (NEF8 kind 4)");
@@ -146,11 +235,129 @@ std::vector<Material> load_materials_from_bytes(
     return detail::parse_materials(detail::parse_list_file(bytes),path);
 }
 
+// Native binary NEF8/YDD dictionary (runtime mesh-parts v1).
+// Layout: 120-byte header; name table; geometry header (72 bytes);
+// repeated 48-byte part headers, then 32-byte render vertices,
+// 48-byte auxiliary attributes, and uint32 triangle indices.
+// Parse with bounds-checked offsets; no blind reinterpret_cast/struct alias.
+static std::vector<Drawable> parse_binary_drawables(
+    detail::ListFile const& file, std::string const& path)
+{
+    using detail::Bytes;
+    using detail::require;
+    Bytes const body(file.body);
+    auto const type=body.integer(0,4);
+    require(body.size()>=192 && body.integer(4,4)==1 &&
+        body.integer(8,4)==40 && file.entries==1 &&
+        (type==4 || type==5),
+        "Unsupported native binary YDD/YDR header");
+    auto const strings=body.integer(16,8);
+    auto const strings_size=body.integer(24,8);
+    auto const geometry=body.integer(32,8);
+    require(strings>=120 && strings_size>0 &&
+        strings<=body.size() && strings_size<=body.size()-strings &&
+        geometry>=strings+strings_size && geometry<=body.size()-72,
+        "Invalid binary drawable string/mesh offsets");
+    auto const table_end=strings+strings_size;
+    auto name_at=[&](std::uint64_t offset) {
+        require(offset < strings_size,"Invalid drawable name reference");
+        auto const start=strings+offset;
+        auto end=start;
+        while (end<table_end && body.integer(end,1)!=0) ++end;
+        require(end<table_end,"Unterminated binary drawable name");
+        auto text=body.string(start,end-start);
+        detail::validate_name(text);
+        return text;
+    };
+    auto const count=body.integer(geometry,4);
+    require(count>0 && count<=128 && body.integer(geometry+4,4)==1,
+        "Unsupported native drawable part table");
+    Drawable drawable;
+    drawable.name=name_at(0);
+    drawable.meshes.reserve(static_cast<std::size_t>(count));
+    auto cursor=geometry+72;
+    std::size_t triangle_total=0;
+    for (std::uint64_t part=0;part<count;++part) {
+        auto const descriptor_bytes=type==5 ? 52u : 48u;
+        require(cursor<=body.size() && body.size()-cursor>=descriptor_bytes,
+            "Truncated binary drawable part");
+        auto const vertices=body.integer(cursor+8,4);
+        auto const indices=body.integer(cursor+12,4);
+        auto const format=body.integer(cursor+40,4);
+        auto const extra_stride=body.integer(cursor+44,4);
+        require(vertices>0 && vertices<=200000 &&
+            indices>0 && indices%3==0 && indices<=600000 &&
+            format==1 && extra_stride==48,
+            "Unsupported native drawable vertex layout");
+        auto const vertex_bytes=vertices*80u;
+        auto const index_bytes=indices*4u;
+        auto const available=body.size()-cursor-descriptor_bytes;
+        require(vertex_bytes<=available && index_bytes<=available-vertex_bytes,
+            "Binary drawable buffers exceed decompressed size");
+        auto const vertex_base=cursor+descriptor_bytes;
+        auto const index_base=vertex_base+vertex_bytes;
+        MeshPart mesh;
+        mesh.name=name_at(body.integer(cursor,4));
+        auto const material_offset=body.integer(cursor+4,4);
+        if (material_offset!=0xFFFFFFFFu) {
+            mesh.material=body.string(strings+material_offset,
+                [&]() -> std::size_t {
+                    require(material_offset<strings_size,"Invalid YDD material offset");
+                    auto const start=strings+material_offset;
+                    auto end=start;
+                    while(end<table_end && body.integer(end,1)!=0)++end;
+                    require(end<table_end,"Unterminated YDD material reference");
+                    return static_cast<std::size_t>(end-start);
+                }());
+            detail::validate_reference(mesh.material);
+            mesh.material_required=false; // The model remains drawable without optional material packs.
+        }
+        mesh.vertices.reserve(static_cast<std::size_t>(vertices));
+        for (std::uint64_t i=0;i<vertices;++i) {
+            auto const offset=vertex_base+i*32u;
+            Vertex vertex{{
+                body.real(offset), body.real(offset+4), body.real(offset+8)
+            },{
+                body.real(offset+12), body.real(offset+16), body.real(offset+20)
+            },{
+                body.real(offset+24), body.real(offset+28)
+            }};
+            for (auto const x:vertex.position) require(std::isfinite(x),"Nonfinite YDD position");
+            for (auto const x:vertex.normal) require(std::isfinite(x),"Nonfinite YDD normal");
+            for (auto const x:vertex.uv) require(std::isfinite(x),"Nonfinite YDD UV");
+            mesh.vertices.push_back(vertex);
+        }
+        mesh.indices.reserve(static_cast<std::size_t>(indices));
+        for (std::uint64_t i=0;i<indices;++i) {
+            auto const index=body.integer(index_base+i*4u,4);
+            require(index<vertices,"YDD triangle index outside vertex buffer");
+            mesh.indices.push_back(static_cast<std::uint32_t>(index));
+        }
+        triangle_total+=static_cast<std::size_t>(indices/3);
+        require(triangle_total<=250000,"Drawable exceeds triangle budget");
+        drawable.meshes.push_back(std::move(mesh));
+        cursor=index_base+index_bytes;
+    }
+    require(cursor==body.size(),"Unexpected trailing binary drawable bytes");
+    for (std::size_t axis=0;axis<3;++axis) {
+        drawable.bounds_min[axis]=body.real(76u+axis*4u);
+        drawable.bounds_max[axis]=body.real(88u+axis*4u);
+        require(std::isfinite(drawable.bounds_min[axis]) &&
+            std::isfinite(drawable.bounds_max[axis]) &&
+            drawable.bounds_min[axis]<=drawable.bounds_max[axis],
+            "Invalid binary YDD drawable bounds");
+    }
+    return {std::move(drawable)};
+}
+
 static std::vector<Drawable> parse_drawable_dictionary(
     detail::ListFile const& file, std::string const& path)
 {
-    require(extension(path) == ".ydd", "Expected a .ydd drawable dictionary");
-    require(file.kind == 2, "Expected a drawable dictionary in YDD");
+    auto const ext=extension(path);
+    require(ext == ".ydd" || ext == ".ydr", "Expected native YDD/YDR model");
+    require(file.kind == 2, "Expected native drawable dictionary");
+    if (!file.body.empty() && file.body.front()!='{')
+        return parse_binary_drawables(file,path);
     auto const body = parse_json(std::string(file.body.begin(), file.body.end()));
     require(body.get<std::string>("schema") == "newengine.ydd.drawable_dictionary.v1" &&
         body.get<std::string>("mesh_encoding") == "newengine.ydd.runtime_mesh_parts.v1",

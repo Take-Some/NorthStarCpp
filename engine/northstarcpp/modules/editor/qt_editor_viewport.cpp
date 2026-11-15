@@ -3,6 +3,7 @@
 #include <northstarcpp/collision_service.hpp>
 #include <northstarcpp/geometry_service.hpp>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -188,6 +189,35 @@ void QtEditorViewport::setCameraPose(CameraPose pose) {
     pose.position.z=std::clamp(pose.position.z,-900000.f,900000.f);
     camera_.pose=pose;
     gpu_dirty_=true;update();
+}
+void QtEditorViewport::updateOrbitCamera() {
+    auto const forward=camera_.forward();
+    camera_.pose.position={
+        orbit_target_.x-forward.x*orbit_distance_,
+        orbit_target_.y-forward.y*orbit_distance_,
+        orbit_target_.z-forward.z*orbit_distance_
+    };
+    gpu_dirty_=true;
+    update();
+}
+void QtEditorViewport::setOrbitMode(bool enabled,Vector3 target,float distance) {
+    if(!std::isfinite(distance) || distance<=0.f)return;
+    if(!std::isfinite(target.x)||!std::isfinite(target.y)||
+       !std::isfinite(target.z))return;
+    orbit_mode_=enabled;
+    orbit_target_=target;
+    orbit_distance_=std::clamp(distance,1.1f,200.f);
+    rotating_=false;
+    held_keys_.clear();
+    fly_timer_->stop();
+    unsetCursor();
+    if(orbit_mode_)updateOrbitCamera();
+}
+void QtEditorViewport::setOrbitAngles(float yaw,float pitch) {
+    if(!std::isfinite(yaw)||!std::isfinite(pitch))return;
+    camera_.pose.yaw=std::remainder(yaw,6.283185307f);
+    camera_.pose.pitch=std::clamp(pitch,-1.45f,1.45f);
+    if(orbit_mode_)updateOrbitCamera();
 }
 void QtEditorViewport::setSelected(int index) {
     selected_=index;gpu_dirty_=true;update();
@@ -489,6 +519,14 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
 }
 void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
     previous_=event->position().toPoint();
+    if(orbit_mode_ && (event->button()==Qt::LeftButton ||
+                       event->button()==Qt::RightButton)) {
+        rotating_=true;
+        setFocus(Qt::MouseFocusReason);
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
     if(event->button()==Qt::RightButton) {
         setFocus(Qt::MouseFocusReason);
         rotating_=true;
@@ -544,7 +582,14 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
     auto current=event->position().toPoint();
     auto difference=current-previous_;
     previous_=current;
-    if(rotating_) {
+    if(orbit_mode_ && rotating_) {
+        if(!(event->buttons()&(Qt::LeftButton|Qt::RightButton))) {
+            rotating_=false;unsetCursor();return;
+        }
+        camera_.look(float(difference.x()),float(-difference.y()),.006f);
+        camera_.pose.pitch=std::clamp(camera_.pose.pitch,-1.45f,1.45f);
+        updateOrbitCamera();
+    } else if(rotating_) {
         if(!event->buttons().testFlag(Qt::RightButton)) {
             rotating_=false;held_keys_.clear();fly_timer_->stop();
             unsetCursor();return;
@@ -563,6 +608,10 @@ void QtEditorViewport::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
+    if(orbit_mode_ && (event->button()==Qt::LeftButton ||
+                       event->button()==Qt::RightButton)) {
+        rotating_=false;unsetCursor();event->accept();return;
+    }
     if(event->button()==Qt::RightButton) {
         rotating_=false;held_keys_.clear();fly_timer_->stop();unsetCursor();
         event->accept();
@@ -575,6 +624,12 @@ void QtEditorViewport::mouseReleaseEvent(QMouseEvent* event) {
 }
 void QtEditorViewport::wheelEvent(QWheelEvent* event) {
     float const notches=float(event->angleDelta().y())/120.f;
+    if(orbit_mode_) {
+        orbit_distance_=std::clamp(orbit_distance_*std::pow(.88f,notches),
+                                   1.1f,200.f);
+        updateOrbitCamera();
+        event->accept();return;
+    }
     if(rotating_)setFlySpeed(fly_speed_*std::pow(1.15f,notches));
     else camera_.dolly(notches*std::clamp(fly_speed_*.18f,.1f,75.f));
     gpu_dirty_=true;update();
@@ -629,15 +684,47 @@ void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
 void QtEditorViewport::dragEnterEvent(QDragEnterEvent* event) {
     if(event->mimeData()->hasFormat("application/x-northstar-asset-reference"))
         event->acceptProposedAction();
+    else event->ignore();
+}
+void QtEditorViewport::dragMoveEvent(QDragMoveEvent* event) {
+    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference"))
+        event->acceptProposedAction();
+    else event->ignore();
 }
 void QtEditorViewport::dropEvent(QDropEvent* event) {
-    if(!event->mimeData()->hasFormat("application/x-northstar-asset-reference"))
-        return;
-    auto raw=event->mimeData()->data("application/x-northstar-asset-reference");
-    auto reference=QString::fromUtf8(raw).trimmed();
-    if(reference.isEmpty())return;
+    if(!event->mimeData()->hasFormat("application/x-northstar-asset-reference")) {
+        event->ignore();return;
+    }
+    auto const reference=QString::fromUtf8(
+        event->mimeData()->data("application/x-northstar-asset-reference")).trimmed();
+    if(reference.isEmpty()) {event->ignore();return;}
+    auto const ray=camera_.screen_ray(float(event->position().x()),
+        float(event->position().y()),float(width()),float(height()));
     auto point=groundAt(event->position().toPoint());
-    emit assetDropped(reference,QVector3D(point.x,point.y,point.z));
+    int target=-1;
+    if(scene_) {
+        try {
+            static northstarcpp::CollisionService collision;
+            static northstarcpp::GeometryService geometry;
+            auto hit=editor_tools::hit_actor_geometry(*scene_,ray,collision,geometry);
+            float const surfaceDistance=hit?hit->distance:
+                std::numeric_limits<float>::infinity();
+            float groundDistance=std::numeric_limits<float>::infinity();
+            if(std::abs(ray.direction.y)>1.e-5f)
+                groundDistance=-ray.origin.y/ray.direction.y;
+            // The nearest surface wins, so a ray through an actor cannot
+            // accidentally place content on the floor behind it.
+            if(hit && (groundDistance<0.f ||
+                       surfaceDistance<=groundDistance+0.001f)) {
+                target=static_cast<int>(hit->index);
+                point=hit->position;
+            }
+        } catch(std::exception const& e) {
+            emit gpuUnavailable(QString::fromUtf8(e.what()));
+            event->ignore();return;
+        }
+    }
+    emit assetDropped(reference,QVector3D(point.x,point.y,point.z),target);
     event->acceptProposedAction();
 }
-}
+} // namespace northstarcpp::editor

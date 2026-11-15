@@ -1,0 +1,50 @@
+{
+  "schema": "northstar.material-function.v1",
+  "name": "Multiply Color",
+  "inputs": [
+    {
+      "name": "color",
+      "type": "vector4"
+    },
+    {
+      "name": "tint",
+      "type": "vector4"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "vector4",
+      "node": "mul"
+    },
+    {
+      "name": "alpha",
+      "type": "scalar",
+      "node": "alpha"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "color_in",
+      "op": "function_input",
+      "name": "color"
+    },
+    {
+      "id": "tint_in",
+      "op": "function_input",
+      "name": "tint"
+    },
+    {
+      "id": "mul",
+      "op": "multiply",
+      "a": "color_in",
+      "b": "tint_in"
+    },
+    {
+      "id": "alpha",
+      "op": "component",
+      "a": "mul",
+      "component": "w"
+    }
+  ]
+}
