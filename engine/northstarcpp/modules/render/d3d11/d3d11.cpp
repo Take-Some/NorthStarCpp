@@ -1,7 +1,9 @@
 // D3D11 engine.render provider ABI remains version 5.
+#include "../../shared/frame_memory_counters.hpp"
 #include "renderer_private.hpp"
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_device_api.h>
+#include <northstarcpp/render_pick_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <wrl/client.h>
 namespace {
@@ -138,6 +140,17 @@ int set_editor_grid(void* renderer,
 const NorthStarRenderEditorGridApi editor_grid_api{
     NORTHSTARCPP_RENDER_EDITOR_GRID_ABI,sizeof(NorthStarRenderEditorGridApi),
     set_editor_grid,3u};
+int read_editor_cube_id(void* renderer,std::uint32_t x,std::uint32_t y,
+                        std::int32_t* result) {
+    return guarded([&] {
+        if(!renderer || !result)
+            throw std::invalid_argument("GPU picking requires renderer and output");
+        *result=static_cast<Renderer*>(renderer)->pick_cube(x,y);
+    });
+}
+const NorthStarRenderPickApi pick_api{
+    NORTHSTARCPP_RENDER_PICK_ABI,sizeof(NorthStarRenderPickApi),
+    read_editor_cube_id};
 const NorthStarRenderApi api{create, destroy, draw, set_sky};
 int read_actual_gpu(void* renderer,NorthStarRenderDeviceInfo* result) {
     return guarded([&] {
@@ -185,6 +198,21 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if(version==NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI) {
+        auto const& api=northstarcpp::diagnostics::frame_memory::api;
+        static const NorthStarModule extension{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"Direct3D 11","5.0.0",
+            NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI,sizeof(api),&api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"Direct3D 11","5.7.0",
+            NORTHSTARCPP_RENDER_PICK_MODULE_ABI,sizeof(pick_api),
+            &pick_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI) {
         static const NorthStarModule extension{
             sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,

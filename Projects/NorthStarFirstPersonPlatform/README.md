@@ -1,167 +1,141 @@
-# NorthStar First Person Platform
+# NorthStar: First Person Protocol
 
-Standalone C++ NorthStarCpp first-person exploration sandbox, powered by the current runtime and provider-neutral APIs.
+A playable first-person training course built on **NorthStarCpp Player Framework**.
+The game uses a component-authored Pawn and Camera Rig, the native Jolt
+Character Motor, V8 project scripts and the existing ECS, asset and rendering
+providers. It does **not** rely on `SceneObject::player` or the previous
+Bullet-powered arena.
 
-## Scene
+## What to play
 
-- 60 x 60 metre solid platform made from 36 static 10 m physics tiles (top at Y=0).
-- First-person dynamic player with gravity, collision and grounded jumps.
-- Three movable rigid-body crates. The remainder of the platform is open.
-- Textured skydome sourced from YDD/YMAT/YTD via engine.assets; D3D11 background pass.
-- Asset-driven camera tuning (assets/gameplay/camera.json).
-- No enemies, weapons, score, mission objectives or required targets.
+The level is a 60 m × 60 m training platform with physics obstacles and a
+four-stage objective sequence. The objectives are implemented in
+`scripts/main.js` using the supported `@northstar/engine` SDK:
+
+1. **SIGNAL:** reach the cyan navigation beacon.
+2. **PHYSICS:** displace the yellow dynamic crate by at least 0.9 m.
+   Use E to push, or collide with the crate while moving.
+3. **TRANSIT:** reach the orange navigation beacon.
+4. **EXTRACTION:** reach the green extraction beacon and finish the course.
+
+The objective and completion time appear in the **window title** and logs.
+The script creates the three beacon markers and physical crate at start.
+No mission entities are hard-coded in the C++ runtime.
 
 ## Controls
 
-| Input | Action |
+| Key / device | Action |
 | --- | --- |
-| WASD / arrows | Move relative to the camera |
-| Mouse / right stick | Look around |
-| V | Switch first-/third-person view with an animated camera move |
-| Mouse wheel (third-person) | Smoothly zoom in/out, 1.5–12 m |
-| Space / gamepad A | Jump |
-| E / gamepad X | Push a nearby dynamic rigid body with a physical impulse |
-| Walk into crates | Push objects through actual rigid-body collision |
-| Escape / gamepad Start | Pause / restart / exit |
+| WASD / gamepad left stick | Character movement relative to camera |
+| Mouse / right stick | Look |
+| Left Shift | Sprint (Jolt Character Motor) |
+| Space / gamepad Jump | Grounded jump |
+| E / gamepad interact | Push a nearby dynamic object |
+| V | Toggle first-person and third-person views |
+| Mouse wheel | Zoom third-person follow distance |
+| R | Restart the course |
+| Escape / gamepad Start | Pause / resume |
+| F10 | Quit |
 
-Physics interactions use the versioned provider-neutral PhysicsScene API (Bullet or Jolt).
+The player starts in **first-person view**. Camera authoring values are
+read from the selected Pawn's `northstar.gameplay.camera_rig` component.
+`scripts/playerConfig.js` defines configuration, controls and optional
+character assets, but does not create another PlayerController.
+`scripts/player/playerMovement.js` forwards input to
+`Player.move`, `Player.jump` and `Player.sprint`.
+Actual physical movement is owned by Jolt.
 
-## Run
+## Architecture
 
-Build the current NorthStarCpp player and its plugins, then from the repository root:
-
-~~~powershell
-.\out\qa-fps-dist-20261114\NorthStarCpp-0.4.0-windows-x64-Release-QA\bin\northstarcpp_player.exe --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
-~~~
-
-Or run Projects\NorthStarFirstPersonPlatform\run.cmd.
-
-## Test
-
-~~~powershell
-.\out\qa-fps-dist-20261114\NorthStarCpp-0.4.0-windows-x64-Release-QA\bin\northstarcpp_player.exe --warp --check-scene --explore --scene Projects\NorthStarFirstPersonPlatform\main.nscn
-ctest --test-dir out\fps-release-qa-20261114 -R "northstarcpp_exploration|northstarcpp_.*physics" --output-on-failure
-~~~
-
-## Packaging
-
-The game exporter recognizes game_mode=explore and passes --explore to the packaged native player; its asset folder and scene are included in the package.
-
-## Limitations
-
-The platform is made from rigid boxes, not imported terrain. Both physics providers retain an implicit infinite Y=0 floor, so leaving the visual platform does not produce a bottomless fall. The test verifies startup/rendering but not subjective input feel or performance over thousands of frames.
-
-
-## Project-owned gameplay
-
-Movement, first-person look, controller mappings, jump, push interaction,
-pause and exit are authored in `scripts/main.js`, not in the NorthStarCpp
-FPS arena implementation. The engine only exposes input, camera, physics,
-ECS and asset APIs. Gameplay changes do not require a C++ rebuild.
-
-The verified QA package includes the tested V8 sidecar development provider.
-A public release requires the independently approved native V8 build and
-clean Windows machine validation.
-
-
-## Verified QA launcher (2026-11-14)
-
-Run run.cmd for the playable example and verify.cmd for a headless
-scene-check plus real runtime initialization. Both scripts use the current
-development Player at out/fps-release-qa-20261114/northstarcpp_player.exe,
-matching the class-based @northstar/engine SDK and project scripts.
-They fail explicitly when the development Player has not been built.
-The earlier QA package is frozen and does not include the newer SDK exports.
-
-The QA package includes a tested V8 sidecar development provider; public
-release still requires signed V8 security approval, independent clean Windows
-acceptance and intellectual-property/licensing review.
-
-
-## Abby — native skeletal playable character (development build)
-
-The project-local \`scripts/playerConfig.js\` selects the namespaced
-\`characters/abby\` bundle (model, skeleton, material, textures and animation).
-To launch the current
-development Player with the complete original resource chain:
-
-    Projects\NorthStarFirstPersonPlatform\run-abby.cmd
-
-To run a headless eight-frame skinned and textured WARP rendering test:
-
-    Projects\NorthStarFirstPersonPlatform\verify-abby.cmd
-
-The Player loads Abby's 1,033-joint YMT skeleton, weighted YDD meshes,
-YCD idle/walk/jump/fall clips, YMAT character materials and YTD textures
-through engine.assets. The original FPS/first-person game handles movement,
-camera and physics. The skeletal pose is evaluated on CPU and uploaded as
-deformed vertices via the optional engine.render character ABI. The current
-D3D12 path falls back to D3D11 when the selected provider does not expose
-this character extension. Native D3D12 GPU skinning is not yet implemented.
-
-The standalone QA package assembled earlier on 2026-11-14 is immutable and
-does not automatically receive these later development changes.
-
-
-## Default player camera root script
-
-The engine evaluates these VFS scripts for camera-enabled game scenes:
-
-1. `scripts/northstar/bootstrap.js`: shared script SDK primitives.
-2. `scripts/playerCamera.js`: default engine-owned camera behavior.
-3. `scripts/main.js`: optional project gameplay and look controls.
-
-`sharedAssets/scripts/playerCamera.js` provides **V** for switching between
-first-person and third-person, a 0.45-second view transition and mouse-wheel
-third-person zoom from 1.5 to 12 metres (0.7 metres per wheel notch).
-The view starts in third-person by default, remembering the selected distance
-when switching back and forth. Fractional wheel notches are supported.
-
-To customize it, create `Projects/<YourProject>/scripts/playerCamera.js`
-and register your own camera event handlers. Its contents replace the
-engine script automatically through VFS priority, not in addition to it.
-The project may use `NorthStar.camera.createViewController` with different
-initial view, toggle key, transition and zoom limits, or use the underlying
-`engine.camera`/`engine.input` API. No C++ or DLL rebuild required.
-
-Example project override (replace entire root script):
-
-```js
-(() => {
-    const view = NorthStar.camera.createViewController({
-        initialMode: "first_person",
-        toggleKey: 67, // C
-        transitionSeconds: 0.3,
-        minDistance: 2,
-        maxDistance: 9,
-        wheelStep: 1
-    });
-    engine.on("start", () => {
-        if (engine.camera.available()) view.start();
-    });
-    engine.on("update", () => {
-        if (engine.camera.available()) view.update();
-    });
-})();
+```text
+Input Provider (Win32/XInput)
+      |
+@northstar/engine Player API
+      |
+Native PlayerController (stable Entity ID)
+      |
+Possess / Unpossess
+      |
+Pawn entity (NEF8 Scene V3)
+      +-- Character Motor --> engine.physics / Jolt
+      +-- Capsule Collider
+      +-- Camera Rig --> Camera Director
+      +-- Visual model / optional animation data
+      +-- Gameplay script --> Four-stage training course
 ```
 
-Project source directories and exported FAT/DB archives use the same
-virtual path. New/changed project overrides trigger hot reload in
-development. Scripts without their own main.js still receive the
-engine camera controller when running in a player-camera-enabled game.
+Only the Pawn component with **Auto Possess Local** is automatically selected
+at game startup. Other Pawn entities can coexist; their stable IDs can be
+possessed through the native Player API. Project scenes use NEF8 Entity V2
+records that do not serialize the old player flag.
 
-The development build resides in
-`out/fps-release-qa-20261114/northstarcpp_player.exe`, while previously
-frozen QA/production packages remain unchanged.
+Scene: `main.nscn` — 41 authored entities and the local Pawn with stable
+Entity ID **1**. The game adds seven runtime entities (three two-part
+beacons and one dynamic crate), producing 48 entities at mission start.
+The player's spawn is at **(4, 1.2, -12)**.
 
-## First runtime prefab: Pistol
+## Build, run and verify
 
-The project references the original native binary NorthStar game asset at
-`prefabs/pistol.nprefab` and its OBJ mesh at
-`sharedAssets/models/weapon/pistol/pistol.ydd`. It has real ECS identity and a
-physics-backed collider. Use `Prefab.instantiate("prefabs/pistol.nprefab",
-{position: {x:2, y:0.75, z:2}})` to spawn it in JavaScript.
+Build the latest NorthStarCpp Player and required providers from the
+current source tree. The development path used for this integration is:
 
-See `prefabs/README.md` and
-`scripts/examples/PistolSpawner.example.js`. This example is not
-automatically loaded. Equip/fire/reload behavior is not yet implemented.
+```text
+C:\Users\Kayla\Documents\NorthStar\cache\qt-pie-icons-build\northstarcpp_player.exe
+```
+
+For a different executable, set the `NORTHSTARCPP_PLAYER_EXE` environment
+variable. The launchers force the supported physics backend:
+
+```powershell
+.\Projects\NorthStarFirstPersonPlatform\run.cmd
+.\Projects\NorthStarFirstPersonPlatform\verify.cmd
+```
+
+`run.cmd` opens the game. `verify.cmd` performs a WARP startup/scene check
+and real V8/Flecs/Jolt initialization, without validating on-screen game feel.
+
+Developer regression tests:
+
+```powershell
+node tests/first_person_protocol_logic_smoke.cjs
+python tests/first_person_protocol_runtime_smoke.py C:\Users\Kayla\Documents\NorthStar\cache\qt-pie-icons-build\northstarcpp_player.exe
+```
+
+The first test checks every objective and restart deterministically.
+The second runs the actual native Player with Jolt, V8 and Flecs, verifying
+spawned entities, native Unpossess/Repossess, sprint and orderly exit.
+
+The Jolt movement test is `tests/player_framework_runtime_smoke.cpp`
+(CMake target `northstarcpp_player_framework_runtime_smoke`). It simulates
+120 physics frames, checks movement and verifies stable identity after
+Unpossess/Repossess. This executable must have access to the built Jolt
+and Flecs provider DLLs.
+
+## Migration and rollback
+
+The original scene is retained at
+`backups/main-pre-pawn-migration-2026-11-16.nscn`; the intermediate
+component-migrated version before grounding the spawn is at
+`backups/main-before-ground-spawn-2026-11-16.nscn`.
+Both are backups, not the current startup scene.
+
+`tools/migrate_fps_scene.cpp` is the one-time converter from earlier
+scene records to current NEF8 format with component-owned Pawn metadata.
+It validates the serialization round trip before accepting the output.
+
+## Current limitations
+
+- This is a **playable development vertical slice**, not a shipped game:
+  in-game mission HUD, environmental storytelling, sound design and final
+  level dressing remain to be produced.
+- The level is mostly native box geometry. The original optional Abby
+  model/animations remain configured, but complete on-screen skeletal
+  acceptance was **not** part of this regression.
+- On WARP, the renderer may be slow. The full mission was validated
+  deterministically and the real V8 lifecycle was validated over a short
+  runtime sequence; **manual end-to-end traversal has not been certified**.
+- Some optional shared materials may warn about a missing
+  `prefabs/tree_animate/textures/tree_animate.ytd` resource. Asset warnings
+  do not currently prevent launch.
+- Changes remain local in the development tree; production distributions,
+  Git commit and push are not part of this update.

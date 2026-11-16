@@ -3,6 +3,7 @@
 #pragma once
 #include "editor_camera.hpp"
 #include "qt_editor_gizmo.hpp"
+#include "viewport_frame_profile.hpp"
 #include <northstarcpp/scene.hpp>
 #include <QPoint>
 #include <northstarcpp/frame_clock.hpp>
@@ -12,6 +13,8 @@
 #include <QWidget>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <cstdint>
 class QDragEnterEvent;
 class QDropEvent;
 class QDragMoveEvent;
@@ -29,11 +32,15 @@ public:
     explicit QtEditorViewport(QWidget* parent=nullptr);
     ~QtEditorViewport() override;
     void setAssetSources(std::filesystem::path projectRoot);
+    std::size_t queueCompiledShader(QString const& absolutePath,QByteArray const& spirv);
     bool gpuActive() const noexcept;
     QString gpuError() const {return gpu_error_;}
     bool renderGpuNow();
     // Returns last native GPU frame's host-side submission summary.
     QString gpuAssetSummary() const;
+    ViewportFrameQuantiles cpuSubmissionQuantiles() const {
+        return host_frame_profile_.summarize();
+    }
     void setScene(Scene const* value);
     void setSelected(int index);
     void setGizmoMode(int index);
@@ -51,6 +58,10 @@ public:
     void setDrawMode(DrawMode mode);
     DrawMode drawMode() const noexcept {return draw_mode_;}
     void setShowGrid(bool enabled);
+    void setShowCollisions(bool enabled);
+    bool showCollisions() const noexcept {return show_collisions_;}
+    void setCollisionHullPreview(int index) { collision_hull_preview_=index;update(); }
+    int collisionHullPreview() const noexcept {return collision_hull_preview_;}
     bool showGrid() const noexcept {return show_grid_;}
     void setFlySpeed(float metersPerSecond);
     float flySpeed() const noexcept {return fly_speed_;}
@@ -67,11 +78,13 @@ signals:
     void flySpeedChanged(float metersPerSecond);
     void selectionChanged(int index);
     void assetDropped(QString path, QVector3D position,int targetActor);
+    void placeableDropped(QString typeId,QVector3D position);
     void gizmoDelta(int mode,int axis,float delta);
     void gizmoModeRequested(int mode);
     void gizmoDragStarted();
     void gizmoDragFinished();
     void gpuUnavailable(QString error);
+    void shaderReloadResult(QString result);
 protected:
     void paintEvent(QPaintEvent*) override;
     void resizeEvent(QResizeEvent*) override;
@@ -89,6 +102,9 @@ protected:
     void dropEvent(QDropEvent*) override;
 private:
     Scene const* scene_{};
+    std::optional<Scene> visual_preview_scene_; // never changes the authored Scene
+    QString visual_prefab_warning_;
+    void refreshVisualPrefabPreview();
     editor_tools::EditorCamera camera_;
     int selected_=-1, gizmo_=0, drag_axis_=-1, hovered_axis_=-1;
     bool gizmo_local_=false;
@@ -100,6 +116,8 @@ private:
     Vector3 orbit_target_{0.f,1.f,0.f};
     bool panning_=false;
     bool show_grid_=true;
+    bool show_collisions_=false;
+    int collision_hull_preview_=-1;
     DrawMode draw_mode_=DrawMode::Shaded; // activated after Qt window show
     float fly_speed_=12.f;
     QSet<int> held_keys_;
@@ -109,9 +127,11 @@ private:
     QWidget* gpu_surface_{};
     struct GpuState;
     std::unique_ptr<GpuState> gpu_;
+    std::optional<std::uint64_t> pending_gpu_pick_;
     std::filesystem::path asset_root_;
     bool gpu_dirty_=true;
     QString gpu_error_;
+    ViewportFrameProfile host_frame_profile_;
     void updateOrbitCamera();
     void ensureGpu();
     void drawGpu();

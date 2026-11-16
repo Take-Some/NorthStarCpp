@@ -67,8 +67,9 @@ int main()
 
     auto unchanged = world.snapshot();
     auto invalid = unchanged;
-    invalid.objects[1].player = true; // Another player already exists.
-    invalid.objects[1].mass = 1.f;
+    // Regression: reject a malformed object without mutating the live ECS.
+    // SceneObject::player was removed when possession moved to components.
+    invalid.objects[1].mass = -1.f;
     bool rejected = false;
     try { world.load(invalid); }
     catch (std::runtime_error const&) { rejected = true; }

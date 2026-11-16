@@ -221,7 +221,7 @@ def run_release(build: Path, report: Path, python: str, logs: Path) -> list[dict
                         "passed" if code == 0 else "failed", took,
                         "" if code == 0 else compact(output), log, "release"))
     if code != 0:
-        for provider in ("bullet", "jolt"):
+        for provider in ("jolt",):
             results.append(case("fps-package-" + provider, "release-packaging", "skipped",
                                 details="Prerequisite engine-package failed", group="release"))
         return results
@@ -232,7 +232,7 @@ def run_release(build: Path, report: Path, python: str, logs: Path) -> list[dict
                             details="Expected exactly one engine package", group="release"))
         return results
     engine = packages[0]
-    for provider in ("bullet", "jolt"):
+    for provider in ("jolt",):
         cmd = [python, "-m", "tools.build_game",
                "--project", str(ROOT / "Projects/NorthStarFPSArena"),
                "--engine-package", str(engine),
@@ -435,7 +435,7 @@ def execute(args: argparse.Namespace) -> tuple[dict, Path]:
         quick = {"northstarcpp_math", "northstarcpp_project_manager_window",
                  "northstarcpp_shared_assets", "northstarcpp_assets_vfs",
                  "northstarcpp_input_win32", "northstarcpp_flecs_ecs",
-                 "northstarcpp_bullet_physics", "northstarcpp_jolt_physics",
+                 "northstarcpp_jolt_physics",
                  "northstarcpp_fps_arena", "northstarcpp_fps_ui",
                  "northstarcpp_editor_player", "northstarcpp_capability_swap",
                  "northstarcpp_camera_director", "northstarcpp_camera_d3d11"}

@@ -21,6 +21,7 @@ class AssetStore;
 struct NativeModelResource {
     MeshAsset mesh;
     std::unordered_map<std::string,MaterialDefinition> materials;
+    std::vector<std::string> unresolved_materials; // Import diagnostics for fallback slots.
     std::string skeleton_reference;
     std::optional<Skeleton> skeleton;
     std::vector<SkinWeights> vertex_skin; // Same order as mesh.vertices.
@@ -40,12 +41,22 @@ MeshAsset skin_native_model_cpu(
 MeshAsset skin_native_mesh_cpu(
     MeshAsset const& mesh, Skeleton const& skeleton,
     std::vector<SkinWeights> const& weights,
-    std::vector<math::float4x4> const& palette);
+    std::vector<math::float4x4> const& palette,
+    std::vector<std::uint8_t> const* active_vertices = nullptr);
 
 
 
-// Strict, bounded native model load. Missing required materials fail the
-// bundle rather than creating untextured placeholder geometry.
+// Reusable-frame CPU skinning: the destination retains its topology and UVs.
+// No per-frame copy of hundreds of thousands of indices/material sections.
+void skin_native_mesh_cpu_into(
+    MeshAsset& output, MeshAsset const& mesh, Skeleton const& skeleton,
+    std::vector<SkinWeights> const& weights,
+    std::vector<math::float4x4> const& palette,
+    std::vector<std::uint8_t> const* active_vertices = nullptr);
+
+// Strict by default. Optional viewport fallback keeps geometry when YMAT is absent.
+// The fallback is neutral PBR, and missing dependencies are reported.
 NativeModelResource load_native_model_resource(
-    AssetStore const& assets, std::string const& reference);
+    AssetStore const& assets, std::string const& reference,
+    bool allow_missing_materials=false);
 } // namespace northstarcpp

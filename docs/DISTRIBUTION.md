@@ -9,7 +9,7 @@ CMakeLists.txt                 Global build, SDK/install exports
 tools/cmake/
   NorthStarModules.cmake      Plugin registration and generated manifests
   NorthStarCppConfig.cmake.in SDK find_package configuration
-include/northstarcpp/        Public engine interfaces and provider ABI
+engine/northstarcpp/modules/api/include/northstarcpp/   Public SDK and foundation headers
 engine/northstarcpp/
   modules/
     host/                    Capability resolver, scene and subsystem adapters
@@ -22,9 +22,12 @@ engine/northstarcpp/
     render/d3d11/            D3D11 provider
     audio/winmm/             WinMM provider
     input/win32/             Win32/XInput provider
-    core/northstarcpp/ Ported implementation and math
+    core/                   Active foundation/math implementation
+    api/include/northstarcpp/ Maintained public ABI and compatible math headers
+    # Historical source archive (not compiled or installed): core/northstarcpp/
 sdk/vendor/sources/        Vendored physics dependencies
 sdk/vendor/flecs/              Flecs source dependency
+tools/shader_generator/      Maintained shader generator sources
 tools/build_release.cmd      Clean Release build from current sources
 tools/build_dist.py          Release builder + content validator
 out/                         Intermediate objects and build outputs
@@ -67,39 +70,74 @@ To inspect and verify a published package without rebuilding:
 ## Release folder
 
 ```text
-distributable/NorthStarCpp-0.1.0-windows-x64-Release/
+NorthStarCpp-<version>-windows-x64-Release/
   bin/
-    northstarcpp_editor.exe
     northstarcpp_player.exe
-    northstarcpp_project_manager.exe
+    northstarcpp_project_manager.exe         # native launcher
+    northstarcpp_asset_browser.exe           # native launcher
+    northstarcpp_editor_qt.exe               # native launcher
+    northstarcpp_camera_timeline_editor.exe  # native launcher
     bugtrap.exe
-    ecs_flecs.dll
-    physics_bullet.dll
-    physics_jolt.dll
-    render_d3d11.dll
-    audio_winmm.dll
-    input_win32.dll
+    bootstrap.json
     AssetManager.dll
+    physics_jolt.dll
+    ... other registered engine providers ...
+    archive/
+      northstar_shared.nsp
+      ... additional *.nsp asset packs ...
+    qt_tools/
+      northstarcpp_project_manager.exe       # real Qt application
+      northstarcpp_asset_browser.exe
+      northstarcpp_editor_qt.exe
+      northstarcpp_camera_timeline_editor.exe
+      Qt6Core.dll
+      Qt6Gui.dll
+      Qt6Widgets.dll
+      Qt6Concurrent.dll
+      platforms/qwindows.dll
+      ... other private Qt/MinGW runtime DLLs and plugins ...
   tools/shader_generator.exe
-  sdk/
-    include/northstarcpp/...
-    lib/*.a
-    lib/cmake/NorthStarCpp/{NorthStarCppConfig.cmake,NorthStarCppTargets.cmake,...}
-  licenses/{bullet.txt,flecs.txt,jolt.txt,RELEASE_REVIEW_REQUIRED.txt}
+  sdk/include/northstarcpp/...
+  sdk/lib/*.a
+  licenses/Qt6Base/...
+  licenses/FontAwesome/...
   documentation/
+  qt.runtime.json
   northstarcpp.plugins.json
   manifest.json
 ```
 
-Applications scan `./` beside the executable by default, not the
-process working directory. Release distributions include an editable
-`bin/bootstrap.json` with `plugins.path` set to `./` and a hidden logging
-console by default. To use an alternative plugin directory, edit
-`plugins.path` (for example, `./plugins`) and put every provider DLL there.
-To show a console with color-coded log messages, set
-`logging.console.visible` to `true`. File journals are always configurable
-separately. No original SDK directories or compiler tools are needed at runtime.
+The **four public Qt executables always live directly in `bin/`**. They are
+small native Windows launchers retaining the application's icon and file metadata;
+the real Qt executables live in `bin/qt_tools/` with their Qt dependencies.
+The launchers preserve Unicode command-line arguments, the working directory,
+and the Qt child's exit status. Double-clicking the public executables does
+not require installing Qt or changing the system PATH.
 
+**All Qt DLLs and Qt platform plugins belong in `bin/qt_tools/`**, never in
+the native Player's `bin/` directory. Isolated Qt processes load engine
+providers and `bootstrap.json` from parent `bin/`. Release validation
+checks launcher hashes and rejects Qt6 DLL leakage into root `bin/`.
+This layout applies even when the distribution has no external V8 provider.
+
+All first-party and additional `.nsp` packs are installed in `bin/archive/`.
+The baseline `northstar_shared.nsp` is generated from the editable sources
+in `engine/northstarcpp/resources/sharedAssets/`.
+
+Release distributions include an editable `bin/bootstrap.json` with native
+`plugins.path` defaults. No Qt SDK or compiler toolchain is required on an
+end-user machine.
+
+### Qt launcher tests
+
+```powershell
+python -m unittest tests.test_qt_runtime -v
+python tests/qt_release_launcher_integration.py --build build/foundation-migration --gpp C:/msys64/mingw64/bin/g++.exe
+```
+
+The integration test stages a temporary Qt distribution, launches the public
+Project Manager from root `bin/` with no Qt on PATH, and verifies the Qt
+application actually executes from `bin/qt_tools/`.
 
 ## C++ SDK
 

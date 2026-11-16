@@ -1,8 +1,8 @@
 """Regenerate IDE typings from the runtime input classes.
 
 Source of truth:
-    sharedAssets/scripts/input/Keys.js
-    sharedAssets/scripts/input/GamepadButtons.js
+    engine/northstarcpp/resources/sharedAssets/api/input/Keys.js
+    engine/northstarcpp/resources/sharedAssets/api/input/GamepadButtons.js
 
 Do not edit the input enum declarations in northstar-engine.d.ts directly.
 Usage: python tools/dev/generate_input_typings.py [--check]
@@ -15,8 +15,8 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-INPUT_DIR = ROOT / "sharedAssets" / "scripts" / "input"
-DECLARATIONS = ROOT / "sharedAssets" / "scripts" / "types" / "northstar-engine.d.ts"
+INPUT_DIR = ROOT / "engine" / "northstarcpp" / "resources" / "sharedAssets" / "api" / "input"
+DECLARATIONS = ROOT / "engine" / "northstarcpp" / "resources" / "sharedAssets" / "api" / "types" / "northstar-engine.d.ts"
 
 BEGIN = "    // BEGIN GENERATED INPUT ENUMS: tools/dev/generate_input_typings.py"
 END = "    // END GENERATED INPUT ENUMS"

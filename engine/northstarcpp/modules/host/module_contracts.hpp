@@ -11,20 +11,44 @@
 #include <northstarcpp/collision_plugin.h>
 #include <northstarcpp/time_plugin.h>
 #include <northstarcpp/physics_plugin.h>
+#include <northstarcpp/physics_vehicle_plugin.h>
+#include <northstarcpp/vehicle_plugin.h>
+#include <northstarcpp/vehicle_dynamics_plugin.h>
+#include <northstarcpp/vehicle_cabin_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_materials_api.h>
+#include <northstarcpp/render_shader_reload_api.h>
+#include <northstarcpp/render_postfx_api.h>
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_frame_memory_api.h>
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_editor_grid_api.h>
+#include <northstarcpp/render_pick_api.h>
 #include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
 
 namespace northstarcpp {
+inline bool valid_api(NorthStarRenderPostFxApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_POSTFX_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderPostFxApi) &&
+           api.set_settings && api.get_settings;
+}
+inline bool valid_api(NorthStarRenderShaderReloadApiV2 const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderShaderReloadApiV2) &&
+           api.set_material_references && api.queue_shader_binary && api.poll;
+}
+inline bool valid_api(NorthStarRenderShaderReloadApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_SHADER_RELOAD_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderShaderReloadApi) &&
+           api.set_material_references && api.queue_fragment_spirv && api.poll;
+}
+
 
 inline bool valid_api(NsEcsApi const& api)
 {
@@ -35,11 +59,79 @@ inline bool valid_api(NsEcsApi const& api)
         api.at && api.set && api.get && api.has && api.remove && api.query && api.progress;
 }
 
+inline bool valid_api(NorthStarVehicleCabinApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_VEHICLE_CABIN_ABI &&
+        api.size>=sizeof(NorthStarVehicleCabinApi) &&
+        api.configure_doors && api.set_door && api.door_state && api.door_count;
+}
+inline bool valid_api(NorthStarVehicleDynamicsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_VEHICLE_DYNAMICS_ABI &&
+        api.struct_size>=sizeof(NorthStarVehicleDynamicsApi) &&
+        api.configure && api.wheel_count && api.wheel_state &&
+        api.seat_count && api.seat_state && api.occupy_seat &&
+        api.release_seat && api.ground_contact && api.motion_state &&
+        api.resolve_collision;
+}
+
+inline bool valid_api(NorthStarVehicleApi const& api)
+{
+    return api.create_world && api.destroy_world && api.attach && api.detach &&
+        api.controls && api.waypoint && api.step && api.read && api.at && api.count;
+}
+
+inline bool valid_api(NorthStarPhysicsVehicleApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_VEHICLE_ABI &&
+        api.size>=sizeof(NorthStarPhysicsVehicleApi) &&
+        api.create && api.destroy && api.controls && api.pose &&
+        api.wheel && api.wheel_count;
+}
 inline bool valid_api(NorthStarPhysicsApi const& api)
 {
     // Older ABI 4 providers may omit impulse support. The host checks it at use.
     return api.create && api.destroy && api.step && api.read_poses && api.jump &&
         api.move_static && api.sweep_sphere && api.add_static_mesh;
+}
+
+inline bool valid_api(NorthStarPhysicsCharacterApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_CHARACTER_ABI &&
+        api.possess_body && api.set_sprinting && api.configure_motor;
+}
+inline bool valid_api(NorthStarPhysicsColliderApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_COLLIDER_ABI &&
+        api.configure!=nullptr;
+}
+
+inline bool valid_api(NorthStarPhysicsMeshApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_MESH_ABI &&
+           api.configure_mesh && api.set_object_type && api.object_type;
+}
+
+inline bool valid_api(NorthStarPhysicsSurfaceApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_SURFACE_ABI &&
+        api.set_triangle_materials && api.add_static_mesh_materials &&
+        api.sweep_sphere_surface;
+}
+inline bool valid_api(NorthStarPhysicsCookedHullsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_COOKED_HULLS_ABI &&
+           api.configure_hulls;
+}
+inline bool valid_api(NorthStarPhysicsChannelsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_CHANNELS_ABI &&
+           api.configure && api.query && api.sweep_sphere && api.raycast;
+}
+inline bool valid_api(NorthStarPhysicsResponseApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_RESPONSE_ABI &&
+           api.configure && api.query && api.drain_events;
 }
 
 inline bool valid_api(NorthStarPhysicsRuntimeApi const& api)
@@ -60,6 +152,20 @@ inline bool valid_api(NorthStarRenderEditorGridApi const& api) {
            api.set_grid && (api.anti_aliasing_modes&1u);
 }
 
+inline bool valid_api(NorthStarRenderPickApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_PICK_ABI &&
+           api.struct_size>=sizeof(api) && api.read_cube_id;
+}
+inline bool valid_api(NorthStarRenderPickAsyncApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_PICK_ASYNC_ABI &&
+           api.struct_size>=sizeof(api) && api.enqueue &&
+           api.poll && api.invalidate_before;
+}
+inline bool valid_api(NorthStarRenderPickApiV2 const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_PICK_V2_ABI &&
+           api.struct_size>=sizeof(api) && api.set_world_triangles &&
+           api.set_cube_entities && api.read_entity_id;
+}
 inline bool valid_api(NorthStarRenderApi const& api)
 {
     return api.create && api.destroy && api.draw && api.set_sky;
@@ -69,6 +175,17 @@ inline bool valid_api(NorthStarRenderUiApi const& api)
 {
     return api.abi_version==NORTHSTARCPP_RENDER_UI_ABI &&
            api.struct_size>=sizeof(api) && api.set_rgba;
+}
+
+inline bool valid_api(NorthStarRenderUiShadersApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_UI_SHADERS_ABI &&
+           api.struct_size>=sizeof(api) && (api.set_hlsl || api.set_spirv);
+}
+
+inline bool valid_api(NorthStarRenderUiEffectsApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_RENDER_UI_EFFECTS_ABI &&
+           api.struct_size>=sizeof(api) && api.set_hover_fx;
 }
 
 inline bool valid_api(NorthStarRenderTrianglesApi const& api)
@@ -106,6 +223,11 @@ inline bool valid_api(NorthStarRenderFeaturesApi const& api)
 }
 
 // Optional GPU timestamp contract: reject incomplete function tables.
+inline bool valid_api(NorthStarRenderFrameMemoryApi const& api)
+{
+    return api.abi_version == NORTHSTARCPP_RENDER_FRAME_MEMORY_ABI && api.exchange;
+}
+
 inline bool valid_api(NorthStarRenderTimingApi const& api)
 {
     return api.abi_version == NORTHSTARCPP_RENDER_TIMING_ABI && api.read;
@@ -126,6 +248,14 @@ inline bool valid_api(NorthStarRenderSurfacesApi const& api)
 inline bool valid_api(NorthStarAudioApi const& api)
 {
     return api.create && api.destroy && api.play && api.stop;
+}
+
+inline bool valid_api(NorthStarAudioVoicesApi const& api)
+{
+    return api.abi_version == NORTHSTARCPP_AUDIO_VOICES_ABI &&
+        api.struct_size >= sizeof(api) && api.play_voice && api.stop_voice &&
+        api.set_voice_gain && api.set_voice_position && api.set_listener &&
+        api.update;
 }
 
 inline bool valid_api(NorthStarInputApi const& api)
@@ -187,6 +317,10 @@ inline bool valid_api(NorthStarUIRasterApi const& api)
 {
     return api.size >= sizeof(api) && api.flags == 0 &&
            api.draw_rgba && api.get_rect && api.pointer;
+}
+
+inline bool valid_api(NorthStarUIRasterLayersApi const& api) {
+    return api.size>=sizeof(api) && api.flags==0 && api.draw_filtered_rgba;
 }
 
 inline bool valid_api(NorthStarUIInputApi const& api)

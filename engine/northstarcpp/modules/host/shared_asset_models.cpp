@@ -1,6 +1,7 @@
 // NorthStarCpp
 // Author: Kayla Verner
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/assets.hpp>
 #include "asset_list_file.hpp"
 #include "material_graph_xml.hpp"
 #include <boost/property_tree/json_parser.hpp>
@@ -228,6 +229,35 @@ std::vector<Material> detail::parse_materials(ListFile const& file, std::string 
                 material.parameters.push_back(std::move(param));
             }
         }
+        auto shader_path=[&](char const* attribute,char const* suffix,
+                             std::string& destination) {
+            auto binding=tree.get_optional<std::string>(
+                std::string("Shaders.<xmlattr>.")+attribute);
+            if(!binding)return;
+            auto const& path=*binding;
+            bool valid=!path.empty() && path.size()<=1024 &&
+                path.front()!='/' && path.find_first_of("@\\:")==std::string::npos &&
+                extension(path)==suffix;
+            std::string_view remaining(path);
+            while(valid && !remaining.empty()) {
+                auto slash=remaining.find('/');
+                auto segment=remaining.substr(0,slash);
+                valid=!segment.empty() && segment!="." && segment!=".." &&
+                    std::none_of(segment.begin(),segment.end(),
+                        [](unsigned char ch){return ch<32;});
+                if(slash==std::string_view::npos)break;
+                remaining.remove_prefix(slash+1);
+                if(remaining.empty())valid=false;
+            }
+            require(valid,"Unsafe shader asset path in XML YMAT");
+            destination=path;
+        };
+        shader_path("vertex",".vert",material.vertex_shader_asset);
+        shader_path("fragment",".frag",material.fragment_shader_asset);
+        shader_path("gbuffer",".frag",material.gbuffer_shader_asset);
+        shader_path("vertex_hlsl",".hlsl",material.vertex_hlsl_asset);
+        shader_path("fragment_hlsl",".hlsl",material.fragment_hlsl_asset);
+        shader_path("gbuffer_hlsl",".hlsl",material.gbuffer_hlsl_asset);
         if(auto graph=tree.get_child_optional("Graph")) {
             if(auto value=graph->get_child_optional("Value"))
                 material.graph_source=
@@ -368,11 +398,166 @@ static std::vector<Drawable> parse_binary_drawables(
     return {std::move(drawable)};
 }
 
+
+static std::vector<Drawable> parse_nvrm_drawables(
+    detail::ListFile const& file,std::string const& path)
+{
+    using detail::require;
+    using detail::Bytes;
+    Bytes const data(file.body);
+    require(file.kind==6 && file.entries==1 &&
+            data.size()>=20 && data.magic(0,"NVRM") &&
+            data.integer(4,4)==1,"Expected NorthStar NVRM model v1");
+    auto const metadata_bytes=data.integer(8,4);
+    auto const geometry_bytes=data.integer(12,8);
+    require(metadata_bytes>0 && metadata_bytes<=8u*1024u*1024u &&
+            metadata_bytes<=data.size()-20 &&
+            geometry_bytes==data.size()-20-metadata_bytes,
+            "NVRM metadata or geometry length mismatch");
+    auto const doc=detail::parse_json(data.string(20,metadata_bytes));
+    require(doc.get<std::string>("schema","")=="northstar.model.runtime.v1",
+            "Unsupported NVRM model schema");
+    auto const& meshes=doc.get_child("meshes");
+    require(!meshes.empty() && meshes.size()<=128,
+            "Invalid NVRM mesh part count");
+    Drawable drawable;
+    drawable.name=std::filesystem::u8path(path).stem().u8string();
+    detail::validate_name(drawable.name);
+    for(auto const& [axis,which]:std::array<std::pair<char const*,char const*>,0>{}) {
+        (void)axis;(void)which;
+    }
+    auto const& bounds=doc.get_child("bounds");
+    std::size_t axis=0;
+    for(auto const& v:bounds.get_child("min")) {
+        require(axis<3,"NVRM bounds min invalid");
+        drawable.bounds_min[axis++]=v.second.get_value<float>();
+    }
+    require(axis==3,"NVRM bounds min count invalid");
+    axis=0;
+    for(auto const& v:bounds.get_child("max")) {
+        require(axis<3,"NVRM bounds max invalid");
+        drawable.bounds_max[axis++]=v.second.get_value<float>();
+    }
+    require(axis==3,"NVRM bounds max count invalid");
+    for(unsigned k=0;k<3;++k)
+        require(std::isfinite(drawable.bounds_min[k]) &&
+                std::isfinite(drawable.bounds_max[k]) &&
+                drawable.bounds_min[k]<=drawable.bounds_max[k],
+                "Nonfinite or inverted NVRM bounds");
+    auto const payload_offset=20+metadata_bytes;
+    Bytes const& source=data;
+    auto const& materials=doc.get_child("material_slots");
+    std::set<std::size_t> valid_slots;
+    for(auto const& entry:materials)
+        require(valid_slots.insert(entry.second.get<std::size_t>("slot")).second,
+                "Duplicate NVRM material slot");
+    auto folder=path.substr(0,path.find_last_of('/')==std::string::npos?
+                            0:path.find_last_of('/')+1);
+    if(folder.compare(0,7,"models/")==0)
+        folder.replace(0,7,"materials/");
+    else folder="materials/";
+    auto const material_path=folder+drawable.name+".ymat";
+    std::size_t vertices_total=0,indices_total=0,mesh_number=0;
+    for(auto const& element:meshes) {
+        auto const& mesh=element.second;
+        auto const count=mesh.get<std::size_t>("vertex_count");
+        require(count>0 && count<=1000000 &&
+                vertices_total<=1200000-count,
+                "NVRM vertex budget exceeded");
+        vertices_total+=count;
+        struct Stream {std::uint64_t offset=0;unsigned components=0;bool valid=false;};
+        Stream position,normal,uv;
+        auto decode_stream=[&](boost::property_tree::ptree const& stream) {
+            auto const offset=stream.get<std::uint64_t>("offset");
+            auto const length=stream.get<std::uint64_t>("length");
+            auto const stride=stream.get<std::uint64_t>("stride");
+            auto const semantic=stream.get<std::string>("semantic");
+            auto const format=stream.get<std::string>("format");
+            require(offset<=geometry_bytes && length<=geometry_bytes-offset &&
+                    stride>0 && length==count*stride,
+                    "NVRM vertex stream outside payload");
+            Stream* destination=nullptr;
+            unsigned dims=0;
+            if(semantic=="position") {destination=&position;dims=3;}
+            if(semantic=="normal") {destination=&normal;dims=3;}
+            if(semantic=="texcoord0"){destination=&uv;dims=2;}
+            if(!destination)return;
+            require(!destination->valid &&
+                    format==(dims==2?"f32x2":"f32x3") &&
+                    stride==dims*4,"Invalid NVRM render stream");
+            *destination={payload_offset+offset,dims,true};
+        };
+        for(auto const& stream:mesh.get_child("streams"))
+            decode_stream(stream.second);
+        require(position.valid && normal.valid && uv.valid,
+                "NVRM render mesh requires position, normal, texcoord0");
+        auto const& index=mesh.get_child("index_buffer");
+        auto const index_offset=index.get<std::uint64_t>("offset");
+        auto const index_count=index.get<std::size_t>("index_count");
+        auto const index_length=index.get<std::uint64_t>("length");
+        require(index.get<std::string>("format")=="u32" &&
+                index_count>0 && index_count%3==0 &&
+                index_length==index_count*4ull &&
+                index_offset<=geometry_bytes &&
+                index_length<=geometry_bytes-index_offset &&
+                indices_total<=6000000-index_count,
+                "Invalid NVRM index buffer");
+        indices_total+=index_count;
+        std::vector<Vertex> decoded;
+        decoded.reserve(count);
+        for(std::size_t vertex=0;vertex<count;++vertex) {
+            Vertex dst{};
+            for(unsigned i=0;i<3;++i) {
+                dst.position[i]=source.real(position.offset+vertex*12+i*4);
+                dst.normal[i]=source.real(normal.offset+vertex*12+i*4);
+                require(std::isfinite(dst.position[i]) &&
+                        std::isfinite(dst.normal[i]),
+                        "Nonfinite NVRM vertex");
+            }
+            for(unsigned i=0;i<2;++i) {
+                dst.uv[i]=source.real(uv.offset+vertex*8+i*4);
+                require(std::isfinite(dst.uv[i]),"Nonfinite NVRM UV");
+            }
+            decoded.push_back(dst);
+        }
+        auto const& primitives=mesh.get_child("primitives");
+        require(!primitives.empty() && primitives.size()<=64,
+                "Invalid NVRM primitive count");
+        for(auto const& item:primitives) {
+            auto const& primitive=item.second;
+            auto const start=primitive.get<std::size_t>("first_index");
+            auto const length=primitive.get<std::size_t>("index_count");
+            auto const base=primitive.get<std::size_t>("base_vertex",0);
+            auto const slot=primitive.get<std::size_t>("material_slot");
+            require(start<=index_count && length>0 && length%3==0 &&
+                    length<=index_count-start && base<count &&
+                    valid_slots.count(slot)!=0 &&
+                    drawable.meshes.size()<256,
+                    "Invalid NVRM render primitive");
+            MeshPart part;
+            part.name="mesh_"+std::to_string(mesh_number)+"_slot_"+std::to_string(slot);
+            part.material=material_path+"@mat_"+std::to_string(slot);
+            part.material_required=false; // Missing YMAT must not hide geometry.
+            part.vertices=decoded;
+            part.indices.reserve(length);
+            for(std::size_t i=start;i<start+length;++i) {
+                auto const idx=source.integer(payload_offset+index_offset+i*4,4);
+                require(idx<count-base,"NVRM index outside vertex stream");
+                part.indices.push_back(static_cast<std::uint32_t>(base+idx));
+            }
+            drawable.meshes.push_back(std::move(part));
+        }
+        ++mesh_number;
+    }
+    return {std::move(drawable)};
+}
+
 static std::vector<Drawable> parse_drawable_dictionary(
     detail::ListFile const& file, std::string const& path)
 {
     auto const ext=extension(path);
     require(ext == ".ydd" || ext == ".ydr", "Expected native YDD/YDR model");
+    if(file.kind==6)return parse_nvrm_drawables(file,path);
     require(file.kind == 2, "Expected native drawable dictionary");
     if (!file.body.empty() && file.body.front()!='{')
         return parse_binary_drawables(file,path);
@@ -470,11 +655,16 @@ static std::vector<Drawable> parse_drawable_dictionary(
 
 std::vector<Drawable> load_drawables(AssetStore const& assets,
                                      std::string const& path) {
-    return parse_drawable_dictionary(detail::read_list_file(assets,path),path);
+    // NVRM kind-6 drawables may carry binary NEF16 metadata; their
+    // authoritative JSON manifest is inside the decompressed NVRM body.
+    // Never interpret the optional outer metadata as JSON.
+    if(assets.size(path)>64u*1024u*1024u)
+        throw std::length_error("Drawable asset exceeds 64 MiB");
+    return parse_drawable_dictionary(detail::parse_list_file(assets.read(path),false),path);
 }
 std::vector<Drawable> load_drawables_from_bytes(std::vector<std::uint8_t> const& bytes,
                                      std::string const& path) {
-    return parse_drawable_dictionary(detail::parse_list_file(bytes),path);
+    return parse_drawable_dictionary(detail::parse_list_file(bytes,false),path);
 }
 
 } // namespace northstarcpp::shared_assets

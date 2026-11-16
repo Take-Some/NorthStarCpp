@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include "editor_prefab.hpp"
 #include "editor_tools.hpp"
+#include <northstarcpp/player_blueprint.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -77,7 +78,6 @@ Scene capture_prefab(Scene const& source,std::size_t root_index) {
     auto append = [&](SceneObject object) {
         if (object.node.id==root_id) object.node.parent=0;
         object.position=moved(object.position,anchor,false);
-        object.player=false; // A prefab cannot create duplicate player controllers.
         layers.insert(object.node.layer);
         if (!object.node.cell.empty()) cells.insert(object.node.cell);
         prefab.objects.push_back(std::move(object));
@@ -94,6 +94,14 @@ Scene capture_prefab(Scene const& source,std::size_t root_index) {
             cell.maximum=moved(cell.maximum,anchor,false);
             prefab.cells.push_back(std::move(cell));
         }
+    // Prefab components are owned by stable template entity IDs.
+    // Preserve collision, materials and provider-owned ECS payloads.
+    bool const is_player_blueprint=
+        player_blueprint::layout(original,root_id).has_value();
+    for(auto const& component:original.components)
+        if(included.count(component.entity_id) &&
+           (component.type!=player_character::pawn_type||is_player_blueprint))
+            prefab.components.push_back(component);
     // Global triggers/portals have no entity owner in Scene V3 and should not
     // be silently duplicated into unrelated world locations.
     validate_scene(prefab);
@@ -169,9 +177,14 @@ std::size_t instantiate_prefab(Scene& destination,Scene const& prefab,
         if (!entity.node.cell.empty())
             entity.node.cell=cell_remap.at(entity.node.cell);
         entity.position=moved(entity.position,anchor,true);
-        entity.player=false;
         if (original_id==template_root) root_index=result.objects.size();
         result.objects.push_back(std::move(entity));
+    }
+    for(auto component:prefab.components) {
+        if(!component.entity_id || !ids.count(component.entity_id))
+            throw std::invalid_argument("Prefab component has an invalid entity ID");
+        component.entity_id=ids.at(component.entity_id);
+        result.components.push_back(std::move(component));
     }
     validate_scene(result);
     destination=std::move(result);

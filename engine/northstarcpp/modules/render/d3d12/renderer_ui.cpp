@@ -10,7 +10,7 @@ void RendererState::set_ui_rgba(const std::uint8_t* source,
     if(!source) {
         if(w||h||source_stride)
             throw std::invalid_argument("Invalid UI overlay clear");
-        ui_cpu_rgba.clear(); ui_width=ui_height=0;return;
+        ui_cpu_rgba.clear(); ui_width=ui_height=0;ui_upload_dirty=true;return;
     }
     if(!w||!h||w>8192||h>8192||
        static_cast<UINT64>(w)*h*4>64ull*1024*1024 ||
@@ -21,16 +21,21 @@ void RendererState::set_ui_rgba(const std::uint8_t* source,
         std::memcpy(bytes.data()+static_cast<size_t>(y)*w*4,
                     source+static_cast<size_t>(y)*source_stride,
                     static_cast<size_t>(w)*4);
-    ui_cpu_rgba.swap(bytes);ui_width=w;ui_height=h;
+    ui_cpu_rgba.swap(bytes);ui_width=w;ui_height=h;ui_upload_dirty=true;
 }
 void RendererState::record_ui_pass(FramePassContext& context) {
     if(ui_cpu_rgba.empty()||!ui_width||!ui_height)return;
     if(!ui_pso) {
         // A dedicated 2D pipeline keeps UI independent of 3D camera,
         // exposure, depth, shadows and world material variants.
-        static constexpr char source[]=R"HLSL(
+        static constexpr char source[]=R"HLSL(// Generic engine UI compositor. No project-specific animation or art.
 Texture2D image : register(t0);
 SamplerState samplerLinear : register(s0);
+cbuffer UiHoverFx : register(b0) {
+    float4 fxRect;
+    float4 fxMotion;
+    float4 fxConfig;
+};
 struct Out { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 Out vs(uint id : SV_VertexID) {
     Out o;
@@ -39,13 +44,19 @@ Out vs(uint id : SV_VertexID) {
     return o;
 }
 float4 ps(Out input) : SV_TARGET {
-    return image.Sample(samplerLinear,input.uv);
+    if(fxConfig.z<=0.5) return image.Sample(samplerLinear,input.uv);
+    float4 base=image.Sample(samplerLinear,float2(input.uv.x,input.uv.y*0.5));
+    float4 overlay=image.Sample(samplerLinear,float2(input.uv.x,0.5+input.uv.y*0.5));
+    return float4(saturate(overlay.rgb+base.rgb*(1-overlay.a)),
+                  saturate(overlay.a+base.a*(1-overlay.a)));
 }
 )HLSL";
         ComPtr<ID3DBlob> vs,ps,error;
         auto makeShader=[&](const char* entry,const char* profile,
                             ComPtr<ID3DBlob>& result) {
-            HRESULT hr=D3DCompile(source,sizeof(source)-1,nullptr,
+            const char* selected=ui_shader_hlsl.empty()?source:ui_shader_hlsl.c_str();
+            const std::size_t selected_size=ui_shader_hlsl.empty()?sizeof(source)-1:ui_shader_hlsl.size();
+            HRESULT hr=D3DCompile(selected,selected_size,nullptr,
                 nullptr,nullptr,entry,profile,D3DCOMPILE_OPTIMIZATION_LEVEL3,0,
                 &result,&error);
             if(FAILED(hr)) {
@@ -61,11 +72,15 @@ float4 ps(Out input) : SV_TARGET {
         D3D12_DESCRIPTOR_RANGE range{};
         range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         range.NumDescriptors=1;range.BaseShaderRegister=0;
-        D3D12_ROOT_PARAMETER param{};
-        param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        param.DescriptorTable.NumDescriptorRanges=1;
-        param.DescriptorTable.pDescriptorRanges=&range;
-        param.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_PARAMETER param[2]{};
+        param[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        param[0].DescriptorTable.NumDescriptorRanges=1;
+        param[0].DescriptorTable.pDescriptorRanges=&range;
+        param[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        param[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        param[1].Constants.Num32BitValues=12;
+        param[1].Constants.ShaderRegister=0;
+        param[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_STATIC_SAMPLER_DESC sampler{};
         sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         sampler.AddressU=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -76,7 +91,7 @@ float4 ps(Out input) : SV_TARGET {
         sampler.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;
         sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_ROOT_SIGNATURE_DESC sig{};
-        sig.NumParameters=1;sig.pParameters=&param;
+        sig.NumParameters=2;sig.pParameters=param;
         sig.NumStaticSamplers=1;sig.pStaticSamplers=&sampler;
         sig.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> serialized;
@@ -118,7 +133,7 @@ float4 ps(Out input) : SV_TARGET {
               "Create UI shader resource descriptor");
     }
     if(!ui_texture||ui_width!=ui_gpu_width||ui_height!=ui_gpu_height) {
-        ui_texture.Reset();ui_upload.Reset();
+        ui_texture.Reset();ui_upload.Reset();ui_upload_dirty=true;
         D3D12_RESOURCE_DESC description{};
         description.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         description.Width=ui_width;
@@ -142,6 +157,7 @@ float4 ps(Out input) : SV_TARGET {
         device->CreateShaderResourceView(ui_texture.Get(),&srv,
                                          ui_srv_heap->GetCPUDescriptorHandleForHeapStart());
     }
+    if(ui_upload_dirty) {
     const UINT pitch=(ui_width*4u+255u)&~255u;
     const UINT64 bytes=static_cast<UINT64>(pitch)*ui_height;
     if(!ui_upload||ui_upload->GetDesc().Width<bytes) {
@@ -185,6 +201,8 @@ float4 ps(Out input) : SV_TARGET {
     staging.PlacedFootprint.Footprint.RowPitch=pitch;
     commands->CopyTextureRegion(&destination,0,0,0,&staging,nullptr);
     transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    ui_upload_dirty=false;
+    }
     commands->OMSetRenderTargets(1,&context.rtv,FALSE,nullptr);
     commands->RSSetViewports(1,&context.viewport);
     commands->RSSetScissorRects(1,&context.scissors);
@@ -193,6 +211,7 @@ float4 ps(Out input) : SV_TARGET {
     commands->SetGraphicsRootSignature(ui_signature.Get());
     commands->SetGraphicsRootDescriptorTable(0,
                                               ui_srv_heap->GetGPUDescriptorHandleForHeapStart());
+    commands->SetGraphicsRoot32BitConstants(1,12,&ui_hover_fx,0);
     commands->SetPipelineState(ui_pso.Get());
     commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commands->DrawInstanced(3,1,0,0);

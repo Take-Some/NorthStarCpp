@@ -26,7 +26,7 @@ int main() {
     REQUIRE(allocations.resource_to_slot[imported]==-1);
     REQUIRE(allocations.slots.size()==3);
     REQUIRE(allocations.committed_bytes==16384);
-    REQUIRE(allocations.peak_live_bytes<=allocations.committed_bytes);
+    REQUIRE(allocations.peak_live_bytes==16384); // p1 and p2 retain three physical slots.
     bool rejected=false;
     try{(void)plan_transient_resources(graph,plan,{{imported,4096,256,1}});}
     catch(const std::invalid_argument&){rejected=true;}REQUIRE(rejected);
@@ -38,4 +38,21 @@ int main() {
     catch(const std::invalid_argument&){rejected=true;}REQUIRE(rejected);
     // Strictly non-overlapping reuse only. A and B both occupy p0.
     REQUIRE(allocations.resource_to_slot[a]!=allocations.resource_to_slot[b]);
+    RenderGraph handoff;
+    const auto first=handoff.add_resource("first");
+    const auto next=handoff.add_resource("next");
+    const auto other=handoff.add_resource("other");
+    handoff.add_pass({"start",{}, {first},{}});
+    handoff.add_pass({"handoff",{}, {next,other},{}});
+    const auto handoff_plan=plan_transient_resources(handoff,handoff.compile(),{
+        {first,8192,256,7},{next,8192,256,7},{other,2048,256,8}});
+    REQUIRE(handoff_plan.resource_to_slot[first]==handoff_plan.resource_to_slot[next]);
+    REQUIRE(handoff_plan.committed_bytes==10240);
+    REQUIRE(handoff_plan.peak_live_bytes==10240);
+    auto invalid_execution=handoff.compile();
+    invalid_execution.lifetimes[next].second=100;
+    rejected=false;
+    try{(void)plan_transient_resources(handoff,invalid_execution,{{next,8192,256,7}});}
+    catch(const std::invalid_argument&){rejected=true;}
+    REQUIRE(rejected);
 }

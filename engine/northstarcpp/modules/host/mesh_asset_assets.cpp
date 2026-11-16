@@ -8,6 +8,8 @@
 #include <limits>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <stdexcept>
 
 namespace northstarcpp {
@@ -61,7 +63,7 @@ MeshAsset load_scene_mesh(AssetStore const& store, std::string const& reference)
     for(auto const& mesh:selected->meshes) {
         auto const first_index=result.indices.size();
         if(result.vertices.size()+mesh.vertices.size()>1000000 ||
-           result.indices.size()+mesh.indices.size()>1500000)
+           result.indices.size()+mesh.indices.size()>3000000)
             throw std::length_error("Scene native model exceeds render budget");
         auto const base=static_cast<std::uint32_t>(result.vertices.size());
         for(auto const& vertex:mesh.vertices)
@@ -98,7 +100,8 @@ MeshAsset load_scene_mesh(AssetStore const& store, std::string const& reference)
     return result;
 }
 NativeModelResource load_native_model_resource(
-    AssetStore const& assets, std::string const& reference)
+    AssetStore const& assets, std::string const& reference,
+    bool allow_missing_materials)
 {
     auto const separator=reference.find('@');
     auto const path=reference.substr(0,separator);
@@ -107,11 +110,19 @@ NativeModelResource load_native_model_resource(
         path.compare(path.size()-4,4,".ydr")!=0))
         throw std::invalid_argument("Native Model bundle requires YDD/YDR VFS path");
     NativeModelResource result;
+    auto const mesh_time=std::chrono::steady_clock::now();
     result.mesh=load_scene_mesh(assets,reference);
+    auto const mesh_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now()-mesh_time).count();
+    if(mesh_ms>100)std::fprintf(stderr,
+        "[PERF] [engine.assets] native.mesh %s %lld ms\n",
+        path.c_str(),static_cast<long long>(mesh_ms));
     if(result.mesh.sections.empty())
         throw std::invalid_argument("Native Model has no drawable sections");
     if(result.mesh.sections.size()>128)
         throw std::length_error("Native Model section budget exceeded");
+    auto const material_time=std::chrono::steady_clock::now();
+    MaterialLoadSession material_session(assets);
     for(auto const& section:result.mesh.sections) {
         if(section.material_reference.empty()) {
             if(section.material_required)
@@ -120,32 +131,72 @@ NativeModelResource load_native_model_resource(
         }
         if(result.materials.count(section.material_reference)) continue;
         try {
-            auto material=load_material_definition(assets,section.material_reference);
+            auto const slot_begin=std::chrono::steady_clock::now();
+            auto material=material_session.load(section.material_reference);
+            auto const slot_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now()-slot_begin).count();
+            if(slot_ms>100)std::fprintf(stderr,
+                "[PERF] [engine.material] slot %s %lld ms\n",
+                section.material_reference.c_str(),static_cast<long long>(slot_ms));
             result.materials.emplace(section.material_reference,std::move(material));
         } catch(std::exception const&) {
-            if(section.material_required)throw;
+            if(section.material_required && !allow_missing_materials)throw;
+            if(allow_missing_materials) {
+                result.unresolved_materials.push_back(section.material_reference);
+                MaterialDefinition neutral;
+                neutral.base_color={0.72f,0.74f,0.78f,1.f};
+                result.materials.emplace(section.material_reference,std::move(neutral));
+            }
             // Optional material slots can use the documented tinted
             // fallback, without inventing an alternative texture.
         }
     }
+    auto const material_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now()-material_time).count();
+    if(material_ms>100)std::fprintf(stderr,
+        "[PERF] [engine.assets] native.materials %s %lld ms (%zu sections)\n",
+        path.c_str(),static_cast<long long>(material_ms),result.mesh.sections.size());
     // YDD/YDR references use a companion .skeleton.ymt if one exists.
     // An ordinary static model must not fail because it has no skeleton.
     auto const dot=path.find_last_of('.');
-    auto const skeleton_path=path.substr(0,dot)+".skeleton.ymt";
+    auto skeleton_path=path.substr(0,dot)+".skeleton.ymt";
     bool has_skeleton=false;
     try {
         has_skeleton=assets.size(skeleton_path)>0;
     } catch(std::runtime_error const&) {
         // No companion rig is an ordinary static drawable.
     }
+    // Native character bundles may use models/abby.ymt rather than a
+    // *.skeleton.ymt companion. Keep the primary path authoritative.
+    if(!has_skeleton && path.rfind("characters/",0)==0) {
+        auto const alternate=path.substr(0,dot)+".ymt";
+        try {
+            if(assets.size(alternate)>0) {
+                skeleton_path=alternate;
+                has_skeleton=true;
+            }
+        } catch(std::runtime_error const&) {}
+    }
     if(has_skeleton) {
+        auto const rig_begin=std::chrono::steady_clock::now();
         result.skeleton=load_skeleton(assets,skeleton_path);
+        auto const rig_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now()-rig_begin).count();
+        if(rig_ms>100)std::fprintf(stderr,
+            "[PERF] [engine.assets] native.skeleton %s %lld ms\n",
+            skeleton_path.c_str(),static_cast<long long>(rig_ms));
         result.skeleton_reference=skeleton_path;
         // Reuse the already vetted native character YDD v4 parser. Do not
         // derive weights from UV/color data or silently assign joint zero.
         // YDR v5 and other non-v4 layouts require an explicit skin decoder.
         if(path.compare(path.size()-4,4,".ydd")==0) {
+            auto const weights_begin=std::chrono::steady_clock::now();
             auto source=load_character_model(assets,path,*result.skeleton);
+            auto const weights_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now()-weights_begin).count();
+            if(weights_ms>100)std::fprintf(stderr,
+                "[PERF] [engine.assets] native.weights %s %lld ms\n",
+                path.c_str(),static_cast<long long>(weights_ms));
             if(source.parts.size()!=result.mesh.sections.size())
                 throw std::invalid_argument("Native skin sections mismatch drawable");
             result.mesh_to_skeleton=source.mesh_to_skeleton;
@@ -176,17 +227,27 @@ NativeModelResource load_native_model_resource(
     }
     return result;
 }
-MeshAsset skin_native_mesh_cpu(
-    MeshAsset const& mesh, Skeleton const& skeleton,
+void skin_native_mesh_cpu_into(
+    MeshAsset& output, MeshAsset const& mesh, Skeleton const& skeleton,
     std::vector<SkinWeights> const& weights,
-    std::vector<math::float4x4> const& palette)
+    std::vector<math::float4x4> const& palette,
+    std::vector<std::uint8_t> const* active_vertices)
 {
     if(weights.size()!=mesh.vertices.size() ||
        palette.size()!=skeleton.joints.size() ||
        palette.empty() || palette.size()>4096)
         throw std::invalid_argument("Native skinning palette or model mismatch");
-    MeshAsset output=mesh;
+    if(active_vertices && active_vertices->size()!=mesh.vertices.size())
+        throw std::invalid_argument("Native skin vertex subset size mismatch");
+    // An actor's scratch mesh is initialized once per imported source.
+    // In the steady state, only skinned positions/normals are updated.
+    if(output.vertices.size()!=mesh.vertices.size() ||
+       output.indices.size()!=mesh.indices.size() ||
+       output.sections.size()!=mesh.sections.size())output=mesh;
     for(std::size_t i=0;i<output.vertices.size();++i) {
+        // The first-person viewmodel uses only arm-weighted triangles.
+        // Never calculate hidden head, torso, leg or hair skin vertices.
+        if(active_vertices && !(*active_vertices)[i])continue;
         auto const& influences=weights[i];
         auto const& input=mesh.vertices[i];
         Vector3 position{0.f,0.f,0.f};
@@ -217,8 +278,16 @@ MeshAsset skin_native_mesh_cpu(
         if(len>1e-6f)
             output.vertices[i].normal={normal.x/len,normal.y/len,normal.z/len};
     }
-    output.minimum=output.maximum=output.vertices.front().position;
-    for(auto const& vertex:output.vertices) {
+    auto first=std::size_t{0};
+    if(active_vertices) {
+        while(first<active_vertices->size() && !(*active_vertices)[first])++first;
+        if(first==active_vertices->size())
+            throw std::invalid_argument("Native skin vertex subset is empty");
+    }
+    output.minimum=output.maximum=output.vertices[first].position;
+    for(std::size_t i=first;i<output.vertices.size();++i) {
+        if(active_vertices && !(*active_vertices)[i])continue;
+        auto const& vertex=output.vertices[i];
         output.minimum.x=std::min(output.minimum.x,vertex.position.x);
         output.minimum.y=std::min(output.minimum.y,vertex.position.y);
         output.minimum.z=std::min(output.minimum.z,vertex.position.z);
@@ -226,7 +295,16 @@ MeshAsset skin_native_mesh_cpu(
         output.maximum.y=std::max(output.maximum.y,vertex.position.y);
         output.maximum.z=std::max(output.maximum.z,vertex.position.z);
     }
-    return output;
+}
+MeshAsset skin_native_mesh_cpu(
+    MeshAsset const& mesh, Skeleton const& skeleton,
+    std::vector<SkinWeights> const& weights,
+    std::vector<math::float4x4> const& palette,
+    std::vector<std::uint8_t> const* active_vertices)
+{
+    MeshAsset result;
+    skin_native_mesh_cpu_into(result,mesh,skeleton,weights,palette,active_vertices);
+    return result;
 }
 MeshAsset skin_native_model_cpu(
     NativeModelResource const& model,

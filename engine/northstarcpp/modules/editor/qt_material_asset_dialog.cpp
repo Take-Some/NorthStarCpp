@@ -4,6 +4,7 @@
 #include "qt_material_asset_dialog.hpp"
 #include "qt_material_authoring.hpp"
 #include "qt_material_graph_editor.hpp"
+// GPU preview is owned by the full editor, not the standalone browser.
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -11,6 +12,9 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QSplitter>
+#include <QHBoxLayout>
+#include <QTimer>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QSet>
@@ -154,6 +158,16 @@ int openMaterialAssetDialog(QWidget* parent,
     auto* form=new QFormLayout(basic);
     auto* shader=new QLineEdit(basic);
     shader->setObjectName("materialShader");
+    auto* fragmentShader=new QLineEdit(basic);
+    fragmentShader->setObjectName("materialFragmentAsset");
+    fragmentShader->setPlaceholderText("assets/shaders/surface.frag (optional)");
+    auto* vertexShader=new QLineEdit(basic);
+    vertexShader->setObjectName("materialVertexAsset");
+    auto* gbufferShader=new QLineEdit(basic);
+    gbufferShader->setObjectName("materialGBufferAsset");
+    auto* vertexHlsl=new QLineEdit(basic);
+    auto* fragmentHlsl=new QLineEdit(basic);
+    auto* gbufferHlsl=new QLineEdit(basic);
     auto* blend=new QComboBox(basic);
     blend->addItems({"opaque","masked","translucent"});
     auto* color=new QLineEdit(basic);
@@ -169,6 +183,12 @@ int openMaterialAssetDialog(QWidget* parent,
     auto* roughness=decimal("materialRoughness");
     auto* cutoff=decimal("materialAlphaCutoff");
     form->addRow("Shader",shader);
+    form->addRow("Vertex GLSL (.vert)",vertexShader);
+    form->addRow("Fragment GLSL (.frag)",fragmentShader);
+    form->addRow("GBuffer GLSL (.frag)",gbufferShader);
+    form->addRow("Vertex HLSL / DXIL (.hlsl)",vertexHlsl);
+    form->addRow("Fragment HLSL / DXIL (.hlsl)",fragmentHlsl);
+    form->addRow("GBuffer HLSL / DXIL (.hlsl)",gbufferHlsl);
     form->addRow("Blend mode",blend);
     form->addRow("Base color",color);
     form->addRow("Metallic",metallic);
@@ -232,9 +252,22 @@ int openMaterialAssetDialog(QWidget* parent,
     graphStatus->setObjectName("materialAssetGraphStatus");
     graphStatus->setWordWrap(true);
     graphLayout->addWidget(graphStatus);
-    auto* graph=new MaterialGraphEditor({},graphPage,contentRoot);
+    auto* graphArea=new QSplitter(Qt::Horizontal,graphPage);
+    graphArea->setObjectName("materialAssetVisualWorkspace");
+    graphArea->setChildrenCollapsible(false);
+    auto* livePreview=new QLabel(graphArea);
+    livePreview->setObjectName("materialAssetGraphPreviewSphere");
+    livePreview->setAlignment(Qt::AlignCenter);
+    livePreview->setMinimumWidth(240);
+    livePreview->setToolTip("Preview of the last saved material (GPU live preview is available in the main editor)");
+    auto* graph=new MaterialGraphEditor({},graphArea,contentRoot);
     graph->setObjectName("materialAssetGraphCanvas");
-    graphLayout->addWidget(graph,1);
+    graphArea->addWidget(livePreview);
+    graphArea->addWidget(graph);
+    graphArea->setStretchFactor(0,2);
+    graphArea->setStretchFactor(1,5);
+    graphArea->setSizes({360,850});
+    graphLayout->addWidget(graphArea,1);
     tabs->addTab(graphPage,"Material Graph");
 
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Close,&dialog);
@@ -250,6 +283,12 @@ int openMaterialAssetDialog(QWidget* parent,
         document=ma::load_descriptor(contentRoot,name);
         writable=true;
         shader->setText(document.value("shader").toString());
+        fragmentShader->setText(document.value("fragment_shader").toString());
+        vertexShader->setText(document.value("vertex_shader").toString());
+        gbufferShader->setText(document.value("gbuffer_shader").toString());
+        vertexHlsl->setText(document.value("vertex_hlsl").toString());
+        fragmentHlsl->setText(document.value("fragment_hlsl").toString());
+        gbufferHlsl->setText(document.value("gbuffer_hlsl").toString());
         blend->setCurrentText(document.value("blend_mode").toString("opaque"));
         color->setText(document.value("base_color").toString("#ffffff"));
         metallic->setValue(document.value("metallic").toDouble());
@@ -275,6 +314,40 @@ int openMaterialAssetDialog(QWidget* parent,
         sphere->setText("Material preview unavailable");
     }
     graph->setEnabled(writable);
+    // Keep the actual renderer's material preview beside the graph.
+    auto refreshVisual=[&] {
+        if(!writable)return;
+        QJsonObject current=document;
+        current["shader"]=shader->text().trimmed();
+        current["base_color"]=color->text().trimmed();
+        current["metallic"]=metallic->value();
+        current["roughness"]=roughness->value();
+        current["alpha_cutoff"]=cutoff->value();
+        current["blend_mode"]=blend->currentText();
+        current["two_sided"]=twoSided->isChecked();
+        if(graph->enabled())current["graph"]=graph->graph();
+        Q_UNUSED(current);
+        livePreview->setPixmap(sphere->pixmap());
+        if(sphere->pixmap().isNull())
+            livePreview->setText(sphere->text());
+    };
+    QObject::connect(graph,&MaterialGraphEditor::graphChanged,
+                     &dialog,refreshVisual);
+    // The library editor uses a saved-material thumbnail, not GPU shader staging.
+                     // Graph validation still reports any compile error on Save.
+    QObject::connect(color,&QLineEdit::textChanged,
+                     &dialog,[refreshVisual](QString const&){refreshVisual();});
+    QObject::connect(metallic,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                     &dialog,[refreshVisual](double){refreshVisual();});
+    QObject::connect(roughness,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                     &dialog,[refreshVisual](double){refreshVisual();});
+    QObject::connect(blend,QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     &dialog,[refreshVisual](int){refreshVisual();});
+    refreshVisual();
+    if(writable) {
+        tabs->setCurrentWidget(graphPage);
+        // No renderer startup is required in the standalone Asset Browser.
+    }
     save->setEnabled(writable);
     surface->setEnabled(writable);
     QObject::connect(save,&QPushButton::clicked,&dialog,[&] {
@@ -287,6 +360,23 @@ int openMaterialAssetDialog(QWidget* parent,
         try {
             auto updated=document;
             updated["shader"]=shader->text().trimmed();
+            auto setShader=[&](char const* key,QLineEdit* input,QString const& suffix) {
+                auto path=input->text().trimmed();
+                if(!path.isEmpty() &&
+                   (!path.endsWith(suffix,Qt::CaseInsensitive) ||
+                    path.startsWith('/') || path.contains(':') ||
+                    path.contains('\\') || path.contains('@') ||
+                    path.contains("//") || path=="." || path.contains("../") ||
+                    path.endsWith("/..") || path.contains("/./")))
+                    throw std::invalid_argument("Shader asset must be a safe project-relative path");
+                updated[key]=path;
+            };
+            setShader("fragment_shader",fragmentShader,".frag");
+            setShader("vertex_shader",vertexShader,".vert");
+            setShader("gbuffer_shader",gbufferShader,".frag");
+            setShader("vertex_hlsl",vertexHlsl,".hlsl");
+            setShader("fragment_hlsl",fragmentHlsl,".hlsl");
+            setShader("gbuffer_hlsl",gbufferHlsl,".hlsl");
             updated["blend_mode"]=blend->currentText();
             updated["base_color"]=color->text().trimmed();
             updated["metallic"]=metallic->value();

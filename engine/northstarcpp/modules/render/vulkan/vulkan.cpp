@@ -1,5 +1,6 @@
 // NorthStarCpp Vulkan GPU provider, experimental Win32 baseline.
 // Implementation is isolated from ABI 5 and remains non-default.
+#include "../../shared/frame_memory_counters.hpp"
 #include "renderer_private.hpp"
 #include "module_provider.hpp"
 #include <northstarcpp/render_timing_api.h>
@@ -9,6 +10,7 @@
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_lights_api.h>
+#include <northstarcpp/render_pick_api.h>
 #include <stdexcept>
 #include <cstdint>
 using northstarcpp::render::vulkan::Renderer;
@@ -123,6 +125,136 @@ int set_ui_rgba(void* renderer,const std::uint8_t* pixels,
 }
 const NorthStarRenderUiApi ui_api{NORTHSTARCPP_RENDER_UI_ABI,
     sizeof(NorthStarRenderUiApi),set_ui_rgba};
+const NorthStarRenderUiEffectsApi ui_effects_api{
+    NORTHSTARCPP_RENDER_UI_EFFECTS_ABI,
+    sizeof(NorthStarRenderUiEffectsApi),
+    [](void* renderer,const NorthStarRenderUiHoverFx* fx)->int {
+        return guarded([&] {
+            if(!renderer)throw std::invalid_argument("Null Vulkan UI renderer");
+            static_cast<Renderer*>(renderer)->set_ui_hover_fx(fx);
+        });
+    }};
+const NorthStarRenderUiShadersApi ui_shaders_api{
+    NORTHSTARCPP_RENDER_UI_SHADERS_ABI,sizeof(NorthStarRenderUiShadersApi),
+    nullptr,
+    [](void* renderer,const uint32_t* words,uint32_t count)->int {
+        return guarded([&] {
+            if(!renderer || (!words && count) || count>262144u)
+                throw std::invalid_argument("Invalid project UI SPIR-V");
+            if(words && (count<5 || words[0]!=0x07230203u))
+                throw std::invalid_argument("Project UI fragment is not SPIR-V");
+            static_cast<Renderer*>(renderer)->set_ui_fragment_spirv(words,count);
+        });
+    }};
+int read_cube_id(void* instance,std::uint32_t x,std::uint32_t y,
+                 std::int32_t* result) {
+    return guarded([&] {
+        if(!instance || !result)
+            throw std::invalid_argument("Invalid Vulkan GPU ID picking request");
+        *result=static_cast<Renderer*>(instance)->pick_cube(x,y);
+    });
+}
+int set_pick_world(void* ptr,NorthStarRenderPickVertex const* vertices,
+                   std::uint32_t count) {
+    return guarded([&] {if(!ptr)throw std::invalid_argument("Missing Vulkan picker");
+        static_cast<Renderer*>(ptr)->set_pick_triangles(vertices,count);});
+}
+int set_pick_cube_ids(void* ptr,std::uint64_t const* ids,std::uint32_t count) {
+    return guarded([&] {if(!ptr)throw std::invalid_argument("Missing Vulkan picker");
+        static_cast<Renderer*>(ptr)->set_pick_cubes(ids,count);});
+}
+int read_pick_entity(void* ptr,std::uint32_t x,std::uint32_t y,
+                     std::uint64_t* entity) {
+    return guarded([&] {if(!ptr||!entity)throw std::invalid_argument("Invalid Vulkan picker");
+        *entity=static_cast<Renderer*>(ptr)->pick_entity(x,y);});
+}
+int async_pick_enqueue(void* renderer,NorthStarRenderPickAsyncRequest const* request) {
+    return guarded([&] {
+        if(!renderer||!request)
+            throw std::invalid_argument("Missing Vulkan async pick request");
+        if(!static_cast<Renderer*>(renderer)->enqueue_async_pick(*request))
+            throw std::runtime_error("Async Vulkan pick ring busy");
+    });
+}
+int async_pick_poll(void* renderer,std::uint64_t id,
+                    NorthStarRenderPickAsyncResult* result) {
+    return guarded([&] {
+        if(!renderer||!result)
+            throw std::invalid_argument("Missing Vulkan async pick result");
+        *result=static_cast<Renderer*>(renderer)->poll_async_pick(id);
+    });
+}
+int async_pick_invalidate(void* renderer,std::uint64_t minGeneration) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing Vulkan async picker");
+        static_cast<Renderer*>(renderer)->invalidate_async_pick(minGeneration);
+    });
+}
+const NorthStarRenderPickAsyncApi pick_async_api{
+    NORTHSTARCPP_RENDER_PICK_ASYNC_ABI,sizeof(NorthStarRenderPickAsyncApi),
+    async_pick_enqueue,async_pick_poll,async_pick_invalidate};
+const NorthStarRenderPickApiV2 pick_api_v2{
+    NORTHSTARCPP_RENDER_PICK_V2_ABI,sizeof(NorthStarRenderPickApiV2),
+    set_pick_world,set_pick_cube_ids,read_pick_entity};
+const NorthStarRenderPickApi pick_api{
+    NORTHSTARCPP_RENDER_PICK_ABI,sizeof(NorthStarRenderPickApi),read_cube_id};
+int shader_bind_materials(void* instance,const char* const* refs,std::uint32_t count) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("Null Vulkan material shader binding");
+        static_cast<Renderer*>(instance)->set_material_references(refs,count);
+    });
+}
+int shader_queue_fragment(void* instance,const char* ref,
+                          const std::uint32_t* spirv,std::uint32_t words) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("Null Vulkan shader reload renderer");
+        static_cast<Renderer*>(instance)->queue_material_fragment_spirv(ref,spirv,words);
+    });
+}
+int shader_status(void* instance,const char* ref,NorthStarShaderReloadStatus* status) {
+    return guarded([&] {
+        if(!instance||!status ||
+           !static_cast<Renderer*>(instance)->shader_reload_status(ref,*status))
+            throw std::invalid_argument("Invalid Vulkan shader reload status request");
+    });
+}
+int shader_queue_stage(void* instance,const char* ref,std::uint32_t stage,
+                       std::uint32_t format,const std::uint8_t* bytes,
+                       std::uint32_t size) {
+    return guarded([&] {
+        if(!instance || format!=NS_SHADER_BINARY_SPIRV || !bytes ||
+           size<24 || size%4 || size>NORTHSTARCPP_SHADER_RELOAD_MAX_BINARY_BYTES)
+            throw std::invalid_argument("Vulkan hot reload requires SPIR-V");
+        std::vector<std::uint32_t> words(size/4);
+        std::memcpy(words.data(),bytes,size);
+        static_cast<Renderer*>(instance)->queue_material_stage_spirv(
+            ref,stage,words.data(),static_cast<std::uint32_t>(words.size()));
+    });
+}
+int set_postfx_look(void* instance,NorthStarRenderPostFxSettings const* value) {
+    return guarded([&] {
+        if(!instance||!value)
+            throw std::invalid_argument("Missing Vulkan filmic look parameters");
+        static_cast<Renderer*>(instance)->set_film_look(*value);
+    });
+}
+int get_postfx_look(void* instance,NorthStarRenderPostFxSettings* result) {
+    return guarded([&] {
+        if(!instance||!result||result->struct_size<sizeof(*result))
+            throw std::invalid_argument("Vulkan PostFX output buffer too small");
+        *result=static_cast<Renderer*>(instance)->get_film_look();
+    });
+}
+const NorthStarRenderPostFxApi postfx_api{
+    NORTHSTARCPP_RENDER_POSTFX_ABI,sizeof(NorthStarRenderPostFxApi),
+    set_postfx_look,get_postfx_look};
+const NorthStarRenderShaderReloadApiV2 shader_reload_v2{
+    NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_ABI,
+    sizeof(NorthStarRenderShaderReloadApiV2),
+    shader_bind_materials,shader_queue_stage,shader_status};
+const NorthStarRenderShaderReloadApi shader_reload_api{
+    NORTHSTARCPP_RENDER_SHADER_RELOAD_ABI,sizeof(NorthStarRenderShaderReloadApi),
+    shader_bind_materials,shader_queue_fragment,shader_status};
 const NorthStarRenderApi render_api{create,destroy,draw,sky};
 const NorthStarRenderTrianglesApi triangles_api{
     NORTHSTARCPP_RENDER_TRIANGLES_ABI,triangles};
@@ -191,6 +323,75 @@ const NorthStarModule timing_module{
 }
 extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarModule*
 northstar_module_query(std::uint32_t host,const char* capability,std::uint32_t version) {
+    if(version==NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI) {
+        auto const& api=northstarcpp::diagnostics::frame_memory::api;
+        static const NorthStarModule extension{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI,sizeof(api),&api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI) {
+        static const NorthStarModule ext{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI,
+            sizeof(postfx_api),&postfx_api,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI) {
+        static const NorthStarModule ext{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI,
+            sizeof(shader_reload_v2),&shader_reload_v2,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_SHADER_RELOAD_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_SHADER_RELOAD_MODULE_ABI,
+            sizeof(shader_reload_api),&shader_reload_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI,sizeof(pick_async_api),
+            &pick_async_api,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI,sizeof(pick_api_v2),
+            &pick_api_v2,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_PICK_MODULE_ABI,sizeof(pick_api),&pick_api,
+            last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_UI_SHADERS_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan","1.0.0",
+            NORTHSTARCPP_RENDER_UI_SHADERS_MODULE_ABI,
+            sizeof(ui_shaders_api),&ui_shaders_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_UI_EFFECTS_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan","1.0.0",
+            NORTHSTARCPP_RENDER_UI_EFFECTS_MODULE_ABI,sizeof(ui_effects_api),
+            &ui_effects_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_UI_MODULE_ABI)
         return match(ui_module,host,capability,version);
     if(version==NORTHSTARCPP_RENDER_DEVICE_MODULE_ABI)

@@ -77,8 +77,8 @@ def audit()->dict:
     if not ("target_link_libraries(northstarcpp_runtime PUBLIC northstarcpp_math"
             in engine and "northstarcpp_core" in engine):
         errors.append("Original foundation is not linked directly to engine runtime")
-    if "DESTINATION sdk/include/northstarcpp" not in cmake:
-        errors.append("Foundation headers are not installed into SDK")
+    if 'install(DIRECTORY "${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}/northstarcpp"' not in cmake:
+        errors.append("Maintained API headers are not installed into SDK")
     if (ROOT/"tests/foundation_original_smoke.cpp").is_file() is False:
         errors.append("Missing real linked-original-source smoke test")
 

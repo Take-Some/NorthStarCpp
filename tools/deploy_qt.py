@@ -59,7 +59,7 @@ def deploy(package: Path, gpp: str, system_dlls: set[str]) -> dict:
     environment["PATH"] = str(mingw) + os.pathsep + environment.get("PATH", "")
     cmd = [str(tool), "--release", "--no-translations",
            "--no-system-d3d-compiler", "--no-system-dxc-compiler",
-           "--no-opengl-sw", "--no-network", "--no-svg",
+           "--no-opengl-sw", "--no-network",
            "--skip-plugin-types", "generic,iconengines,networkinformation,tls",
            "--no-compiler-runtime", "--dir", str(bin_dir), str(browser)]
     result = subprocess.run(cmd, cwd=bin_dir, capture_output=True, text=True,
@@ -161,11 +161,12 @@ QT_TOOL_EXECUTABLES = (
 
 
 def isolate_qt_runtime(package: Path) -> dict:
-    """Relocate verified Qt runtime and its standalone tools into bin/qt_tools.
+    """Keep the Qt runtime in bin/qt_tools, with native launchers in bin.
 
-    Process isolation is required when a differently built V8/CRT runtime is
-    present. The function never replaces a target or merges conflicting DLLs.
-    The manifest records every moved file under its new canonical path.
+    Direct execution from Explorer works because the small public EXE starts
+    the Qt-linked program from the directory containing its Qt dependencies.
+    Qt and native V8 may use conflicting CRT builds, so never move Qt DLLs
+    back beside the Player.
     """
     record_path = package / "qt.runtime.json"
     if not record_path.is_file():
@@ -187,19 +188,29 @@ def isolate_qt_runtime(package: Path) -> dict:
                   if (bin_dir / name).is_file()]
     if not tool_names:
         raise QtDeploymentError("No Qt tool to isolate")
-    # All input paths and expected hashes are validated before any move.
+
+    # Validate every source and destination before modifying the stage.
     new_paths = {}
     for rel, info in paths.items():
         part = Path(rel)
-        if not isinstance(rel, str) or len(part.parts) < 2 or                 part.parts[0] != "bin" or ".." in part.parts:
+        if (not isinstance(rel, str) or len(part.parts) < 2 or
+                part.parts[0] != "bin" or ".." in part.parts):
             raise QtDeploymentError("Qt manifest contains unsafe path")
         moved = Path("bin") / "qt_tools" / Path(*part.parts[1:])
         if (package / moved).exists():
             raise QtDeploymentError("Qt isolate destination already exists")
         new_paths[moved.as_posix()] = info
-    for tool in tool_names:
-        if (qt / tool).exists():
-            raise QtDeploymentError("Qt isolate tool collision: " + tool)
+    launchers = {}
+    for name in tool_names:
+        private = qt / name
+        launcher_name = Path(name).stem + "_launcher.exe"
+        launcher = package / "tools" / "qt_launchers" / launcher_name
+        if private.exists():
+            raise QtDeploymentError("Qt isolate tool collision: " + name)
+        if not launcher.is_file():
+            raise QtDeploymentError("Required native Qt launcher is missing: " + str(launcher))
+        launchers[name] = launcher
+
     qt.mkdir()
     for name in tool_names:
         (bin_dir / name).replace(qt / name)
@@ -208,9 +219,16 @@ def isolate_qt_runtime(package: Path) -> dict:
         target = package / moved
         target.parent.mkdir(parents=True, exist_ok=True)
         (package / rel).replace(target)
+    public = {}
+    for name, launcher in launchers.items():
+        destination = bin_dir / name
+        shutil.copy2(launcher, destination)
+        public["bin/" + name] = {
+            "sha256": digest(destination), "size": destination.stat().st_size}
     record["dlls"] = new_paths
     record["layout"] = "process-isolated"
     record["executables"] = ["bin/qt_tools/" + name for name in tool_names]
+    record["launchers"] = public
     record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
                            encoding="utf-8")
     verified_extras(package)
@@ -234,17 +252,38 @@ def verified_extras(package: Path, additional_extras: set[str] | None = None) ->
     required_files = [qt_prefix + "/" + name for name in
                       ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
                        "platforms/qwindows.dll")]
-    if ((package / qt_prefix / "northstarcpp_asset_browser.exe").is_file()):
+    if ((package / qt_prefix / "northstarcpp_asset_browser.exe").is_file() or
+            (layout == "flat" and
+             (package / "bin/northstarcpp_asset_browser.exe").is_file())):
         required_files.append(qt_prefix + "/Qt6Concurrent.dll")
     if layout == "process-isolated":
         executable_paths = record.get("executables")
+        launchers = record.get("launchers")
         if not isinstance(executable_paths, list) or not executable_paths:
             raise QtDeploymentError("Private Qt executable registry missing")
+        if not isinstance(launchers, dict):
+            raise QtDeploymentError("Public Qt launcher registry missing")
+        expected = set()
         for name in executable_paths:
             if not isinstance(name, str) or not name.startswith(qt_prefix + "/") or (
                     Path(name).parent.as_posix() != qt_prefix or
                     not (package / name).is_file()):
                 raise QtDeploymentError("Invalid Qt private executable: " + str(name))
+            public_name = "bin/" + Path(name).name
+            expected.add(public_name)
+            info = launchers.get(public_name)
+            launcher = package / public_name
+            if not isinstance(info, dict) or not launcher.is_file() or (
+                    launcher.stat().st_size != info.get("size") or
+                    digest(launcher) != info.get("sha256")):
+                raise QtDeploymentError("Public Qt launcher is missing or modified: " +
+                                        public_name)
+        if set(launchers) != expected:
+            raise QtDeploymentError("Unexpected public Qt launchers in registry")
+        if any((package / "bin" / lib).exists() for lib in
+               ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
+                "Qt6Concurrent.dll")):
+            raise QtDeploymentError("Qt DLL leaked into public bin")
     for required in required_files:
         if required not in extras:
             raise QtDeploymentError("Qt runtime registry missing " + required)
@@ -304,6 +343,16 @@ def deploy_developer_binary(executable: Path, gpp: str, system_dlls: set[str]) -
                     digest(dest) == digest(source):
                 continue
             shutil.copy2(source, dest)
+        # Include Qt's optional headless platform plugin in developer builds.
+        # The audited production Qt package remains unchanged.
+        offscreen = (Path(gpp).resolve().parent.parent /
+                     "share/qt6/plugins/platforms/qoffscreen.dll")
+        if offscreen.is_file():
+            destination = exe.parent / "platforms/qoffscreen.dll"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if (not destination.is_file() or
+                    digest(destination) != digest(offscreen)):
+                shutil.copy2(offscreen, destination)
         return len(record["dlls"])
 
 

@@ -15,6 +15,15 @@ RendererState::RendererState(HWND target, bool software) : window(target){
         check(device->QueryInterface(__uuidof(IDXGIDevice),
             reinterpret_cast<void**>(dxgi_device.put())), "Get DXGI device");
         check(dxgi_device->GetAdapter(adapter.put()), "Get DXGI adapter");
+        // Size only the immutable texture residency cache to real hardware.
+        // No LOD/texture quality is reduced; unused GPU residency is evicted.
+        DXGI_ADAPTER_DESC adapter_info{};
+        if(SUCCEEDED(adapter->GetDesc(&adapter_info)) &&
+           adapter_info.DedicatedVideoMemory) {
+            auto const quarter=std::uint64_t(adapter_info.DedicatedVideoMemory)/4;
+            material_texture_cache_budget=std::clamp(quarter,
+                512ull*1024ull*1024ull,4096ull*1024ull*1024ull);
+        }
         check(adapter->GetParent(__uuidof(IDXGIFactory2),
             reinterpret_cast<void**>(factory.put())), "Get DXGI factory");
 

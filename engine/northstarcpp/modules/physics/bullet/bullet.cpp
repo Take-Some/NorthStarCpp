@@ -4,6 +4,7 @@
 
 #include <northstarcpp/physics_plugin.h>
 #include "module_provider.hpp"
+#include "bullet_mesh.hpp"
 
 #include <btBulletDynamicsCommon.h>
 
@@ -22,11 +23,16 @@ constexpr double fixed_step = 1.0 / 120.0;
 constexpr double max_frame_time = 0.1;
 
 struct Body {
+    std::unique_ptr<btTriangleMesh> mesh_triangles;
+    std::vector<std::unique_ptr<btCollisionShape>> convex_children;
+    std::unique_ptr<btCollisionShape> child_shape;
     std::unique_ptr<btCollisionShape> shape;
     std::unique_ptr<btRigidBody> rigid;
     float half = 0.f;
     bool resident = true;
     bool alive = true;
+    bool collision_enabled = true;
+    std::uint32_t object_type=0;
 };
 
 Body make_body(std::unique_ptr<btCollisionShape> shape, float mass, btVector3 const& center)
@@ -39,7 +45,7 @@ Body make_body(std::unique_ptr<btCollisionShape> shape, float mass, btVector3 co
     setup.m_startWorldTransform.setIdentity();
     setup.m_startWorldTransform.setOrigin(center);
     setup.m_friction = 0.65f;
-    return {std::move(shape), std::make_unique<btRigidBody>(setup)};
+    return {nullptr,{},nullptr,std::move(shape),std::make_unique<btRigidBody>(setup)};
 }
 
 float axis_input(float value)
@@ -94,7 +100,7 @@ struct World {
                 rigid->setCcdMotionThreshold(half);
                 rigid->setCcdSweptSphereRadius(half * 0.8f);
             }
-            if (object.player) {
+            if (object.initially_controlled) {
                 player = rigid;
                 rigid->setAngularFactor(btVector3(0, 0, 0));
                 rigid->setFriction(0.f);
@@ -187,7 +193,7 @@ struct World {
 
     uint32_t add_runtime_body(NorthStarRigidBody const& object)
     {
-        if (bodies.size() >= 16384u || object.player ||
+        if (bodies.size() >= 16384u || object.initially_controlled ||
             !std::isfinite(object.x) || !std::isfinite(object.y) ||
             !std::isfinite(object.z) || !std::isfinite(object.size) ||
             !std::isfinite(object.mass) || object.size <= 0.f ||
@@ -221,6 +227,71 @@ struct World {
         entry.shape.reset();
     }
 
+    void configure_collider(uint32_t index, NorthStarPhysicsCollider const& spec)
+    {
+        if(index>=bodies.size() || !bodies[index].alive ||
+           spec.enabled>1u || spec.shape>2u)
+            throw std::invalid_argument("Invalid Bullet collider target");
+        for(float f:{spec.width,spec.height,spec.depth})
+            if(!std::isfinite(f)||f<.01f||f>10000.f)
+                throw std::invalid_argument("Invalid Bullet collider dimension");
+        for(float f:{spec.offset_x,spec.offset_y,spec.offset_z})
+            if(!std::isfinite(f)||std::abs(f)>10000.f)
+                throw std::invalid_argument("Invalid Bullet collider offset");
+        if(spec.shape==2u && spec.height<spec.width)
+            throw std::invalid_argument("Capsule height below diameter");
+        auto& body=bodies[index];
+        auto* rigid=body.rigid.get();
+        std::unique_ptr<btCollisionShape> child;
+        if(spec.shape==1u)
+            child=std::make_unique<btSphereShape>(spec.width*.5f);
+        else if(spec.shape==2u)
+            child=std::make_unique<btCapsuleShape>(
+                spec.width*.5f,spec.height-spec.width);
+        else
+            child=std::make_unique<btBoxShape>(btVector3(
+                spec.width*.5f,spec.height*.5f,spec.depth*.5f));
+        auto compound=std::make_unique<btCompoundShape>();
+        btTransform local;
+        local.setIdentity();
+        local.setOrigin(btVector3(spec.offset_x,
+            (spec.shape==1u?spec.width:spec.height)*.5f-body.half+spec.offset_y,spec.offset_z));
+        compound->addChildShape(local,child.get());
+        if(body.resident) {
+            world.removeRigidBody(rigid);
+            body.resident=false;
+        }
+        rigid->setCollisionShape(compound.get());
+        float const mass=rigid->getInvMass()>0.f ?
+            1.f/static_cast<float>(rigid->getInvMass()):0.f;
+        btVector3 inertia(0,0,0);
+        if(mass>0.f)compound->calculateLocalInertia(mass,inertia);
+        rigid->setMassProps(mass,inertia);
+        rigid->updateInertiaTensor();
+        body.shape=std::move(compound);
+        body.child_shape=std::move(child);
+        body.collision_enabled=spec.enabled!=0u;
+        if(body.collision_enabled) {
+            world.addRigidBody(rigid);
+            body.resident=true;
+            rigid->activate(true);
+            world.updateSingleAabb(rigid);
+        }
+    }
+
+    void configure_mesh(uint32_t index,uint32_t mode,uint32_t splits,
+                        const float* vertices,uint32_t vertex_count,
+                        const uint32_t* indices,uint32_t index_count);
+    void set_object_type(uint32_t index,uint32_t type) {
+        if(index>=bodies.size()||!bodies[index].alive||type>5)
+            throw std::invalid_argument("Invalid Bullet object collision type");
+        bodies[index].object_type=type;
+    }
+    uint32_t object_type(uint32_t index) const {
+        return index<bodies.size()&&bodies[index].alive?
+            bodies[index].object_type:UINT32_MAX;
+    }
+
     void set_static_resident(uint32_t index, bool resident)
     {
         if (index>=bodies.size() || !bodies[index].alive ||
@@ -228,6 +299,7 @@ struct World {
             !bodies[index].rigid->isStaticObject())
             throw std::invalid_argument("Only scene static bodies may change Bullet residency");
         auto& body=bodies[index];
+        if (!body.collision_enabled) return;
         if (body.resident==resident) return;
         if (resident) world.addRigidBody(body.rigid.get());
         else world.removeRigidBody(body.rigid.get());
@@ -349,6 +421,8 @@ struct World {
     double elapsed = 0.0;
 };
 
+#include "bullet_mesh_impl.hpp"
+
 void* create(NorthStarRigidBody const* objects, uint32_t count)
 {
     std::unique_ptr<World> result;
@@ -441,6 +515,36 @@ int remove_runtime_body(void* world, uint32_t index)
         static_cast<World*>(world)->remove_runtime_body(index);
     });
 }
+int configure_collider(void* world,uint32_t index,
+                       NorthStarPhysicsCollider const* spec)
+{
+    return guarded([&] {
+        if(!world || !spec)throw std::invalid_argument("Null Bullet collider request");
+        static_cast<World*>(world)->configure_collider(index,*spec);
+    });
+}
+const NorthStarPhysicsColliderApi collider_api{
+    NORTHSTARCPP_PHYSICS_COLLIDER_ABI,configure_collider};
+int configure_mesh(void* world,uint32_t index,uint32_t mode,uint32_t splits,
+                   float const* vertices,uint32_t vertex_count,
+                   uint32_t const* indices,uint32_t index_count) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null Bullet collision world");
+        static_cast<World*>(world)->configure_mesh(
+            index,mode,splits,vertices,vertex_count,indices,index_count);
+    });
+}
+int set_object_type(void* world,uint32_t index,uint32_t type) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null Bullet collision world");
+        static_cast<World*>(world)->set_object_type(index,type);
+    });
+}
+uint32_t object_type(void* world,uint32_t index) {
+    return world?static_cast<World*>(world)->object_type(index):UINT32_MAX;
+}
+const NorthStarPhysicsMeshApi mesh_api{
+    NORTHSTARCPP_PHYSICS_MESH_ABI,configure_mesh,set_object_type,object_type};
 const NorthStarPhysicsRuntimeApi runtime_api{
     NORTHSTARCPP_PHYSICS_RUNTIME_ABI, add_runtime_body, remove_runtime_body};
 
@@ -456,6 +560,19 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if (version == NORTHSTARCPP_PHYSICS_MESH_MODULE_ABI) {
+        static NorthStarModule const ext{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_PHYSICS,"Bullet","3.25",
+            NORTHSTARCPP_PHYSICS_MESH_MODULE_ABI,sizeof(mesh_api),&mesh_api,last_error};
+        return match(ext,host,capability,version);
+    }
+    if (version == NORTHSTARCPP_PHYSICS_COLLIDER_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_PHYSICS, "Bullet", "3.25",
+            NORTHSTARCPP_PHYSICS_COLLIDER_MODULE_ABI, sizeof(collider_api),
+            &collider_api, last_error};
+        return match(extension, host, capability, version);
+    }
     if (version == NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_PHYSICS, "Bullet", "3.25",

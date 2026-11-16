@@ -107,18 +107,7 @@ QImage engineThumbnail(fs::path const& root,std::string const& key, AssetKind ki
                 // Render the entire native composition on this existing
                 // async thumbnail worker; one camera and shared Z buffer.
                 AssetManager assets;
-                assets.mount_directory("",root,100);
-                std::error_code ec;
-                for(auto current=root.parent_path();!current.empty();) {
-                    auto shared=current/"sharedAssets";
-                    if(fs::is_directory(shared,ec)) {
-                        assets.mount_shared_assets(shared);
-                        break;
-                    }
-                    auto upper=current.parent_path();
-                    if(upper==current)break;
-                    current=upper;
-                }
+                prefab_preview::mount_preview_assets(assets,root);
                 auto composition=prefab_preview::load_composition(
                     prefab,assets);
                 if(!composition.drawable.meshes.empty()) {

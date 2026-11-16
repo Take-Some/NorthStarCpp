@@ -37,6 +37,10 @@ void D3D12PlacedTransientAlias::configure(
     std::map<std::tuple<int,int,int,int>,std::uint64_t> keys;
     std::vector<TransientResourceRequest> allocations;
     std::vector<Member> requested;
+    // A transient alias configuration knows its exact membership up front.
+    // Reserve once instead of reallocating both arrays while registering GPU targets.
+    allocations.reserve(requests.size());
+    requested.reserve(requests.size());
     std::uint64_t original_bytes=0;
     for(auto const& req:requests) {
         auto const& d=req.description;

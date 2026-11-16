@@ -16,12 +16,24 @@ void check_ui(VkResult value,const char* name) {
                                  std::to_string(static_cast<int>(value)));
 }
 }
+void Renderer::set_ui_fragment_spirv(const std::uint32_t* words,
+                                    std::uint32_t count) {
+    std::vector<std::uint32_t> next;
+    if(words)next.assign(words,words+count);
+    if(next==ui_fragment_spirv_)return;
+    // The old pipeline may still be referenced by an in-flight submission.
+    if(device_) {
+        check_ui(vkDeviceWaitIdle(device_),"Wait for UI shader reload");
+        destroy_ui_resources();
+    }
+    ui_fragment_spirv_.swap(next);
+}
 void Renderer::set_ui_rgba(const std::uint8_t* pixels,std::uint32_t width,
                             std::uint32_t height,std::uint32_t stride) {
     if(!pixels) {
         if(width||height||stride)
             throw std::invalid_argument("Invalid Vulkan UI clear");
-        ui_cpu_rgba_.clear();ui_width_=ui_height_=0;
+        ui_cpu_rgba_.clear();ui_width_=ui_height_=0;ui_upload_dirty_=true;
         return;
     }
     if(!width||!height||width>8192||height>8192||
@@ -34,6 +46,7 @@ void Renderer::set_ui_rgba(const std::uint8_t* pixels,std::uint32_t width,
                     pixels+static_cast<size_t>(y)*stride,
                     static_cast<size_t>(width)*4);
     ui_cpu_rgba_.swap(owned);ui_width_=width;ui_height_=height;
+    ui_upload_dirty_=true;
 }
 void Renderer::destroy_ui_resources() noexcept {
     if(!device_)return;
@@ -54,6 +67,7 @@ void Renderer::destroy_ui_resources() noexcept {
     ui_image_memory_=VK_NULL_HANDLE;ui_staging_=VK_NULL_HANDLE;
     ui_staging_memory_=VK_NULL_HANDLE;
     ui_image_layout_=VK_IMAGE_LAYOUT_UNDEFINED;
+    ui_upload_dirty_=true;
     ui_gpu_width_=ui_gpu_height_=0;
 }
 void Renderer::ensure_ui_resources() {
@@ -96,6 +110,12 @@ void Renderer::ensure_ui_resources() {
         VkPipelineLayoutCreateInfo layout{
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layout.setLayoutCount=1;layout.pSetLayouts=&ui_set_layout_;
+        VkPushConstantRange hoverRange{};
+        hoverRange.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+        hoverRange.offset=0;
+        hoverRange.size=sizeof(NorthStarRenderUiHoverFx);
+        layout.pushConstantRangeCount=1;
+        layout.pPushConstantRanges=&hoverRange;
         check_ui(vkCreatePipelineLayout(device_,&layout,nullptr,&ui_pipeline_layout_),
                  "Create UI pipeline layout");
         auto shader=[&](const uint32_t* source,size_t count) {
@@ -109,7 +129,9 @@ void Renderer::ensure_ui_resources() {
             return result;
         };
         auto vertex=shader(shaders::ui_vert,std::size(shaders::ui_vert));
-        auto fragment=shader(shaders::ui_frag,std::size(shaders::ui_frag));
+        auto fragment=ui_fragment_spirv_.empty()?
+            shader(shaders::ui_frag,std::size(shaders::ui_frag)):
+            shader(ui_fragment_spirv_.data(),ui_fragment_spirv_.size());
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;
@@ -239,9 +261,11 @@ void Renderer::ensure_ui_resources() {
     vkUpdateDescriptorSets(device_,1,&write,0,nullptr);
     ui_image_layout_=VK_IMAGE_LAYOUT_UNDEFINED;
     ui_gpu_width_=ui_width_;ui_gpu_height_=ui_height_;
+    ui_upload_dirty_=true;
 }
 void Renderer::record_ui_overlay(VkCommandBuffer command,std::uint32_t imageIndex) {
     if(ui_cpu_rgba_.empty()||!ui_image_||!ui_pipeline_)return;
+    if(ui_upload_dirty_) {
     void* mapped=nullptr;
     check_ui(vkMapMemory(device_,ui_staging_memory_,0,ui_cpu_rgba_.size(),0,&mapped),
              "Map Vulkan UI staging");
@@ -282,6 +306,8 @@ void Renderer::record_ui_overlay(VkCommandBuffer command,std::uint32_t imageInde
     dependency.pImageMemoryBarriers=&toSample;
     vkCmdPipelineBarrier2(command,&dependency);
     ui_image_layout_=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ui_upload_dirty_=false;
+    } // Reuse the GPU texture until UI pixels change.
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     color.imageView=image_views_.at(imageIndex);
     color.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -301,6 +327,8 @@ void Renderer::record_ui_overlay(VkCommandBuffer command,std::uint32_t imageInde
     vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,ui_pipeline_);
     vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,
                             ui_pipeline_layout_,0,1,&ui_descriptor_set_,0,nullptr);
+    vkCmdPushConstants(command,ui_pipeline_layout_,
+        VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(ui_hover_fx_),&ui_hover_fx_);
     vkCmdDraw(command,3,1,0,0);
     vkCmdEndRendering(command);
 }

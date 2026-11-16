@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp binary scene and legacy migration regression.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/scene.hpp>
@@ -96,7 +97,7 @@ int main(int argc,char** argv) {
     save_scene(legacy,path);
     auto upgraded=load_scene(path);
     if(upgraded.version!=3 || upgraded.objects.size()!=1 ||
-       upgraded.objects[0].node.id!=1 || !upgraded.objects[0].player)
+       upgraded.objects[0].node.id!=1 || !scene_pawn::is_local(upgraded,upgraded.objects[0]))
         return 6;
     std::filesystem::remove(path,ec);
 

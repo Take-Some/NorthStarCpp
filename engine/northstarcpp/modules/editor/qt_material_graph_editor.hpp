@@ -10,6 +10,9 @@
 class QComboBox;
 class QLineEdit;
 class QLabel;
+class QFormLayout;
+class QScrollArea;
+class QSplitter;
 class QGraphicsScene;
 class QGraphicsRectItem;
 class QGraphicsEllipseItem;
@@ -22,6 +25,7 @@ class MaterialGraphEditor final : public QWidget {
 public:
     explicit MaterialGraphEditor(QJsonObject const& graph={},QWidget* parent=nullptr,
                                  std::filesystem::path functionRoot={});
+    ~MaterialGraphEditor() override;
     QJsonObject graph() const;
     void setGraph(QJsonObject const& graph);
     // Function mode reuses exactly the Material Graph canvas, including
@@ -75,6 +79,11 @@ private:
     QComboBox* palette_{};
     QLineEdit* search_{};
     QLabel* message_{};
+    QWidget* detailsContent_{};
+    QFormLayout* detailsForm_{};
+    QLabel* detailsHint_{};
+    QLabel* stats_{};
+    bool snapEnabled_=true;
     QList<Pin> pins_;
     QHash<QString,QGraphicsRectItem*> graphics_;
     QHash<QString,QGraphicsRectItem*> groupGraphics_;
@@ -92,5 +101,10 @@ private:
     bool wouldCycle(QString const& source,QString const& destination) const;
     void setMessage(QString const& value,bool failure=false);
     void highlightSearch(QString const& phrase);
+    void updateNodeDetails();
+    void applyNodeDetail(QString const& id,QString const& field,
+                         QJsonValue const& value);
+    void focusSelection();
+    void focusAll();
 };
 } // namespace northstarcpp::editor

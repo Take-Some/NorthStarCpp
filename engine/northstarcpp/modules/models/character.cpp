@@ -1,4 +1,5 @@
 #include <northstarcpp/character.hpp>
+#include <northstarcpp/shared_assets.hpp>
 #include "asset_list_file.hpp"
 #include "character_asset_namespace.hpp"
 #include <algorithm>
@@ -108,39 +109,40 @@ std::vector<CharacterAppearance> load_character_appearance(AssetStore const& ass
     CharacterModel const& model, std::string const& material, std::string const& textures)
 {
     using namespace shared_assets::detail;
-    auto const file = read_list_file(assets, material);
-    require(file.kind == 30, "Expected a NorthStar v1 YMAT library");
-    auto const json = parse_json(std::string(file.body.begin(), file.body.end()));
-    auto const& materials = json.get_child("materials");
-    require(json.get<std::string>("schema") == "northstar.ymat.v1" &&
-        materials.size() == file.entries, "Invalid character YMAT library");
+    // Canonical YMAT is a NEF8 kind-4 XML material library. Character
+    // rendering must share the engine.material decoder, not parse v1 JSON.
+    auto const materials = shared_assets::load_materials(assets, material);
     struct Binding {std::string texture; float cutoff;};
     std::map<std::string, Binding> bindings;
-    for (auto const& item : materials) {
-        auto const& value = item.second;
-        auto const name = value.get<std::string>("name");
-        auto const blend = value.get<std::string>("blend");
-        for (auto const& node : value.get_child("textures")) {
-            if (node.second.get<std::string>("slot") != "base_color") continue;
-            auto const reference = node.second.get<std::string>("ref");
-            validate_reference(reference);
-            auto const cutoff = value.get<float>("alpha_cutoff", blend == "masked" ? 0.5f :
-                blend == "alpha" ? 0.15f : 0.f);
-            require(cutoff >= 0.f && cutoff <= 1.f &&
-                bindings.emplace(name,Binding{reference.substr(reference.find('@')+1),cutoff}).second,
+    for (auto const& entry : materials) {
+        for (auto const& texture : entry.textures) {
+            if (texture.slot != "base_color") continue;
+            validate_reference(texture.reference);
+            auto const selector = texture.reference.find('@');
+            require(selector != std::string::npos &&
+                selector + 1 < texture.reference.size() &&
+                std::isfinite(entry.alpha_cutoff) &&
+                entry.alpha_cutoff >= 0.f && entry.alpha_cutoff <= 1.f,
                 "Invalid character YMAT binding");
+            require(bindings.emplace(entry.name,
+                Binding{texture.reference.substr(selector + 1),
+                        entry.alpha_cutoff}).second,
+                "Duplicate character YMAT base-color binding");
         }
     }
     auto dictionary = shared_assets::load_textures(assets, textures);
     std::vector<CharacterAppearance> result;
+    result.reserve(model.parts.size());
     for (auto const& part : model.parts) {
         auto const selector = part.mesh.material.find('@');
-        auto const binding = bindings.find(part.mesh.material.substr(selector+1));
-        require(material.size() >= selector && material.compare(material.size()-selector,selector,part.mesh.material,0,selector) == 0 && binding != bindings.end(),
-            "Character material is missing");
-        auto const found = std::find_if(dictionary.begin(), dictionary.end(), [&](auto const& image) {
-            return image.name == binding->second.texture;
-        });
+        require(selector != std::string::npos &&
+            selector + 1 < part.mesh.material.size() &&
+            part.mesh.material.substr(0, selector) == material,
+            "Character mesh references an unexpected material library");
+        auto const binding = bindings.find(part.mesh.material.substr(selector + 1));
+        require(binding != bindings.end(), "Character material is missing");
+        auto const found = std::find_if(dictionary.begin(), dictionary.end(),
+            [&](auto const& image) { return image.name == binding->second.texture; });
         require(found != dictionary.end(), "Character albedo texture is missing");
         result.push_back({*found,binding->second.cutoff});
     }

@@ -52,7 +52,7 @@ class Catalog {
 public:
     Catalog(std::filesystem::path projects_directory,
             std::filesystem::path catalog_file,
-            std::string engine_version = "0.4.0");
+            std::string engine_version = "0.5.0");
 
     std::vector<Project> list() const;
     Project inspect(std::filesystem::path const& path) const;

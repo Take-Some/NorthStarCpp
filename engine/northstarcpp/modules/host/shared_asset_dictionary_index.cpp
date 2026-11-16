@@ -76,7 +76,9 @@ std::vector<DictionaryEntry> list_dictionary_entries(
     require(ext==".ytd" || ext==".ydd" || ext==".ydr" ||
             ext==".ymat" || ext==".ymt" || ext==".ycd",
             "Expected NEF8 YTD/YDD/YMAT/YMT/YCD dictionary");
-    auto file=parse_list_file(source); // size, deflate and hash checks
+    // Catalog indexes typed content; never parse optional JSON metadata
+    // solely to enumerate virtual children in a concurrent scan.
+    auto file=parse_list_file(source,false); // envelope, DEFLATE and hash checks
     std::vector<DictionaryEntry> output;
     output.reserve(file.entries);
     std::set<std::string> unique;
@@ -105,7 +107,7 @@ std::vector<DictionaryEntry> list_dictionary_entries(
             output.push_back({material.name,0});
         }
     } else if(ext==".ydd" || ext==".ydr") {
-        require(file.kind==2,"Expected native drawable dictionary");
+        require(file.kind==2 || file.kind==6,"Expected native drawable dictionary");
         if (!file.body.empty() && file.body.front()!='{') {
             auto const parsed=load_drawables_from_bytes(source,path);
             require(parsed.size()==file.entries,
@@ -135,7 +137,7 @@ std::vector<DictionaryEntry> list_dictionary_entries(
             output.push_back({std::move(name),0});
         }
     } else {
-        require(file.kind==1,"Expected YTD texture dictionary");
+        require(file.kind==1 || file.kind==5,"Expected YTD texture dictionary");
         Bytes const bytes(file.body);
         require(bytes.size()>=64 && bytes.magic(0,"NETD") &&
                     bytes.integer(4,4)==2 && bytes.integer(8,4)==64 &&

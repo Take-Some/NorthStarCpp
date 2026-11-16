@@ -5,9 +5,12 @@ class QDockWidget;
 class QScrollArea;
 class QWidget;
 class QFormLayout;
+class QLineEdit;
 
 namespace northstarcpp::editor {
 struct InspectorScrollLayout {
+    QWidget* panel=nullptr;
+    QLineEdit* search=nullptr;
     QScrollArea* scroll=nullptr;
     QWidget* content=nullptr;
     QFormLayout* form=nullptr;

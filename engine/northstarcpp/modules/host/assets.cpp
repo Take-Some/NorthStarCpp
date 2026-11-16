@@ -6,12 +6,50 @@
 #include "asset_streaming.hpp"
 #include "asset_streaming_sizes.hpp"
 
+#include <algorithm>
+#include <array>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace northstarcpp {
 namespace {
+
+std::filesystem::path runtime_archives_path()
+{
+#ifdef _WIN32
+    // Resolve ./archive beside the exe, including Qt tools in bin/qt_tools.
+    std::array<wchar_t,32768> buffer{};
+    auto const length=GetModuleFileNameW(nullptr,buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    if(length && length<buffer.size()) {
+        auto const executable=std::filesystem::path(buffer.data()).parent_path();
+        auto const local=executable/"archive";
+        if(std::filesystem::is_directory(local))return local;
+        if(executable.filename()=="qt_tools") {
+            auto const shared=executable.parent_path()/"archive";
+            if(std::filesystem::is_directory(shared))return shared;
+        }
+    }
+#endif
+    return {};
+}
+std::string folded_filename(std::filesystem::path const& path)
+{
+    auto name=path.filename().u8string();
+    std::transform(name.begin(),name.end(),name.begin(),
+        [](unsigned char c) {
+            return static_cast<char>(c>='A' && c<='Z'?c-'A'+'a':c);
+        });
+    return name;
+}
 
 char const* key(std::string const& value)
 {
@@ -61,22 +99,57 @@ void AssetStore::mount_project_assets(std::filesystem::path const& project_root,
         throw std::invalid_argument("Project VFS root is not a directory");
     auto const assets = project_root / "assets";
     auto const has_assets = fs::is_directory(assets);
-    if (!shared_root.empty()) {
-        if (!fs::is_directory(shared_root))
-            throw std::invalid_argument("Engine sharedAssets root is not a directory");
-        // Do not mount the same directory twice: the VFS provider rejects
-        // duplicate roots even when their priorities differ.
-        std::error_code ec;
-        bool const is_project = fs::equivalent(project_root, shared_root, ec) && !ec;
-        ec.clear();
-        bool const is_assets = has_assets &&
-            fs::equivalent(assets, shared_root, ec) && !ec;
-        if (!is_project && !is_assets)
-            mount_shared_assets(shared_root);
+    mount_runtime_archives();
+    if(!shared_root.empty()) {
+        if(fs::is_regular_file(shared_root) && shared_root.extension()==".nsp") {
+            // Compatibility for explicit pack mounts; avoid a second mount.
+            auto const discovered=runtime_archives_path()/shared_root.filename();
+            std::error_code ec;
+            bool const duplicate=fs::equivalent(shared_root,discovered,ec) && !ec;
+            if(!duplicate)mount_archive("",shared_root,shared_root,-90);
+        } else {
+            if(!fs::is_directory(shared_root))
+                throw std::invalid_argument("Engine sharedAssets source is not a directory");
+            std::error_code ec;
+            bool const is_project=fs::equivalent(project_root,shared_root,ec) && !ec;
+            ec.clear();
+            bool const is_assets=has_assets && fs::equivalent(assets,shared_root,ec) && !ec;
+            if(!is_project && !is_assets)
+                mount_directory("",shared_root,-80); // editable development overlay
+        }
     }
     mount_directory("", project_root, 0); // scripts/, project metadata, scenes
     if (has_assets)
         mount_directory("", assets, 100); // textures/, models/, gameplay/
+}
+void AssetStore::mount_runtime_archives(std::filesystem::path const& root)
+{
+    namespace fs=std::filesystem;
+    auto const archives=root.empty()?runtime_archives_path():fs::absolute(root);
+    if(archives.empty())return; // Isolated tests/projects may have no runtime packs.
+    if(!fs::is_directory(archives))
+        throw std::invalid_argument("NSP archive directory does not exist: "+
+            archives.u8string());
+    std::vector<fs::path> packs;
+    for(auto const& entry:fs::directory_iterator(archives)) {
+        if(entry.is_symlink() || !entry.is_regular_file())continue;
+        auto const filename=folded_filename(entry.path());
+        if(filename.size()>4 && filename.substr(filename.size()-4)==".nsp")
+            packs.push_back(entry.path());
+    }
+    if(packs.size()>4096)
+        throw std::runtime_error("NSP archive directory has more than 4096 packs");
+    std::sort(packs.begin(),packs.end(),[](fs::path const& a,fs::path const& b) {
+        return folded_filename(a)<folded_filename(b);
+    });
+    // Baseline < addon packs < project root < project/assets.
+    // Within the addon tier, later alphabetical names override earlier ones.
+    for(auto const& pack:packs) {
+        int const priority=folded_filename(pack)=="northstar_shared.nsp"?-100:-50;
+        mount_archive("",pack,pack,priority);
+        std::clog<<"[engine.assets] mounted NSP "<<pack.u8string()
+                 <<" priority="<<priority<<"\n";
+    }
 }
 void AssetStore::mount_directory(std::string const& prefix,
     std::filesystem::path const& root, int32_t priority)

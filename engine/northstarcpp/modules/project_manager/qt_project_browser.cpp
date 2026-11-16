@@ -3,6 +3,7 @@
 // Qt 6 Widgets + Font Awesome 6 Free (see resources/fontawesome/LICENSE.txt).
 #include <northstarcpp/project_catalog.hpp>
 #include "provider_inventory.hpp"
+#include "../shared/crash_handler.hpp"
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_feature_requirements.hpp>
 #include <northstarcpp/logger.hpp>
@@ -331,6 +332,13 @@ public:
                    [](auto const& c) {return c.capability=="engine.assets" &&
                                               c.id=="directory";}))
                 return 44;
+            // A persisted native vehicle selection must resolve to an actual
+            // ABI-valid DLL, not merely a stale registry entry.
+            if(fs::is_regular_file(ns::executable_directory()/"vehicle_native.dll") &&
+               std::none_of(providerChoices_.begin(),providerChoices_.end(),
+                   [](auto const& c) {return c.capability=="engine.vehicle" &&
+                                              c.id=="native";}))
+                return 61;
             // Actual exported feature declarations and extension tables must
             // be observed, not inferred from the binary filename.
             for(auto const& option:providerChoices_) {
@@ -1352,6 +1360,9 @@ private:
             }
             // A saved choice must remain available. Do not silently launch
             // another backend when its selected DLL was removed.
+            // Refresh at launch to recognize newly installed plugins without
+            // requiring a Project Manager restart.
+            providerChoices_=ns::discover_provider_choices(ns::executable_directory());
             for(auto const& [capability,provider]:current.provider_choices) {
                 auto found=std::find_if(providerChoices_.begin(),providerChoices_.end(),
                     [&](auto const& candidate) {
@@ -1648,6 +1659,7 @@ private:
 
 int main(int argc,char** argv)
 {
+    northstarcpp::diagnostics::install_crash_handler();
     QApplication app(argc,argv);
     if (app.arguments().contains("--smoke-editor-child")) {
         auto const index=app.arguments().indexOf("--smoke-editor-child");

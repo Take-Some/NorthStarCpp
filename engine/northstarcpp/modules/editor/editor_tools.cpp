@@ -124,7 +124,6 @@ std::size_t duplicate(Scene& scene, std::size_t index, bool as_child)
         promote_to_v3(scene);
 
     auto copy = scene.objects[index];
-    copy.player = false;
     std::string const suffix = as_child ? " Child" : " Copy";
     if (copy.name.size() + suffix.size() > 96)
         copy.name.resize(96 - suffix.size());

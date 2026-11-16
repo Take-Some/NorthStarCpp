@@ -45,6 +45,10 @@ layout(location=2) in vec4 vertex_tint;
 layout(location=3) in vec4 vertex_params;
 layout(location=4) in vec3 vertex_world;
 layout(location=0) out vec4 output_color;
+#ifdef NS_GBUFFER
+layout(location=1) out vec4 output_normal_roughness;
+layout(location=2) out vec4 output_emissive_metallic;
+#endif
 const float PI=3.14159265;
 void main() {
     GraphInput p;p.uv=vertex_uv;
@@ -57,8 +61,15 @@ void main() {
     if(opacity < NS_ALPHA_CUTOFF) discard;
 #endif
     if(vertex_params.z>.5) {
+#ifdef NS_GBUFFER
+        output_color=vec4(base.rgb,1);
+        output_normal_roughness=vec4(normalize(vertex_normal),-.7);
+        output_emissive_metallic=vec4(
+            texture(emissive_sampler,vertex_uv).rgb+NS_GRAPH_EMISSIVE(p).rgb,0);
+#else
         output_color=vec4(base.rgb+texture(emissive_sampler,vertex_uv).rgb+
                           NS_GRAPH_EMISSIVE(p).rgb,opacity);
+#endif
         return;
     }
     float metallic=clamp((NS_GRAPH_METAL(p)).x*
@@ -76,6 +87,14 @@ void main() {
         vec3 normalSample=texture(normal_sampler,vertex_uv).xyz*2.0-1.0;
         N=normalize(mat3(T,B,N)*normalSample);
     }
+#ifdef NS_GBUFFER
+    output_color=vec4(base.rgb,1);
+    output_normal_roughness=vec4(N,roughness);
+    output_emissive_metallic=vec4(
+        texture(emissive_sampler,vertex_uv).rgb+NS_GRAPH_EMISSIVE(p).rgb,
+        metallic);
+    return;
+#endif
     vec3 V=normalize(vec3(0.0,0.0,1.0));
     vec3 f0=mix(vec3(.04),base.rgb,metallic);
     float a=roughness*roughness;

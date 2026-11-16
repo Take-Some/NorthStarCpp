@@ -39,6 +39,7 @@ def main() -> None:
     for extension, symbol in (
         ("vert", "material_vertex"),
         ("frag", "material_fragment"),
+        ("frag", "material_gbuffer_fragment"),
         ("comp", "material_skin_compute"),
         ("world.vert", "world_vertex"),
         ("world.frag", "world_fragment"),
@@ -53,7 +54,9 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="northstar-vulkan-shader-") as tmp:
             output = Path(tmp) / (extension + ".spv")
             subprocess.run(
-                [compiler, "-O", "--target-env=vulkan1.3", str(source), "-o", str(output)],
+                [compiler, "-O", "--target-env=vulkan1.3",
+                 *(["-DNS_GBUFFER=1"] if symbol=="material_gbuffer_fragment" else []),
+                 str(source), "-o", str(output)],
                 check=True,
             )
             data = output.read_bytes()

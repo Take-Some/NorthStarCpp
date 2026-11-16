@@ -1,0 +1,33 @@
+{
+  "schema": "northstar.character.v1",
+  "id": "characters/abby",
+  "display_name": "Abby",
+  "model": "characters/abby/models/abby.ydd",
+  "skeleton": "characters/abby/models/abby.ymt",
+  "appearance": {
+    "material": "characters/abby/materials/abby.ymat",
+    "textures": "characters/abby/textures/abby.ytd"
+  },
+  "animations": [
+    {
+      "state": "idle",
+      "source": "characters/abby/animations/mm-explore.ycd",
+      "clip": "abby-mm-explore-idle"
+    },
+    {
+      "state": "walk",
+      "source": "characters/abby/animations/mm-explore.ycd",
+      "clip": "abby-mm-explore-walk-loop-fw"
+    },
+    {
+      "state": "jump",
+      "source": "characters/abby/animations/traversal.ycd",
+      "clip": "abby-ground-jump-run"
+    },
+    {
+      "state": "fall",
+      "source": "characters/abby/animations/fall-medium.ycd",
+      "clip": "abby-fall-medium"
+    }
+  ]
+}

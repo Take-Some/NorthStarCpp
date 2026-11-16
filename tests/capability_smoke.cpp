@@ -36,7 +36,7 @@ int main(int argc, char** argv)
         EcsWorld ecs;
         PhysicsScene physics(make_startup_scene());
         if (mode == "default")
-            return audio.provider_name() == "WinMM" && physics.provider_name() == "Bullet" &&
+            return audio.provider_name() == "WinMM" && physics.provider_name() == "Jolt" &&
                 ecs.provider_name() == "Flecs 4.2.0" ? 0 : 4;
         if (mode != "fixture" || audio.provider_name() != "Fixture Audio" ||
             ecs.provider_name() != "Test memory ECS" || physics.provider_name() != "Fixture Physics")
@@ -44,6 +44,28 @@ int main(int argc, char** argv)
 
         int16_t const sample = 73;
         audio.play({&sample, 1, 24000, 1});
+        // ABI 1 remains functional; ABI 2 is optional on the same provider.
+        AudioEngine engine;
+        if (!engine.supports_voices() || engine.provider_name() != "Fixture Audio")
+            return 10;
+        NorthStarAudioVoiceOptions options{sizeof(NorthStarAudioVoiceOptions),
+            1.0f, 0u, 1u, {1.0f, 2.0f, 3.0f}};
+        NorthStarAudioListener listener{sizeof(NorthStarAudioListener),
+            {0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+        engine.set_listener(listener);
+        auto const voice = engine.play_voice({&sample, 1, 24000, 1}, options);
+        if (voice != 73)
+            return 11;
+        engine.set_voice_gain(voice, 0.5f);
+        engine.set_voice_position(voice, {3, 2, 1});
+        engine.update(0.016f);
+        engine.stop_voice(voice);
+        try {
+            engine.stop_voice(voice);
+            return 12;
+        } catch (std::runtime_error const&) {
+            // Fixture rejects stale voice handles.
+        }
         audio.stop();
         try {
             audio.play({&sample, 1, 24000, 2});

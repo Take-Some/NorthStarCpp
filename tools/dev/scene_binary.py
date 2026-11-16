@@ -164,7 +164,7 @@ def scene_entity_references(data: bytes) -> list[tuple[str, str]]:
             return result
 
         read_text()  # entity name
-        cursor += 12 + 4 + 4 + 1 + 4 + 8 + 8  # transform, proxy, state, IDs
+        cursor += 12 + 4 + 4 + 4 + 8 + 8  # position, size, color, mass, IDs
         for _ in range(3):
             read_text()  # layer, streaming cell, room
         asset = read_text()
@@ -180,8 +180,9 @@ from tools.dev import scene_binary_v2 as _chunked
 
 def pack_listfile(records: list[tuple[int,int,bytes]],
                   entity_cells: dict[int,str] | None = None,
-                  cell_order: list[str] | None = None) -> bytes:
-    return _chunked.pack_listfile(records, entity_cells, cell_order)
+                  cell_order: list[str] | None = None,
+                  record_versions: dict[int,int] | None = None) -> bytes:
+    return _chunked.pack_listfile(records,entity_cells,cell_order,record_versions)
 
 
 def validate_nef8_scene(data: bytes) -> int:

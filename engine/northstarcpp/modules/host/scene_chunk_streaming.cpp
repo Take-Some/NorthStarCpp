@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
-#include <unordered_set>
 #include <utility>
 
 namespace northstarcpp {
@@ -32,60 +31,53 @@ SceneCellAsyncResidency::SceneCellAsyncResidency(
 
 void SceneCellAsyncResidency::apply(SceneWorld const& world)
 {
-    // Work off persistent world residency, not only its one-frame transitions;
-    // a pending asynchronous load must remain requested across later frames.
-    auto const& index=available_;
-    std::unordered_set<std::string> desired{""};
-    for(auto const& chunk:index)
-        if(chunk.cell.empty() || world.cell_loaded(chunk.cell))
-            desired.insert(chunk.cell);
-
-    // Do not hold inactive decoded cells. Pending work is allowed to complete
-    // without cancellation blocking the frame; stale results are discarded.
+    // Poll active I/O even when the planner reused its cell selection.
+    const auto desired=[&](std::string const& cell) {
+        return cell.empty() || world.cell_loaded(cell);
+    };
     for(auto it=resident_.begin();it!=resident_.end();)
-        if(!desired.count(it->first))it=resident_.erase(it);
+        if(!desired(it->first))it=resident_.erase(it);
         else ++it;
     for(auto it=errors_.begin();it!=errors_.end();)
-        if(!desired.count(it->first))it=errors_.erase(it);
+        if(!desired(it->first))it=errors_.erase(it);
         else ++it;
 
-    std::vector<std::string> finished;
-    for(auto& [cell,job]:pending_) {
-        if(job.wait_for(std::chrono::seconds(0))!=std::future_status::ready)
+    for(auto it=pending_.begin();it!=pending_.end();) {
+        auto& [cell,job]=*it;
+        if(job.wait_for(std::chrono::seconds(0))!=std::future_status::ready) {
+            ++it;
             continue;
+        }
         try {
             auto records=job.get();
-            if(desired.count(cell))
-                resident_.insert_or_assign(cell,std::move(records));
+            if(desired(cell))resident_.insert_or_assign(cell,std::move(records));
         } catch(std::exception const& error) {
-            if(desired.count(cell))errors_.insert_or_assign(cell,error.what());
+            if(desired(cell))errors_.insert_or_assign(cell,error.what());
         } catch(...) {
-            if(desired.count(cell))errors_.insert_or_assign(cell,"Unknown Scene cell I/O error");
+            if(desired(cell))errors_.insert_or_assign(cell,"Unknown Scene cell I/O error");
         }
-        finished.push_back(cell);
+        it=pending_.erase(it);
     }
-    for(auto const& cell:finished)pending_.erase(cell);
 
-    // First schedule forced/near cells in SceneWorld's transition order. The
-    // remaining persistent requests are scheduled in deterministic file order.
-    std::vector<std::string> ordered;
-    ordered.reserve(index.size());
-    ordered.push_back("");
-    for(auto const& transition:world.cell_transitions())
-        if(transition.loaded && desired.count(transition.name))
-            ordered.push_back(transition.name);
-    for(auto const& chunk:index)
-        if(desired.count(chunk.cell))
-            ordered.push_back(chunk.cell);
-    std::unordered_set<std::string> seen;
-    auto current=source_;
-    for(auto const& cell:ordered) {
-        if(pending_.size()>=max_in_flight_)break;
-        if(!seen.insert(cell).second || !desired.count(cell) ||
-           resident_.count(cell) || pending_.count(cell) || errors_.count(cell))
-            continue;
+    // Root and newly selected cells have priority, followed by file order.
+    // Existing work is keyed by cell, so duplicate scheduling calls are cheap.
+    const auto schedule=[&](std::string const& cell) {
+        if(!desired(cell) || resident_.count(cell) || pending_.count(cell) || errors_.count(cell))
+            return;
         pending_.emplace(cell,std::async(std::launch::async,
-            [current,cell] {return current->load(cell);}));
+            [current=source_,cell] { return current->load(cell); }));
+    };
+    if(pending_.size()>=max_in_flight_)return;
+    const auto root=std::find_if(available_.begin(),available_.end(),
+        [](auto const& chunk) { return chunk.cell.empty(); });
+    if(root!=available_.end())schedule(root->cell);
+    for(auto const& transition:world.cell_transitions()) {
+        if(pending_.size()>=max_in_flight_)return;
+        if(transition.loaded && has_chunk(transition.name))schedule(transition.name);
+    }
+    for(auto const& chunk:available_) {
+        if(pending_.size()>=max_in_flight_)break;
+        schedule(chunk.cell);
     }
 }
 

@@ -86,10 +86,18 @@ struct ShadercLibrary {
                     module=LoadLibraryExW(file.c_str(),nullptr,
                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|
                         LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                    if(!module) {
+                        file.resize(separator+1);
+                        file+=L"libshaderc_shared.dll";
+                        module=LoadLibraryExW(file.c_str(),nullptr,
+                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|
+                            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                    }
                 }
             }
         }
         if(!module)module=LoadLibraryW(L"shaderc_shared.dll");
+        if(!module)module=LoadLibraryW(L"libshaderc_shared.dll");
         if(!module) {
             std::array<wchar_t,2048> sdk{};
             auto n=GetEnvironmentVariableW(L"VULKAN_SDK",sdk.data(),
@@ -97,11 +105,15 @@ struct ShadercLibrary {
             if(n>0&&n<sdk.size()) {
                 auto path=std::wstring(sdk.data())+L"\\Bin\\shaderc_shared.dll";
                 module=LoadLibraryW(path.c_str());
+                if(!module) {
+                    path=std::wstring(sdk.data())+L"\\Bin\\libshaderc_shared.dll";
+                    module=LoadLibraryW(path.c_str());
+                }
             }
         }
         if(!module)
             throw std::runtime_error(
-                "Vulkan Material Graph v2 requires shaderc_shared.dll "
+                "Vulkan Material Graph v2 requires shaderc_shared.dll or libshaderc_shared.dll "
                 "(install the Vulkan SDK or package its runtime library)");
         const auto bind=[&](auto& field,const char* name) {
             field=reinterpret_cast<std::remove_reference_t<decltype(field)>>(

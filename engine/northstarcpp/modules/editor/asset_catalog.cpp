@@ -1,9 +1,13 @@
 // Cross-platform asset catalog; source of truth is project Content directory.
 #include <northstarcpp/editor_asset_catalog.hpp>
+#include <northstarcpp/embedded_script_api.hpp>
+#include <northstarcpp/nac.hpp>
 #include "asset_catalog_nef8_cache.hpp"
 #include <northstarcpp/shared_assets.hpp>
 #include <northstarcpp/scene.hpp>
 #include <algorithm>
+#include <unordered_set>
+#include <chrono>
 #include <fstream>
 #include <cctype>
 #include <stdexcept>
@@ -22,6 +26,16 @@ bool belongs_to(fs::path const& candidate, fs::path const& root) {
     for(;b!=root.end();++a,++b)
         if(a==candidate.end() || *a!=*b) return false;
     return true;
+}
+void index_time(AssetRecord& record,fs::directory_entry const& entry) noexcept {
+    std::error_code ec;
+    auto stamp=entry.last_write_time(ec);
+    if(ec)return;
+    using namespace std::chrono;
+    // C++17 has no standardized file_clock -> system_clock conversion.
+    auto converted=time_point_cast<milliseconds>(
+        system_clock::now()+(stamp-fs::file_time_type::clock::now()));
+    record.modified_epoch_ms=converted.time_since_epoch().count();
 }
 // Parse bounded prefab metadata during asynchronous catalog indexing only.
 void index_prefab(AssetRecord& record,fs::path const& source) noexcept {
@@ -48,6 +62,7 @@ char const* kind_name(AssetKind k) noexcept {
     switch(k) {
     case AssetKind::folder:return "Folder";
     case AssetKind::mesh:return "Mesh";
+    case AssetKind::collision:return "Collision";
     case AssetKind::material:return "Material";
     case AssetKind::texture:return "Texture";
     case AssetKind::audio:return "Audio";
@@ -64,6 +79,7 @@ char const* kind_name(AssetKind k) noexcept {
 }
 AssetKind kind_from_extension(fs::path const& p) noexcept {
     auto e=lowercase(p.extension().u8string());
+    if(e==".ybn" || e==".ncm")return AssetKind::collision;
     if(e==".ydd" || e==".ydr" || e==".mesh" || e==".obj" || e==".fbx" ||
        e==".gltf" || e==".glb")return AssetKind::mesh;
     auto const filename=lowercase(p.filename().u8string());
@@ -87,14 +103,14 @@ AssetKind kind_from_extension(fs::path const& p) noexcept {
     if(e==".ytd" || e==".png" || e==".jpg" || e==".jpeg" ||
        e==".dds" || e==".tga" || e==".webp" || e==".bmp" ||
        e==".ktx" || e==".ktx2")return AssetKind::texture;
-    if(e==".wav" || e==".ogg" || e==".mp3" || e==".flac")return AssetKind::audio;
+    if(e==".wav" || e==".ogg" || e==".mp3" || e==".flac" || e==".nac")return AssetKind::audio;
     if(e==".nprefab")return AssetKind::prefab;
     if(e==".nscn" || e==".nscene" || e==".ymap" || e==".world")return AssetKind::scene;
     if(e==".js" || e==".mjs" || e==".ysc" || e==".lua" ||
        e==".ts" || e==".py")return AssetKind::script;
     if(e==".ymt")return AssetKind::skeleton;
     if(e==".anim" || e==".ycd" || e==".gltfanim")return AssetKind::animation;
-    if(e==".hlsl" || e==".hlsli" || e==".shader" || e==".vs" ||
+    if(e==".vert" || e==".frag" || e==".hlsl" || e==".hlsli" || e==".shader" || e==".vs" ||
        e==".ps" || e==".cs" || e==".glsl" || e==".spv")
        return AssetKind::shader;
     return AssetKind::other;
@@ -113,7 +129,8 @@ bool safe_virtual_path(std::string const& name) noexcept {
     }
     return name.back()!='/';
 }
-void AssetCatalog::scan(fs::path root,std::size_t max_records) {
+void AssetCatalog::scan(fs::path root,std::size_t max_records,
+                        bool include_embedded_engine_api) {
     entries_.clear();
     entry_index_.clear();
     cache_hits_=0;
@@ -139,6 +156,13 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
         if(entry_error)continue;
         if(entries_.size()>=max_records) {truncated_=true;break;}
         auto relative=it->path().lexically_relative(root_).generic_u8string();
+        // Engine shared on-disk scripts are obsolete. Never expose a writable
+        // filesystem copy in the engine branch or let it shadow compiled API.
+        if(include_embedded_engine_api &&
+           (relative=="scripts" || relative.compare(0,8,"scripts/")==0)) {
+            if(folder)it.disable_recursion_pending();
+            continue;
+        }
         if(!safe_virtual_path(relative)) {
             if(folder)it.disable_recursion_pending();
             continue;
@@ -148,11 +172,46 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
         rec.filename=it->path().filename().u8string();
         rec.directory=folder;
         rec.kind=folder?AssetKind::folder:kind_from_extension(it->path());
+        index_time(rec,*it);
         if(!folder) {
             rec.size=it->file_size(entry_error);
             if(entry_error)rec.size=0;
             if(rec.kind==AssetKind::prefab)
                 index_prefab(rec,it->path());
+            if(rec.kind==AssetKind::audio &&
+               lowercase(it->path().extension().u8string())==".nac" &&
+               rec.size>=40) {
+                std::vector<nac::TrackInfo> tracks;
+                std::string error;
+                if(nac::inspect_file(it->path(),tracks,error)) {
+                    if(tracks.size()>max_records-entries_.size()-1) {
+                        truncated_=true;
+                        break;
+                    }
+                    rec.directory=true;
+                    rec.kind=AssetKind::folder;
+                    rec.virtual_child_count=tracks.size();
+                    rec.container_path=relative;
+                    entries_.push_back(rec);
+                    for(auto const& track:tracks) {
+                        AssetRecord child;
+                        child.entry_name="track-"+std::to_string(track.id);
+                        child.virtual_path=relative+"/"+child.entry_name;
+                        child.filename=track.name;
+                        child.kind=AssetKind::audio;
+                        child.container_path=relative;
+                        child.size=track.payload_bytes;
+                        child.audio_track_id=track.id;
+                        child.audio_sample_rate=track.sample_rate;
+                        child.audio_channels=track.channels;
+                        child.audio_frames=track.frames;
+                        child.modified_epoch_ms=rec.modified_epoch_ms;
+                        entries_.push_back(std::move(child));
+                    }
+                    continue;
+                }
+                // A damaged container stays visible as an ordinary audio file.
+            }
             auto ext=lowercase(it->path().extension().u8string());
             if((ext==".ytd" || ext==".ydd" || ext==".ydr" ||
                  ext==".ymat" || ext==".ymt" || ext==".ycd") && rec.size>=128) {
@@ -188,6 +247,7 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
                         child.container_path=relative;
                         child.entry_name=item.name;
                         child.size=item.size;
+                        child.modified_epoch_ms=rec.modified_epoch_ms;
                         entries_.push_back(std::move(child));
                     }
                     continue;
@@ -240,12 +300,48 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records) {
             record.directory=dir;
             record.kind=dir?AssetKind::folder:AssetKind::prefab;
             record.external_prefab=true;
+            index_time(record,*prefabs);
             if(!dir) {
                 record.size=prefabs->file_size(prefab_ec);
                 if(prefab_ec)record.size=0;
                 index_prefab(record,prefabs->path());
             }
             entries_.push_back(std::move(record));
+        }
+    }
+    // The engine mount includes a read-only virtual directory whose sources
+    // live in the executable, not the filesystem or the project VFS.
+    if(include_embedded_engine_api) {
+        // The physical scripts directory was skipped by the engine scan.
+        // Dedupe only the few virtual script directories, not every asset
+        // in the potentially 100k-entry catalog (memory and CPU reduction).
+        std::unordered_set<std::string> virtual_paths;
+        virtual_paths.reserve(embedded_api::count()*3+1);
+        auto add=[&](std::string path,bool folder,std::size_t bytes) {
+            if(!virtual_paths.emplace(path).second)return;
+            if(entries_.size()>=max_records){truncated_=true;return;}
+            AssetRecord rec;
+            rec.virtual_path=std::move(path);
+            rec.filename=fs::u8path(rec.virtual_path).filename().u8string();
+            rec.kind=folder?AssetKind::folder:AssetKind::script;
+            rec.directory=folder;
+            rec.embedded_engine_api=true;
+            rec.size=bytes;
+            entries_.push_back(std::move(rec));
+        };
+        add("scripts",true,0);
+        auto const* const scripts=embedded_api::entries();
+        auto const count=embedded_api::count();
+        for(std::size_t i=0;i<count;++i) {
+            auto const& script=scripts[i];
+            auto const path=std::string(script.virtual_path);
+            if(!safe_virtual_path(path))continue;
+            auto slash=path.find('/',8);
+            while(slash!=std::string::npos) {
+                add(path.substr(0,slash),true,0);
+                slash=path.find('/',slash+1);
+            }
+            add(path,false,script.source.size());
         }
     }
     // Previous comparator allocated two lowercase strings for every
@@ -287,6 +383,8 @@ std::string AssetCatalog::asset_reference(std::string const& virtual_path) const
 }
 fs::path AssetCatalog::resolve(std::string const& virtual_path) const {
     auto const* record=find(virtual_path);
+    if(record && record->embedded_engine_api)
+        throw std::invalid_argument("Engine API is embedded, not a physical file");
     if(record && record->is_virtual_entry())
         throw std::invalid_argument("ListFile child is not a physical file");
     if(root_.empty() || !safe_virtual_path(virtual_path))

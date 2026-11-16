@@ -13,7 +13,7 @@
   <a href="https://cmake.org/"><img alt="CMake and Ninja" src="https://img.shields.io/badge/Build-CMake%20%2B%20Ninja-064F8C?style=flat-square&amp;logo=cmake&amp;logoColor=white" /></a>
   <a href="https://gcc.gnu.org/"><img alt="GNU GCC" src="https://img.shields.io/badge/Toolchain-GNU%20GCC-4B6C21?style=flat-square&amp;logo=gnu&amp;logoColor=white" /></a>
   <a href="https://www.qt.io/"><img alt="Qt 6" src="https://img.shields.io/badge/Editor-Qt%206-41CD52?style=flat-square&amp;logo=qt&amp;logoColor=white" /></a>
-  <a href="CMakeLists.txt"><img alt="Version 0.4.0" src="https://img.shields.io/badge/Version-0.4.0-DFAC35?style=flat-square" /></a>
+  <a href="CMakeLists.txt"><img alt="Version 0.6.2" src="https://img.shields.io/badge/Version-0.6.2-DFAC35?style=flat-square" /></a>
   <a href="docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md"><img alt="Active development" src="https://img.shields.io/badge/Status-Active%20Development-F59E0B?style=flat-square" /></a>
 </p>
 

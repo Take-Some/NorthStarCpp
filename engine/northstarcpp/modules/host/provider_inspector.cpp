@@ -3,6 +3,8 @@
 #include <northstarcpp/provider_inspector.hpp>
 #include "module_loader.hpp"
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/ui_plugin.h>
+#include <northstarcpp/vehicle_plugin.h>
 #include <exception>
 #include <utility>
 
@@ -32,7 +34,7 @@ ProviderResolution inspect(char const* capability, std::uint32_t abi,
 
 std::vector<ProviderResolution> inspect_engine_providers() {
     std::vector<ProviderResolution> providers;
-    providers.reserve(13);
+    providers.reserve(15);
     providers.push_back(inspect<NorthStarGeometryApi>(
         NORTHSTARCPP_CAPABILITY_GEOMETRY, NORTHSTARCPP_GEOMETRY_ABI));
     providers.push_back(inspect<NorthStarCollisionApi>(
@@ -49,12 +51,16 @@ std::vector<ProviderResolution> inspect_engine_providers() {
         NORTHSTARCPP_CAPABILITY_ECS, NORTHSTARCPP_ECS_API_VERSION));
     providers.push_back(inspect<NorthStarPhysicsApi>(
         NORTHSTARCPP_CAPABILITY_PHYSICS, NORTHSTARCPP_PHYSICS_ABI));
+    providers.push_back(inspect<NorthStarVehicleApi>(
+        NORTHSTARCPP_CAPABILITY_VEHICLE, NORTHSTARCPP_VEHICLE_ABI));
     providers.push_back(inspect<NorthStarAudioApi>(
         NORTHSTARCPP_CAPABILITY_AUDIO, NORTHSTARCPP_AUDIO_ABI));
     providers.push_back(inspect<NorthStarInputApi>(
         NORTHSTARCPP_CAPABILITY_INPUT, NORTHSTARCPP_INPUT_ABI));
     providers.push_back(inspect<NorthStarScriptingApi>(
         NORTHSTARCPP_CAPABILITY_SCRIPTING, NORTHSTARCPP_SCRIPTING_ABI));
+    providers.push_back(inspect<NorthStarUIApi>(
+        NORTHSTARCPP_CAPABILITY_UI, NORTHSTARCPP_UI_ABI));
 #ifdef _WIN32
     // Two distinct render-provider requests: the primary D3D12 and D3D11
     // compatibility backend. The active viewport may already own an instance.

@@ -240,6 +240,28 @@ Composition compose(Scene const& prefab,DrawableLoader const& models,
         warning(result,"No visible geometry in this prefab");
     return result;
 }
+void mount_preview_assets(AssetStore& assets,
+                          std::filesystem::path const& content_root) {
+    namespace fs=std::filesystem;
+    assets.mount_directory("",content_root,100);
+    for(auto current=content_root.parent_path();!current.empty();) {
+        std::error_code ec;
+        auto const shared=current/"sharedAssets";
+        if(fs::is_directory(shared,ec) && !ec) {
+            ec.clear();
+            bool const already_mounted=fs::equivalent(shared,content_root,ec);
+            if(ec)
+                throw std::runtime_error("Cannot compare prefab preview VFS roots");
+            if(!already_mounted)
+                assets.mount_shared_assets(shared);
+            break;
+        }
+        auto const parent=current.parent_path();
+        if(parent==current)break;
+        current=parent;
+    }
+}
+
 Composition load_composition(Scene const& prefab,AssetStore const& assets) {
     return compose(prefab,[&](std::string const& ref) {
         auto const at=ref.find('@');

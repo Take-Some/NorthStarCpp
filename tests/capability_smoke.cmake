@@ -32,9 +32,9 @@ file(SHA256 "${EDITOR}" editor_before)
 file(SHA256 "${staged_PLAYER}" player_before)
 file(WRITE "${host}/bootstrap.json" "{\"plugins\":{\"path\":\"./providers\"}}\n")
 
-set(bullet "${host}/providers/zz_bullet.dll")
+set(jolt "${host}/providers/zz_jolt.dll")
 set(alternative "${host}/providers/02_fixture.DLL")
-configure_file("${BULLET}" "${bullet}" COPYONLY)
+configure_file("${JOLT}" "${jolt}" COPYONLY)
 configure_file("${FIXTURE}" "${alternative}" COPYONLY)
 file(WRITE "${host}/providers/00_broken.dll" "Invalid DLL")
 configure_file("${WINMM}" "${host}/providers/zz_winmm.dll" COPYONLY)
@@ -51,13 +51,6 @@ run("${staged_PLAYER}" --warp --check-scene --scene
     "${TEST_ROOT}/defaults/editor created.nscn")
 
 file(RENAME "${alternative}" "${host}/inactive.disabled")
-run("${staged_PROBE}" bullet)
-run("${staged_PLAYER}" --warp --check-scene --scene
-    "${TEST_ROOT}/defaults/editor created.nscn")
-
-file(REMOVE "${bullet}")
-set(jolt "${host}/providers/jolt.dll")
-configure_file("${JOLT}" "${jolt}" COPYONLY)
 run("${staged_PROBE}" jolt)
 run("${staged_PLAYER}" --warp --check-scene --scene
     "${TEST_ROOT}/defaults/editor created.nscn")

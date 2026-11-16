@@ -11,7 +11,7 @@ from tools.v8_provider.player_e2e import run
 
 SCRIPT = r"""import { Camera, Input, Events, Player } from "@northstar/engine";
 (() => {
-    // The engine loads sharedAssets/scripts/playerCamera.js automatically,
+    // The engine loads its compiled default playerCamera.js automatically,
     // BEFORE the project game script. A project may replace the same VFS path.
     if (typeof NorthStar !== "object" || NorthStar.apiVersion !== 1 ||
         typeof NorthStar.camera.createViewController !== "function" ||

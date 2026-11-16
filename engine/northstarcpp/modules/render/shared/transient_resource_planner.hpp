@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
-#include <unordered_set>
 #include <vector>
 
 namespace northstarcpp::render {
@@ -37,18 +36,22 @@ inline TransientAllocationPlan plan_transient_resources(
     TransientAllocationPlan result;
     result.resource_to_slot.assign(graph.resources().size(),-1);
     std::vector<TransientResourceRequest> ordered=requests;
-    std::unordered_set<ResourceId> seen;
+    // Direct resource indexing avoids per-entry hash-node allocations.
+    std::vector<std::uint8_t> seen(graph.resources().size(), 0);
     for(const auto& req:ordered) {
-        if(req.resource>=graph.resources().size()||!seen.insert(req.resource).second)
+        if(req.resource>=seen.size() || seen[req.resource])
             throw std::invalid_argument("Invalid or duplicate transient resource");
+        seen[req.resource]=1;
         if(graph.resources()[req.resource].imported)
             throw std::invalid_argument("Imported resources must not alias");
         if(req.bytes==0||req.alignment==0||
            (req.alignment&(req.alignment-1))!=0||
            req.bytes>std::numeric_limits<std::uint64_t>::max()-(req.alignment-1))
             throw std::invalid_argument("Invalid transient allocation description");
-        if(execution.lifetimes[req.resource].first<0)
-            throw std::invalid_argument("Unused transient resource requested");
+        const auto life=execution.lifetimes[req.resource];
+        if(life.first<0 || life.second<life.first ||
+           static_cast<std::size_t>(life.second)>=execution.passes.size())
+            throw std::invalid_argument("Invalid transient resource lifetime");
     }
     std::sort(ordered.begin(),ordered.end(),[&](const auto& a,const auto& b) {
         const auto la=execution.lifetimes[a.resource];
@@ -81,21 +84,37 @@ inline TransientAllocationPlan plan_transient_resources(
             throw std::overflow_error("Transient memory total overflow");
         result.committed_bytes+=slot.reserved_bytes;
     }
-    // Peak counts physical memory per occupied slot, not logical resource
-    // bytes. It is a conservative planning metric (not GPU residency).
-    for(std::size_t step=0;step<execution.passes.size();++step) {
-        std::uint64_t live=0;
-        for(std::size_t slot=0;slot<result.slots.size();++slot) {
-            bool in_use=false;
-            for(const auto& req:ordered) {
-                if(result.resource_to_slot[req.resource]!=static_cast<int>(slot))continue;
-                const auto lifetime=execution.lifetimes[req.resource];
-                if(lifetime.first<=static_cast<int>(step) && lifetime.second>=static_cast<int>(step)) {
-                    in_use=true;break;
-                }
-            }
-            if(in_use)live+=result.slots[slot].reserved_bytes;
+    // Each slot may be reused only after the previous lifetime ended.
+    // Account for its physical allocation once per live interval. A single
+    // event array replaces the passes x slots x requests nested scan.
+    // End events are applied before begin events at the next pass, so a
+    // strictly non-overlapping handoff does not inflate the measured peak.
+    struct LiveEvents { std::uint64_t begin=0, end=0; };
+    std::vector<LiveEvents> events(execution.passes.size());
+    for(const auto& req:ordered) {
+        const auto life=execution.lifetimes[req.resource];
+        const auto slot=result.resource_to_slot[req.resource];
+        const auto bytes=result.slots[static_cast<std::size_t>(slot)].reserved_bytes;
+        auto& begin=events[static_cast<std::size_t>(life.first)].begin;
+        if(begin>std::numeric_limits<std::uint64_t>::max()-bytes)
+            throw std::overflow_error("Transient live bytes overflow");
+        begin+=bytes;
+        const auto after=static_cast<std::size_t>(life.second)+1;
+        if(after<events.size()) {
+            auto& end=events[after].end;
+            if(end>std::numeric_limits<std::uint64_t>::max()-bytes)
+                throw std::overflow_error("Transient released bytes overflow");
+            end+=bytes;
         }
+    }
+    std::uint64_t live=0;
+    for(const auto& event:events) {
+        if(event.end>live)
+            throw std::logic_error("Invalid transient slot lifetime overlap");
+        live-=event.end;
+        if(event.begin>std::numeric_limits<std::uint64_t>::max()-live)
+            throw std::overflow_error("Transient peak bytes overflow");
+        live+=event.begin;
         result.peak_live_bytes=std::max(result.peak_live_bytes,live);
     }
     return result;

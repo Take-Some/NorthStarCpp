@@ -6,6 +6,9 @@ inline constexpr char scene_fxaa_shader[] = R"(
 cbuffer PostFx : register(b0) {
     float4 viewport_size; // width, height, reciprocal width, reciprocal height
     float4 bloom_params; // bloom strength, bloom enabled, threshold, FXAA enabled
+    float4 exposure_params; // same constant layout as HDR
+    float4 film_params; // grain, vignette, chromatic pixels, saturation
+    float4 film_extra; // contrast, exposure EV, HDR input, frame
 };
 Texture2D scene_color : register(t0);
 Texture2D bloom_color : register(t1);
@@ -25,13 +28,32 @@ float luma(float3 color) {
     return dot(color,float3(0.299,0.587,0.114));
 }
 float4 compose_scene(float3 filtered, float2 uv) {
-    if(bloom_params.y>0.5) {
-        // Quarter-resolution prefiltered highlights, linear sampling
-        // produces a soft halo without applying blur to the HUD.
-        float3 glow=bloom_color.SampleLevel(scene_sampler,uv,0).rgb;
-        filtered=saturate(filtered+glow*bloom_params.x);
+    // Film and lens grading run on the scene before any HUD/UI overlay.
+    if(film_params.z>0.0) {
+        float2 chroma=(uv-float2(.5,.5))*viewport_size.zw*(film_params.z*2.0);
+        filtered.r=sample_scene(uv+chroma).r;
+        filtered.b=sample_scene(uv-chroma).b;
     }
-    return float4(filtered,1);
+    if(bloom_params.y>0.5) {
+        float3 glow=bloom_color.SampleLevel(scene_sampler,uv,0).rgb;
+        filtered+=glow*bloom_params.x;
+    }
+    if(film_extra.z<0.5)filtered*=exp2(film_extra.y);
+    float lum=dot(filtered,float3(.2126,.7152,.0722));
+    filtered=lerp(lum.xxx,filtered,film_params.w);
+    filtered=(filtered-.5)*film_extra.x+.5;
+    if(film_params.y>0.0) {
+        float2 centered=uv-float2(.5,.5);
+        centered.x*=viewport_size.x/max(viewport_size.y,1.0);
+        filtered*=1.0-film_params.y*smoothstep(.03,.55,dot(centered,centered));
+    }
+    if(film_params.x>0.0) {
+        float2 pixel=floor(uv*viewport_size.xy);
+        float noise=frac(sin(dot(pixel,float2(12.9898,78.233))+
+                             film_extra.w*17.371)*43758.5453)-.5;
+        filtered+=noise*film_params.x;
+    }
+    return float4(saturate(filtered),1);
 }
 float4 bloom_additive_ps(FSOut p):SV_Target {
     // The unfiltered scene has already been copied into the backbuffer.
@@ -40,6 +62,8 @@ float4 bloom_additive_ps(FSOut p):SV_Target {
     return float4(glow*bloom_params.x,0);
 }
 float4 fxaa_ps(FSOut p):SV_Target {
+    // No blurring when AA is disabled; film look remains a separate effect.
+    if(bloom_params.w<0.5)return compose_scene(sample_scene(p.uv),p.uv);
     float2 inv_screen=viewport_size.zw;
     float3 rgbNW=sample_scene(p.uv+float2(-1,-1)*inv_screen);
     float3 rgbNE=sample_scene(p.uv+float2(1,-1)*inv_screen);

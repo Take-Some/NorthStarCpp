@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // CameraDirector invariants and behavior regression tests.
 #include <northstarcpp/camera.hpp>
 #include <northstarcpp/camera_track.hpp>
@@ -12,7 +13,7 @@ int main() {
         CameraTarget t;
         t.eye={0,1.6f,0};t.yaw=0.f;t.pitch=0.f;t.ignore_object=0;
         Scene scene;
-        scene.objects.push_back({"Player",{0,0,0},1.5f,0xffffff,true,2.f});
+        qa::append(scene,{"Player",{0,0,0},1.5f,0xffffff,true,2.f});
         CameraDirector camera;
         auto check_defaults=[&](char const* step) {
             auto const& settings=camera.settings();
@@ -46,7 +47,7 @@ int main() {
         if(!check_defaults("mode transition"))return 96;
         p=camera.update(.25f,t,&scene);
         if (p.position.z>-0.3f || p.position.z<-4.5f)return 3;
-        scene.objects.push_back({"Wall",{0,1,-2},1.5f,0x888888,false,0.f});
+        qa::append(scene,{"Wall",{0,1,-2},1.5f,0x888888,false,0.f});
         camera.reset();
         p=camera.update(.016f,t,&scene);
         // Occlusion constrains the camera in front of the wall.

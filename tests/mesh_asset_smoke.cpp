@@ -1,6 +1,8 @@
 // NorthStarCpp Wavefront OBJ / Scene V3 mesh smoke.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/mesh_asset.hpp>
+#include <northstarcpp/native_model.hpp>
+#include <northstarcpp/assets.hpp>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -52,6 +54,24 @@ f -3 -2 -1
         reject([]{parse_obj_mesh("v nan 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");});
         reject([]{parse_obj_mesh("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 4\n");});
         reject([]{parse_obj_mesh(std::string(8*1024*1024+1,'x'));});
+        if(argc==4 && std::string(argv[1])=="--mt28") {
+            AssetStore assets;
+            assets.mount_project_assets(argv[2],argv[3]);
+            static constexpr char body[]=
+                "models/mahir_mt28/v_mahir_mt28_coach__ext01_body_01.ydr";
+            std::cerr<<"MT28 basic mesh loading..."<<std::endl;
+            auto const basic=load_scene_mesh(assets,body);
+            std::cerr<<"MT28 basic geometry "<<basic.vertices.size()<<std::endl;
+            auto const native=load_native_model_resource(assets,body,true);
+            require(native.mesh.vertices.size()>600000,"MT28 body geometry missing");
+            require(native.mesh.indices.size()>2000000,"MT28 body triangles missing");
+            require(native.mesh.sections.size()>=30,"MT28 material groups missing");
+            std::cout<<"MT28 native geometry PASS: "<<native.mesh.vertices.size()
+                <<" vertices "<<native.mesh.indices.size()/3<<" triangles "
+                <<native.mesh.sections.size()<<" material slots; unresolved "
+                <<native.unresolved_materials.size()<<'\n';
+            return 0;
+        }
         if(argc==3) {
             std::ifstream input(argv[1],std::ios::binary);
             require(input.good(),"Missing actual OBJ lab asset");

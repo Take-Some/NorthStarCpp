@@ -85,8 +85,8 @@ std::string lower_engine_imports(std::string_view source) {
             }
             auto const imported=read_identifier(cursor);
             static constexpr std::string_view allowed[]{
-                "Camera","Input","Events","Character","Player","Script",
-                 "Keys","GamepadButtons","Entity","Prefab","Scene","Physics","Session","UI","Logger"};
+                "Camera","Input","Events","Character","Player","Script","PlayerScript","InputAction",
+                 "Keys","GamepadButtons","Entity","Prefab","Scene","Physics","Session","UI","Logger","Audio"};
             if(std::find(std::begin(allowed),std::end(allowed),imported)==std::end(allowed))
                 throw std::invalid_argument("Unknown @northstar/engine export: "+imported);
             skip_whitespace(cursor);

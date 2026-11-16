@@ -2,6 +2,8 @@
 // This file is an internal utility; it does not change engine.* provider tables.
 #pragma once
 
+#include "frame_memory_counters.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -13,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace northstarcpp::diagnostics {
@@ -24,6 +27,8 @@ enum class FrameStage : std::size_t {
 inline constexpr std::array<char const*, static_cast<std::size_t>(FrameStage::count)>
     frame_stage_names = {"scripting", "animation", "physics", "scene_streaming",
                          "rendering", "asset_streaming"};
+
+using FrameMemory = std::array<NorthStarFrameMemoryCounters, frame_stage_names.size()>;
 
 struct FrameSample {
     // Unclamped interval between frame timer callbacks. Includes waiting and
@@ -82,11 +87,22 @@ public:
     bool active() const noexcept { return samples_.size() < target_; }
     std::size_t collected() const noexcept { return samples_.size(); }
 
-    void record(FrameSample sample)
+    void record(FrameSample sample, FrameMemory const& memory = {})
     {
         if (!active())
             return;
         samples_.push_back(sample);
+        for (std::size_t i=0; i<memory.size(); ++i) {
+            auto const& delta=memory[i];
+            auto& total=memory_[i];
+            total.allocations+=delta.allocations;
+            total.allocation_bytes+=delta.allocation_bytes;
+            total.geometry_copy_bytes+=delta.geometry_copy_bytes;
+            total.texture_copy_bytes+=delta.texture_copy_bytes;
+            total.palette_copy_bytes+=delta.palette_copy_bytes;
+            total.device_allocations+=delta.device_allocations;
+            total.device_allocation_bytes+=delta.device_allocation_bytes;
+        }
         if (!active())
             report(stderr);
     }
@@ -98,6 +114,11 @@ public:
         return statistics([stage](FrameSample const& s) {
             return s.stage_ms[static_cast<std::size_t>(stage)];
         });
+    }
+
+    NorthStarFrameMemoryCounters memory_stage(FrameStage stage) const noexcept
+    {
+        return memory_[static_cast<std::size_t>(stage)];
     }
 
     void report(std::FILE* out) const
@@ -116,7 +137,23 @@ public:
         print("frame_cpu_wall", statistics_wall(), true);
         for (std::size_t i = 0; i < frame_stage_names.size(); ++i)
             print(frame_stage_names[i], statistics_stage(static_cast<FrameStage>(i)), true);
-        std::fprintf(out, "}}\n");
+        std::fputs("},\"memory\":{\"coverage\":\"instrumented_buffers\",\"stages\":{",out);
+        for (std::size_t i=0; i<memory_.size(); ++i) {
+            auto const& value=memory_[i];
+            std::fprintf(out,
+                "%s\"%s\":{\"allocations\":%llu,\"allocation_bytes\":%llu,"
+                "\"geometry_copy_bytes\":%llu,\"texture_copy_bytes\":%llu,"
+                "\"palette_copy_bytes\":%llu,\"device_allocations\":%llu,"
+                "\"device_allocation_bytes\":%llu}",i?",":"",frame_stage_names[i],
+                static_cast<unsigned long long>(value.allocations),
+                static_cast<unsigned long long>(value.allocation_bytes),
+                static_cast<unsigned long long>(value.geometry_copy_bytes),
+                static_cast<unsigned long long>(value.texture_copy_bytes),
+                static_cast<unsigned long long>(value.palette_copy_bytes),
+                static_cast<unsigned long long>(value.device_allocations),
+                static_cast<unsigned long long>(value.device_allocation_bytes));
+        }
+        std::fputs("}}}\n",out);
         std::fflush(out);
     }
 
@@ -132,6 +169,7 @@ private:
     }
     std::size_t target_;
     std::vector<FrameSample> samples_;
+    FrameMemory memory_{};
 };
 
 // Scope guard also records frames that return early from the editor branch.
@@ -146,6 +184,8 @@ public:
         if (profiler_) {
             sample_.interval_ms = unclamped_seconds * 1000.0;
             started_ = Clock::now();
+            previous_=current_;
+            current_=this;
         }
     }
     FrameProfileScope(FrameProfileScope const&) = delete;
@@ -155,9 +195,10 @@ public:
     {
         if (!profiler_)
             return;
+        current_=previous_;
         sample_.wall_ms = milliseconds(started_, Clock::now());
         try {
-            profiler_->record(sample_);
+            profiler_->record(sample_, memory_);
         } catch (...) {
             // Profiling cannot cause a gameplay failure on allocation/IO errors.
         }
@@ -170,6 +211,7 @@ public:
             callback();
             return;
         }
+        frame_memory::Scope memory_scope(&memory_[static_cast<std::size_t>(stage)]);
         auto const started = Clock::now();
         try {
             callback();
@@ -178,6 +220,13 @@ public:
             throw;
         }
         account(stage, started);
+    }
+
+    template<class F>
+    static void measure_current(FrameStage stage, F&& callback)
+    {
+        if (current_) current_->measure(stage, std::forward<F>(callback));
+        else callback();
     }
 
     void account(FrameStage stage, Clock::time_point started)
@@ -195,7 +244,10 @@ private:
         return std::chrono::duration<double, std::milli>(b - a).count();
     }
     FrameProfiler* profiler_ = nullptr;
+    inline static thread_local FrameProfileScope* current_=nullptr;
+    FrameProfileScope* previous_=nullptr;
     FrameSample sample_;
+    FrameMemory memory_{};
     Clock::time_point started_{};
 };
 

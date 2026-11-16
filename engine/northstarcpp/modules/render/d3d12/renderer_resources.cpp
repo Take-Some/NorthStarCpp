@@ -2,6 +2,9 @@
 #include "renderer_private.hpp"
 namespace northstarcpp::render::d3d12::detail {
 RendererState::~RendererState(){
+        // Join any outstanding DXIL build before releasing D3D device resources.
+        if(hot_worker.valid())try{(void)hot_worker.get();}catch(...){}
+        shutdown_async_pick();
         if(queue&&fence) {try{wait();}catch(...){}}
         if(vertex_buffer&&vertex_data)vertex_buffer->Unmap(0,nullptr);
         if(constant_buffer&&camera_data)constant_buffer->Unmap(0,nullptr);
@@ -33,12 +36,28 @@ RendererState::~RendererState(){
         if(event)CloseHandle(event);
     }
 void RendererState::wait(){
-        UINT64 next=++fence_value;
+        const auto next=++fence_value;
         check(queue->Signal(fence.Get(),next),"Signal D3D12 fence");
-        if(fence->GetCompletedValue()<next) {
-            check(fence->SetEventOnCompletion(next,event),"Wait D3D12 fence");
-            if(WaitForSingleObject(event,10000)!=WAIT_OBJECT_0)
+        wait_for_fence(next);
+        material_uploads_in_flight.clear();
+    }
+void RendererState::wait_for_fence(UINT64 value){
+        auto completed=fence->GetCompletedValue();
+        if(completed==UINT64_MAX)
+            throw std::runtime_error("D3D12 device removed while waiting for fence");
+        if(completed>=value)return;
+        check(fence->SetEventOnCompletion(value,event),"Wait D3D12 fence");
+        const auto deadline=GetTickCount64()+10000;
+        // An event registered before a timeout may still fire later.
+        // Check the fence value itself before releasing any GPU resources.
+        while(completed<value) {
+            const auto now=GetTickCount64();
+            if(now>=deadline ||
+               WaitForSingleObject(event,static_cast<DWORD>(deadline-now))!=WAIT_OBJECT_0)
                 throw std::runtime_error("D3D12 GPU timeout");
+            completed=fence->GetCompletedValue();
+            if(completed==UINT64_MAX)
+                throw std::runtime_error("D3D12 device removed while waiting for fence");
         }
     }
 void RendererState::resize(UINT w,UINT h){
@@ -83,6 +102,7 @@ void RendererState::resize(UINT w,UINT h){
         for(auto& exposure:hdr_exposure)exposure.Reset();
         exposure_frame_index=0;
         exposure_history_valid=false;
+        exposure_frame_clock_valid=false;
         check(swapchain->ResizeBuffers(buffer_count,w,h,DXGI_FORMAT_R8G8B8A8_UNORM,0),
             "Resize D3D12 swapchain");
         auto rtv=rtvs->GetCPUDescriptorHandleForHeapStart();
@@ -153,7 +173,7 @@ void RendererState::resize(UINT w,UINT h){
                     // Bloom [PostFX]. The graph plan must prove non-overlap.
                     auto normal_desc=scene_desc;
                     normal_desc.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
-                    const auto graph=build_frame_graph();
+                    const auto graph=build_frame_graph(gbuffer_v2,bloom_enabled,hdr_enabled,postfx_enabled());
                     transient_alias.configure(device.Get(),graph,graph.compile(),
                         static_cast<northstarcpp::render::ResourceId>(FrameResource::GBufferNormal),
                         normal_desc,
@@ -251,13 +271,14 @@ void RendererState::resize(UINT w,UINT h){
 void RendererState::ensure_gbuffer(){
         if(gbuffer[0])return;
         if(!width||!height)throw std::logic_error("Deferred targets need a viewport");
-        DXGI_FORMAT const formats[3]{
+        DXGI_FORMAT const formats[4]{
             DXGI_FORMAT_R8G8B8A8_UNORM,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
-            DXGI_FORMAT_R16G16B16A16_FLOAT};
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R8G8B8A8_UNORM};
         auto rtv=deferred_rtvs->GetCPUDescriptorHandleForHeapStart();
         auto srv=deferred_srvs->GetCPUDescriptorHandleForHeapStart();
-        for(UINT i=0;i<3;++i) {
+        for(UINT i=0;i<(gbuffer_v2?4u:3u);++i) {
             D3D12_RESOURCE_DESC desc{};
             desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             desc.Width=width;desc.Height=height;
@@ -267,6 +288,7 @@ void RendererState::ensure_gbuffer(){
             desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             D3D12_CLEAR_VALUE clear{};
             clear.Format=formats[i]; // zero alpha: no deferred coverage
+            if(i==3)clear.Color[0]=1.f; // legacy materials -> neutral AO
             if(i==1 && transient_alias.enabled()) {
                 transient_alias.create(device.Get(),
                     static_cast<northstarcpp::render::ResourceId>(FrameResource::GBufferNormal),
@@ -282,11 +304,20 @@ void RendererState::ensure_gbuffer(){
             view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
             view.Texture2D.MipLevels=1;
-            device->CreateShaderResourceView(gbuffer[i].Get(),&view,srv);
+            // SRV t3 is depth, t4/t5 are light lists and t6 is shadow.
+            // The opt-in extra MRT lives at t7: never overwrite depth.
+            auto destination=srv;
+            if(i==3) {
+                destination=deferred_srvs->GetCPUDescriptorHandleForHeapStart();
+                destination.ptr+=UINT64(7)*deferred_srv_stride;
+            }
+            device->CreateShaderResourceView(gbuffer[i].Get(),&view,destination);
             rtv.ptr+=deferred_rtv_stride;
-            srv.ptr+=deferred_srv_stride;
+            if(i!=3)srv.ptr+=deferred_srv_stride;
         }
     }
+// t7 is an optional extension. Populate it even in v1 to satisfy the
+// superset root descriptor table without reassigning legacy SRV slots.
 void RendererState::ensure_light_buffers(){
         auto upload=heap(D3D12_HEAP_TYPE_UPLOAD);
         if(!dynamic_light_buffer) {
@@ -310,6 +341,7 @@ void RendererState::ensure_light_buffers(){
             device->CreateShaderResourceView(dynamic_light_buffer.Get(),&view,handle);
         }
         if(!tile_index_buffer) {
+            tile_light_cache.invalidate();
             auto const columns=(width+northstarcpp::render::light_tile_width-1)/
                                northstarcpp::render::light_tile_width;
             auto const rows=(height+northstarcpp::render::light_tile_width-1)/
@@ -361,25 +393,75 @@ void RendererState::set_lights(NorthStarRenderLight const* data,UINT count){
         if(!count)dynamic_lights.clear();
         else dynamic_lights.assign(data,data+count);
     }
-void RendererState::ensure_material_buffers(){
-        if(material_vertex_gpu)return;
-        auto upload=heap(D3D12_HEAP_TYPE_UPLOAD);
-        auto vertices=memory(UINT64(NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES)*
-                             sizeof(NorthStarMaterialVertex));
+void RendererState::ensure_material_buffers(
+    std::size_t required_vertices,std::size_t required_batches) {
+    // Fixed small-scene limits are not a quality policy. The only absolute
+    // bounds here are the 32-bit D3D12 vertex buffer view and the hardware
+    // shader-visible descriptor heap capacity.
+    if(required_vertices>NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES)
+        throw std::length_error("D3D12 material vertex buffer exceeds 32-bit view");
+    constexpr std::size_t slots_per_material=5;
+    constexpr std::size_t max_batch_heap=
+        D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1/slots_per_material;
+    if(required_batches>max_batch_heap)
+        throw std::length_error("D3D12 hardware material descriptor heap capacity exceeded");
+    auto upload=heap(D3D12_HEAP_TYPE_UPLOAD);
+    // set_material_batches has already waited for the previous GPU frame.
+    // Grow in powers of two but do not preallocate for the maximum scene.
+    if(!material_vertex_gpu || required_vertices>material_vertex_capacity) {
+        std::size_t next=material_vertex_capacity ? material_vertex_capacity : 65536u;
+        while(next<required_vertices)
+            next=std::min<std::size_t>(next*2u,NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES);
+        auto vertices=memory(UINT64(next)*sizeof(NorthStarMaterialVertex));
+        ComPtr<ID3D12Resource> replacement;
         check(device->CreateCommittedResource(&upload,D3D12_HEAP_FLAG_NONE,&vertices,
             D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,
-            IID_PPV_ARGS(&material_vertex_gpu)),"Create D3D12 material vertex upload");
-        check(material_vertex_gpu->Map(0,nullptr,
-            reinterpret_cast<void**>(&material_vertex_data)),"Map D3D12 material vertices");
+            IID_PPV_ARGS(&replacement)),"Create full-detail D3D12 material vertex upload");
+        unsigned char* mapped=nullptr;
+        check(replacement->Map(0,nullptr,reinterpret_cast<void**>(&mapped)),
+            "Map full-detail D3D12 material vertices");
+        if(material_vertex_gpu && material_vertex_data)
+            material_vertex_gpu->Unmap(0,nullptr);
+        material_vertex_gpu=std::move(replacement);
+        material_vertex_data=mapped;
+        material_vertex_capacity=next;
+        material_vertices_dirty=true;
         material_vertex_view.BufferLocation=material_vertex_gpu->GetGPUVirtualAddress();
         material_vertex_view.StrideInBytes=sizeof(NorthStarMaterialVertex);
         material_vertex_view.SizeInBytes=static_cast<UINT>(vertices.Width);
-        auto constants=memory(UINT64(NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES)*256u);
+        std::fprintf(stderr,
+            "[INFO] [engine.render] d3d12.material_vertex_capacity=%zu vertices bytes=%llu\n",
+            next,static_cast<unsigned long long>(vertices.Width));
+    }
+    if(!material_constant_gpu || required_batches>material_batch_capacity) {
+        std::size_t next=material_batch_capacity;
+        while(next<required_batches)
+            next=std::min<std::size_t>(next*2u,max_batch_heap);
+        D3D12_DESCRIPTOR_HEAP_DESC heap_descriptor{};
+        heap_descriptor.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_descriptor.NumDescriptors=static_cast<UINT>(next*slots_per_material);
+        heap_descriptor.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        ComPtr<ID3D12DescriptorHeap> new_heap;
+        check(device->CreateDescriptorHeap(&heap_descriptor,
+            IID_PPV_ARGS(&new_heap)),"Create dynamic D3D12 material SRV heap");
+        auto constants=memory(UINT64(next)*256u);
+        ComPtr<ID3D12Resource> new_constants;
         check(device->CreateCommittedResource(&upload,D3D12_HEAP_FLAG_NONE,&constants,
             D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,
-            IID_PPV_ARGS(&material_constant_gpu)),"Create D3D12 PBR constants");
-        check(material_constant_gpu->Map(0,nullptr,
-            reinterpret_cast<void**>(&material_constant_data)),"Map D3D12 PBR constants");
+            IID_PPV_ARGS(&new_constants)),"Create dynamic D3D12 material constants");
+        unsigned char* mapped=nullptr;
+        check(new_constants->Map(0,nullptr,reinterpret_cast<void**>(&mapped)),
+            "Map dynamic D3D12 material constants");
+        if(material_constant_gpu&&material_constant_data)
+            material_constant_gpu->Unmap(0,nullptr);
+        material_srv_heap=std::move(new_heap);
+        material_constant_gpu=std::move(new_constants);
+        material_constant_data=mapped;
+        material_batch_capacity=next;
+        std::fprintf(stderr,
+            "[INFO] [engine.render] d3d12.material_batch_capacity=%zu\n",next);
+    }
+    if(!material_camera_gpu) {
         auto camera_desc=memory(256);
         check(device->CreateCommittedResource(&upload,D3D12_HEAP_FLAG_NONE,&camera_desc,
             D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,
@@ -387,4 +469,5 @@ void RendererState::ensure_material_buffers(){
         check(material_camera_gpu->Map(0,nullptr,
             reinterpret_cast<void**>(&material_camera_data)),"Map PBR camera constant");
     }
+}
 } // namespace northstarcpp::render::d3d12::detail

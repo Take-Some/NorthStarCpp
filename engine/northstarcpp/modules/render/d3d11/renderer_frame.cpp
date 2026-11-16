@@ -9,6 +9,7 @@ void RendererState::draw(NorthStarRenderFrame const& frame){
         resize(client.right, client.bottom);
 
         vertices.clear();
+        pick_cubes.clear();
         for (int n = -10; !frame.first_person && !frame.camera_override && n <= 10; ++n) {
             auto const i = static_cast<float>(n);
             float const tone = n == 0 ? 0.38f : 0.23f;
@@ -85,6 +86,13 @@ void RendererState::draw(NorthStarRenderFrame const& frame){
                 continue;
             auto const first=vertices.size();
             add_cube(vertices, transform, static_cast<std::int32_t>(i) == frame.selected ? 0xffd474u : cube.rgb);
+            // GPU ID pass uses unlit vertex colors in an independent RT.
+            // Color channel order is explicitly R=low8, G=mid8, B=high8.
+            // Draw index i+1 reserves zero for the clear/no-hit value.
+            auto const tag=i+1u;
+            auto const id_color=((tag&255u)<<16)|
+                                (((tag>>8)&255u)<<8)|((tag>>16)&255u);
+            pick_cubes.push_back({transform,id_color});
             if(i<surface_ids.size() && surface_ids[i] &&
                surface_views[(surface_ids[i]-1)*3].get()) {
                 auto const category=float(surface_ids[i]);

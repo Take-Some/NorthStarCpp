@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp — camera override smoke through native engine.render D3D11.
 #ifndef UNICODE
 #define UNICODE
@@ -30,8 +31,8 @@ int main(int argc, char** argv) {
         ShowWindow(hwnd,SW_SHOW);
         UpdateWindow(hwnd);
         northstarcpp::Scene scene;
-        scene.objects.push_back({"Player",{0.f,0.f,0.f},1.5f,0xffffff,true,2.f});
-        scene.objects.push_back({"Target Center",{0.f,1.f,5.f},1.5f,0x3dfe90,false,0.f});
+        northstarcpp::qa::append(scene,{"Player",{0.f,0.f,0.f},1.5f,0xffffff,true,2.f});
+        northstarcpp::qa::append(scene,{"Target Center",{0.f,1.f,5.f},1.5f,0x3dfe90,false,0.f});
         if(argc>=4) {
             // Real NSCN/NEF8 map remains untouched; exercise all authored
             // objects with their actual actor/layer surface associations.
@@ -39,9 +40,9 @@ int main(int argc, char** argv) {
             if(scene.objects.size()<600)
                 throw std::runtime_error("FPS world texture scene is unexpectedly small");
         } else if(argc>=3) {
-            scene.objects.push_back({"Deck Test",{0.f,-0.5f,5.f},8.f,0xffffff,false,0.f});
-            scene.objects.push_back({"Rock Cliff",{8.f,-0.5f,10.f},6.f,0xffffff,false,0.f});
-            scene.objects.push_back({"Forest Floor",{-8.f,-0.5f,10.f},6.f,0xffffff,false,0.f});
+            northstarcpp::qa::append(scene,{"Deck Test",{0.f,-0.5f,5.f},8.f,0xffffff,false,0.f});
+            northstarcpp::qa::append(scene,{"Rock Cliff",{8.f,-0.5f,10.f},6.f,0xffffff,false,0.f});
+            northstarcpp::qa::append(scene,{"Forest Floor",{-8.f,-0.5f,10.f},6.f,0xffffff,false,0.f});
         }
         northstarcpp::FpsArena game(scene);
         northstarcpp::CameraDirector camera;

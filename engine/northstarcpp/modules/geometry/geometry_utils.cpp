@@ -4,7 +4,7 @@
 // NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
 ////////////////////////////////////////////////////////////////////////////
 
-#include "pch.h"
+#include "../core/pch.h"
 #include <cmath>
 #include <limits>
 #include <initializer_list>

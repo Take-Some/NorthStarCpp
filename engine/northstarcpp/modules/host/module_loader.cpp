@@ -3,6 +3,7 @@
 // Updated: 2026
 
 #include "module_loader.hpp"
+#include <northstarcpp/scene_component_registry.hpp>
 #include <northstarcpp/provider_identity.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
@@ -64,7 +65,13 @@ fs::path executable_directory()
     auto const length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
     if (!length || length >= path.size())
         throw std::runtime_error("Cannot locate NorthStarCpp executable");
-    return fs::path(path.data()).parent_path();
+    auto const directory=fs::path(path.data()).parent_path();
+    // Private Qt processes under bin/qt_tools still load providers and
+    // bootstrap configuration from the parent bin directory.
+    if(directory.filename()==L"qt_tools" &&
+       fs::is_regular_file(directory.parent_path()/"bootstrap.json"))
+        return directory.parent_path();
+    return directory;
 #else
     return fs::read_symlink("/proc/self/exe").parent_path();
 #endif
@@ -220,6 +227,7 @@ Module::Module(std::string capability, std::string preferred_provider)
 Module::~Module()
 {
     if (handle)
+        release_scene_components_for_module(handle);
         CloseModule{}(handle);
 }
 
@@ -287,6 +295,11 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
             throw std::runtime_error("Legacy module cannot confirm selected provider for "+
                 capability_id);
         if (module || (!query && mode == Mode::legacy)) {
+            auto registrar=reinterpret_cast<NorthStarSceneComponentsRegisterC>(
+                find_symbol(library.get(),"northstarcpp_register_scene_components_v1"));
+            if(registrar && !acquire_scene_components_for_module(library.get(),registrar))
+                throw std::runtime_error("Scene component DLL registration failed for "+
+                    capability_id+": "+path.u8string());
             descriptor = module;
             selected_query = query;
             handle = library.release();
@@ -314,6 +327,11 @@ void const* Module::resolve(uint32_t api_version, uint32_t api_size, Validator v
             find_symbol(library.get(), "northstar_module_query"));
         auto const* module = match(query);
         if (accepts(module)) {
+            auto registrar=reinterpret_cast<NorthStarSceneComponentsRegisterC>(
+                find_symbol(library.get(),"northstarcpp_register_scene_components_v1"));
+            if(registrar && !acquire_scene_components_for_module(library.get(),registrar))
+                throw std::runtime_error("Scene component DLL registration failed for "+
+                    capability_id+": "+candidate.u8string());
             path = candidate;
             descriptor = module;
             selected_query = query;

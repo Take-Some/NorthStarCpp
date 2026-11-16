@@ -45,7 +45,15 @@ struct ListFile {
 };
 
 ListFile read_list_file(AssetStore const& assets, std::string const& path);
-ListFile parse_list_file(std::vector<std::uint8_t> const& bytes);
+// Index-only callers need the verified body, not optional metadata JSON.
+ListFile parse_list_file(std::vector<std::uint8_t> const& bytes,
+                         bool include_metadata=true);
+
+// Shared NEF8 v1/raw-DEFLATE/BLAKE3 writer. All asset types reuse the same
+// container envelope; kind/schema define the payload contract.
+std::vector<std::uint8_t> serialize_list_file(
+    std::uint16_t kind, std::uint16_t schema, std::uint64_t entries,
+    std::string const& metadata_json, std::vector<std::uint8_t> const& body);
 Tree parse_json(std::string const& text);
 bool legacy_material_library(ListFile const& file);
 std::vector<Material> parse_materials(ListFile const& file, std::string const& path);

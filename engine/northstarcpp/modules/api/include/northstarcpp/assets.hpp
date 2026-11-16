@@ -35,6 +35,12 @@ public:
                          std::filesystem::path const& data);
     // Shared content is a base VFS layer. Project mounts can override it.
     void mount_shared_assets(std::filesystem::path const& root);
+    // Search ./archive adjacent to the host executable. Editor tools under
+    // bin/qt_tools also search their parent directory. With an explicit root,
+    // mount all .nsp packs from that directory without changing the provider ABI.
+    // northstar_shared.nsp is the base layer (-100), other packs override it
+    // (-50, sorted by filename; later names win).
+    void mount_runtime_archives(std::filesystem::path const& root = {});
     // Default VFS overlay: sharedAssets (-100), project root (0),
     // project/assets (+100). Project resources shadow engine defaults.
     void mount_project_assets(std::filesystem::path const& project_root,

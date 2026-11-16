@@ -4,6 +4,7 @@
 // Reference archive informed the feature map; its code is not included here.
 
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -226,9 +227,7 @@ void validate_scene_v3(Scene const& scene)
         require(std::isfinite(node.lod_near) && std::isfinite(node.lod_far) &&
                 node.lod_near >= 0.f && node.lod_far >= node.lod_near &&
                 node.lod_far <= world_limit, "Entity LOD distance range is invalid");
-        if (object.player)
-            require(node.cell.empty() || !scene.cells.empty(),
-                    "Player needs a persistent or valid cell assignment");
+
     }
 
     // Tri-color topological check detects cycles without recursion or stack overflow.
@@ -269,6 +268,7 @@ Scene parse_scene_v3(std::string const& bytes)
     bool has_budget = false;
     bool has_scene = false;
     std::unordered_map<std::uint64_t,std::string> scripts;
+    std::vector<std::uint64_t> old_owned_ids;
     while (std::getline(input, line)) {
         ++line_number;
         if (!line.empty() && line.back() == '\r')
@@ -359,6 +359,28 @@ Scene parse_scene_v3(std::string const& bytes)
                 scripts.size()>max_scene_records)
                 throw std::runtime_error("Invalid or duplicate script component at line " +
                     std::to_string(line_number));
+        } else if (kind == "component") {
+            SceneComponentBlob entry;
+            std::string id, hex;
+            if(!(record>>id>>std::quoted(entry.type)>>entry.version>>
+                 std::quoted(hex)) ||
+               hex.size()%2 || hex.size()>2097152 ||
+               scene.components.size()>=max_scene_records)
+                throw std::runtime_error("Invalid component at line "+
+                                         std::to_string(line_number));
+            entry.entity_id=unsigned_id(id);
+            auto nibble=[](char ch)->int {
+                if(ch>='0'&&ch<='9')return ch-'0';
+                if(ch>='a'&&ch<='f')return ch-'a'+10;
+                if(ch>='A'&&ch<='F')return ch-'A'+10;
+                return -1;
+            };
+            for(std::size_t n=0;n<hex.size();n+=2) {
+                int const a=nibble(hex[n]),b=nibble(hex[n+1]);
+                if(a<0||b<0)throw std::runtime_error("Invalid component hex");
+                entry.payload.push_back(char(a*16+b));
+            }
+            scene.components.push_back(std::move(entry));
         } else if (kind == "entity") {
             SceneObject object;
             std::string id, parent;
@@ -380,7 +402,7 @@ Scene parse_scene_v3(std::string const& bytes)
                 (collision != 0 && collision != 1) ||
                 !record_size(scene.objects.size(), max_scene_records))
                 throw std::runtime_error("Invalid scene entity at line " + std::to_string(line_number));
-            object.player = player == 1;
+            if(player==1)old_owned_ids.push_back(object.node.id);
             object.node.visible = visible == 1;
             object.node.collision = collision == 1;
             scene.objects.push_back(std::move(object));
@@ -398,6 +420,7 @@ Scene parse_scene_v3(std::string const& bytes)
         }
     }
     require(scripts.empty(),"Script component references a missing scene entity");
+    for(auto id:old_owned_ids)scene_pawn::migrate_imported_local(scene,id);
     validate_scene(scene);
     return scene;
 }
@@ -454,7 +477,7 @@ std::string serialize_scene_v3(Scene const& scene)
         write_vector(out, object.position);
         out << ' ' << object.size << ' ' << std::hex << std::setfill('0') <<
             std::setw(6) << object.color << std::dec << std::setfill(' ') <<
-            ' ' << object.player << ' ' << object.mass << ' ';
+            ' ' << 0 << ' ' << object.mass << ' '; // text-v3 compatibility slot
         write_vector(out, node.rotation);
         out << ' ';
         write_vector(out, node.scale);
@@ -462,6 +485,14 @@ std::string serialize_scene_v3(Scene const& scene)
             node.visible << ' ' << node.collision << '\n';
         if (!node.script.empty())
             out << "script " << node.id << ' ' << quoted(node.script) << '\n';
+    }
+    static constexpr char digits[]="0123456789abcdef";
+    for(auto const& component:scene.components) {
+        out<<"component "<<component.entity_id<<' '<<quoted(component.type)<<
+            ' '<<component.version<<" \"";
+        for(unsigned char byte:component.payload)
+            out<<digits[byte>>4]<<digits[byte&15];
+        out<<"\"\n";
     }
     return out.str();
 }

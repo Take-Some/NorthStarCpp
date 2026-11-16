@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // Bullet / Jolt integration: vehicle camera under streaming, teleport and fast travel.
 #include <northstarcpp/camera.hpp>
 #include <northstarcpp/physics.hpp>
@@ -32,9 +33,10 @@ int main() {
             {"Highway East",{730.f,-15.f,-90.f},{870.f,30.f,90.f},false}
         };
         SceneObject bus;
-        bus.name="Bus";bus.player=true;bus.mass=1200.f;
+        bus.name="Bus";// Vehicle Pawn uses a separate scene component.bus.mass=1200.f;
         bus.node.id=101;bus.node.cell="Highway West";
         authored.objects.push_back(bus);
+    scene_pawn::migrate_imported_local(authored,101);
         SceneObject distant;
         distant.name="Streaming marker";
         distant.position={800.f,0.f,4.f};

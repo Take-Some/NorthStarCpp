@@ -3,6 +3,7 @@
 #include "qt_asset_preview_dialog.hpp"
 #include "qt_asset_warnings.hpp"
 #include "qt_prefab_preview.hpp"
+#include "qt_prefab_collision_editor.hpp"
 #include "qt_material_function_editor.hpp"
 #include "qt_material_asset_dialog.hpp"
 #include "editor_prefab_composition.hpp"
@@ -718,6 +719,17 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
         QObject::connect(reset,&QPushButton::clicked,preview,
                          [preview]{preview->reset();});
         side->addWidget(reset);
+        auto* editColliders=new QPushButton("Edit Collisions...",&dialog);
+        editColliders->setObjectName("prefabEditCollisions");
+        QObject::connect(editColliders,&QPushButton::clicked,&dialog,[&] {
+            try {
+                if(openPrefabCollisionEditor(&dialog,content_root,asset_reference)
+                   ==QDialog::Accepted)dialog.accept(); // refresh on next open
+            }catch(std::exception const& e) {
+                QMessageBox::warning(&dialog,"Prefab Collision",qt(e.what()));
+            }
+        });
+        side->addWidget(editColliders);
         auto* close=new QPushButton("Close",&dialog);
         QObject::connect(close,&QPushButton::clicked,&dialog,&QDialog::accept);
         side->addWidget(close);
@@ -803,18 +815,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                 loaded.prefab=prefab_preview::load(content_root,
                                                    asset_reference);
                 AssetManager assets;
-                assets.mount_directory("",content_root,100);
-                std::error_code ec;
-                for(auto current=content_root.parent_path();!current.empty();) {
-                    auto shared=current/"sharedAssets";
-                    if(fs::is_directory(shared,ec)) {
-                        assets.mount_shared_assets(shared);
-                        break;
-                    }
-                    auto parent=current.parent_path();
-                    if(parent==current)break;
-                    current=parent;
-                }
+                prefab_preview::mount_preview_assets(assets,content_root);
                 loaded.composition=prefab_preview::load_composition(
                     *loaded.prefab,assets);
             } catch(std::exception const& e) {

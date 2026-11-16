@@ -66,6 +66,18 @@ Tree material_xml(Material const& source) {
     Tree params;
     for(auto const& param:source.parameters)appendParam(params,param);
     m.add_child("Params",params);
+    if(!source.vertex_shader_asset.empty())
+        m.put("Shaders.<xmlattr>.vertex",source.vertex_shader_asset);
+    if(!source.gbuffer_shader_asset.empty())
+        m.put("Shaders.<xmlattr>.gbuffer",source.gbuffer_shader_asset);
+    if(!source.vertex_hlsl_asset.empty())
+        m.put("Shaders.<xmlattr>.vertex_hlsl",source.vertex_hlsl_asset);
+    if(!source.fragment_hlsl_asset.empty())
+        m.put("Shaders.<xmlattr>.fragment_hlsl",source.fragment_hlsl_asset);
+    if(!source.gbuffer_hlsl_asset.empty())
+        m.put("Shaders.<xmlattr>.gbuffer_hlsl",source.gbuffer_hlsl_asset);
+    if(!source.fragment_shader_asset.empty())
+        m.put("Shaders.<xmlattr>.fragment",source.fragment_shader_asset);
     if(!source.graph_source.empty())
         m.add_child("Graph.Value",
             detail::graph_xml_value_from_json(source.graph_source));

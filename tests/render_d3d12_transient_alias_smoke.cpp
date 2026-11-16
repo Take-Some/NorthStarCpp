@@ -22,7 +22,9 @@ int main() {
     ComPtr<ID3D12Device> device;
     if(FAILED(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,
                               IID_PPV_ARGS(device.GetAddressOf()))))return 77;
-    const auto graph=build_frame_graph();
+    // Bloom is opt-in in the frame graph; aliasing requires an actual
+    // Bloom lifetime after the G-buffer normal is no longer used.
+    const auto graph=build_frame_graph(false,true,false,false);
     const auto plan=graph.compile();
     auto first=static_cast<northstarcpp::render::ResourceId>(FrameResource::GBufferNormal);
     auto second=static_cast<northstarcpp::render::ResourceId>(FrameResource::Bloom);

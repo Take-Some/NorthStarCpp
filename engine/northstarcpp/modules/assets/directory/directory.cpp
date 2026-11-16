@@ -5,6 +5,7 @@
 #include "module_provider.hpp"
 #include "asset_paths.hpp"
 #include "fat_archive.hpp"
+#include "nsp_archive.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -85,6 +86,7 @@ struct Mount {
     fs::path path;
     fs::path data_path;
     std::shared_ptr<FatArchive> archive;
+    std::shared_ptr<NspArchive> nsp;
     std::int32_t priority;
 };
 struct Store {
@@ -95,12 +97,14 @@ struct Source {
     fs::path path;
     std::shared_ptr<FatArchive> archive;
     FatArchive::Entry const* entry = nullptr;
+    std::shared_ptr<NspArchive> nsp;
+    NspArchive::Entry const* nsp_entry = nullptr;
 
     std::uint64_t size() const
     {
         if (entry && entry->compressed)
             throw std::runtime_error("PPMd-compressed FAT/DB entries are not supported");
-        auto const count = entry ? entry->size : fs::file_size(path);
+        auto const count = nsp_entry ? nsp_entry->size : (entry ? entry->size : fs::file_size(path));
         if (count > max_asset_bytes)
             throw std::runtime_error("Buffered asset size exceeds 256 MiB");
         return count;
@@ -126,9 +130,14 @@ Source resolve(Store& state, char const* name)
             relative.remove_prefix(length + 1);
         }
 
+        if (mount.nsp) {
+            if (auto const* entry = mount.nsp->find(relative))
+                return {{}, {}, nullptr, mount.nsp, entry};
+            continue;
+        }
         if (mount.archive) {
             if (auto const* entry = mount.archive->find(relative))
-                return {{}, mount.archive, entry};
+                return {{}, mount.archive, entry, {}, nullptr};
             continue;
         }
         auto const candidate = fs::weakly_canonical(
@@ -136,7 +145,7 @@ Source resolve(Store& state, char const* name)
         if (!contained(mount.path, candidate))
             throw std::runtime_error("Mounted asset points outside its root");
         if (fs::is_regular_file(candidate))
-            return {candidate, {}, nullptr};
+            return {candidate, {}, nullptr, {}, nullptr};
     }
     throw std::runtime_error("Asset not found: " + key);
 }
@@ -188,13 +197,13 @@ int mount_directory(void* ptr, char const* prefix, char const* folder, std::int3
         auto path = physical(folder);
         if (!fs::is_directory(path))
             throw std::runtime_error("Asset mount directory does not exist");
-        add_mount(store(ptr), {std::move(key), std::move(path), {}, {}, priority});
+        add_mount(store(ptr), {std::move(key), std::move(path), {}, {}, {}, priority});
     });
 }
 int unmount_directory(void* ptr, char const* prefix, char const* folder)
 {
     return guarded([&] {
-        remove_mount(store(ptr), {virtual_path(prefix, true), physical(folder), {}, {}, 0});
+        remove_mount(store(ptr), {virtual_path(prefix, true), physical(folder), {}, {}, {}, 0});
     });
 }
 
@@ -206,15 +215,23 @@ int mount_archive(void* ptr, char const* prefix, char const* index, char const* 
         auto data_path = physical(data);
         if (!fs::is_regular_file(index_path) || !fs::is_regular_file(data_path))
             throw std::runtime_error("FAT/DB archive files do not exist");
-        auto archive = std::make_shared<FatArchive>(index_path, data_path);
-        add_mount(store(ptr), {std::move(key), std::move(index_path), std::move(data_path),
-            std::move(archive), priority});
+        if (index_path.extension() == ".nsp" || data_path.extension() == ".nsp") {
+            if (index_path != data_path)
+                throw std::runtime_error("NSP is a single-file archive");
+            auto archive = std::make_shared<NspArchive>(index_path);
+            add_mount(store(ptr), {std::move(key), std::move(index_path), std::move(data_path),
+                {}, std::move(archive), priority});
+        } else {
+            auto archive = std::make_shared<FatArchive>(index_path, data_path);
+            add_mount(store(ptr), {std::move(key), std::move(index_path), std::move(data_path),
+                std::move(archive), {}, priority});
+        }
     });
 }
 int unmount_archive(void* ptr, char const* prefix, char const* index, char const* data)
 {
     return guarded([&] {
-        remove_mount(store(ptr), {virtual_path(prefix, true), physical(index), physical(data), {}, 0});
+        remove_mount(store(ptr), {virtual_path(prefix, true), physical(index), physical(data), {}, {}, 0});
     });
 }
 
@@ -233,7 +250,9 @@ int read(void* ptr, char const* name, std::uint8_t* bytes, std::uint64_t capacit
         auto const size = source.size();
         if (capacity < size || (size && !bytes))
             throw std::runtime_error("Asset buffer capacity is insufficient");
-        if (source.archive) {
+        if (source.nsp) {
+            source.nsp->read(*source.nsp_entry, bytes);
+        } else if (source.archive) {
             source.archive->read(*source.entry, bytes);
         } else {
             std::ifstream input(source.path, std::ios::binary);
@@ -254,7 +273,10 @@ int read_range(void* ptr, char const* name, std::uint64_t offset,
         auto const total=source.size();
         if (offset>total || length>total-offset)
             throw std::runtime_error("Asset read range exceeds logical file");
-        if(source.archive) {
+        if(source.nsp) {
+            source.nsp->read_range(*source.nsp_entry,offset,bytes,
+                                   static_cast<std::size_t>(length));
+        } else if(source.archive) {
             source.archive->read_range(*source.entry,offset,bytes,
                                        static_cast<std::size_t>(length));
         } else if(length) {
@@ -271,13 +293,13 @@ NorthStarAssetsApi const api{create, destroy, mount_directory, unmount_directory
 NorthStarAssetsRangeApi const range_api{read_range};
 NorthStarAssetsArchiveApi const archive_api{mount_archive, unmount_archive};
 NorthStarModule const module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
-    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.2.0",
+    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.3.0",
     NORTHSTARCPP_ASSETS_ABI, sizeof(api), &api, last_error};
 NorthStarModule const archive_module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
-    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.2.0",
+    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.3.0",
     NORTHSTARCPP_ASSETS_ARCHIVE_ABI, sizeof(archive_api), &archive_api, last_error};
 NorthStarModule const range_module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
-    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.2.0",
+    NORTHSTARCPP_CAPABILITY_ASSETS, "Directory VFS", "1.3.0",
     NORTHSTARCPP_ASSETS_RANGE_ABI, sizeof(range_api), &range_api, last_error};
 }
 

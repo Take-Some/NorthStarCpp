@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp — scene animation contract and gameplay-independent playback
 // Copyright (c) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/scene_animation.hpp>
@@ -114,7 +115,7 @@ int main(int argc,char** argv) {
         dynamic.objects[0].mass=2.f;
         rejects([&] {player.play(dynamic,41,clip);},"Dynamic physics body accepted");
         auto player_scene=test_scene();
-        player_scene.objects[0].player=true;
+        scene_pawn::migrate_imported_local(player_scene,41);
         rejects([&] {player.play(player_scene,41,clip);},"Player accepted");
         rejects([&] {
             auto invalid=valid_clip;

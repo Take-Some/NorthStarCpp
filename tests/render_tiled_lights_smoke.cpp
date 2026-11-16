@@ -1,4 +1,5 @@
 #include "../engine/northstarcpp/modules/render/shared/tiled_lights.hpp"
+#include "../engine/northstarcpp/modules/render/shared/tiled_light_cache.hpp"
 #include "../engine/northstarcpp/modules/render/shared/render_light_components.hpp"
 #include <cassert>
 #include <stdexcept>
@@ -40,6 +41,30 @@ int main() {
     try {(void)build_tile_lights(32,32,inv,{0,0,0},nullptr,2);}
     catch(std::invalid_argument const&) {invalid=true;}
     assert(invalid);
+    // Static views avoid repeated O(tiles*lights) CPU classification,
+    // but every camera/light/viewport change is invalidating.
+    TileLightCache cache;
+    assert(cache.update(128,128,inv,{0,0,0},lights,2));
+    assert(cache.misses()==1 && cache.hits()==0);
+    assert(cache.grid().indices==grid.indices);
+    assert(!cache.update(128,128,inv,{0,0,0},lights,2));
+    assert(cache.misses()==1 && cache.hits()==1);
+    lights[0].position_range[0]+=.5f;
+    assert(cache.update(128,128,inv,{0,0,0},lights,2));
+    assert(cache.grid().indices==
+           build_tile_lights(128,128,inv,{0,0,0},lights,2).indices);
+    assert(cache.update(128,128,inv,{0.1f,0,0},lights,2));
+    assert(cache.update(160,128,inv,{0.1f,0,0},lights,2));
+    auto modified=inv;modified[0]*=1.05f;
+    assert(cache.update(160,128,modified,{0.1f,0,0},lights,2));
+    assert(!cache.update(160,128,modified,{0.1f,0,0},lights,2));
+    cache.invalidate(); // GPU buffer reallocated after resize.
+    assert(cache.update(160,128,modified,{0.1f,0,0},lights,2));
+    invalid=false;
+    try {(void)cache.update(128,128,inv,{0,0,0},nullptr,2);}
+    catch(std::invalid_argument const&) {invalid=true;}
+    assert(invalid); // Failed update leaves previous valid entry untouched.
+    assert(!cache.update(160,128,modified,{0.1f,0,0},lights,2));
     northstarcpp::Scene scene;
     northstarcpp::SceneObject actor;
     actor.node.id=77;actor.position={2.f,3.f,4.f};

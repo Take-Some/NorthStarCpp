@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // Coarse navigation cell lifecycle follows verified NEF8 and WorldPartition.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/scene_navigation_cells.hpp>
@@ -14,9 +15,10 @@ int main() {
         {"C",{20.f,-2.f,0.f},{30.f,2.f,10.f},false},
         {"D",{100.f,-2.f,100.f},{110.f,2.f,110.f},false}};
     SceneObject player;
-    player.name="Driver";player.node.id=1;player.player=true;
+    player.name="Driver";player.node.id=1;// Pawn possession is a Scene component.
     player.mass=1.f;
     scene.objects.push_back(player);
+    scene_pawn::migrate_imported_local(scene,1);
     SceneWorld world(scene);
     SceneNavigationCells navigation(scene);
     world.enable_payload_gate(true);

@@ -40,9 +40,11 @@ template<class Api>
 bool valid_table(void const* raw) {
     return raw && northstarcpp::valid_api(*static_cast<Api const*>(raw));
 }
-static const std::array<Expected,12> expected{{
+static const std::array<Expected,13> expected{{
     {NORTHSTARCPP_CAPABILITY_ECS,NORTHSTARCPP_ECS_API_VERSION,
         sizeof(NsEcsApi),valid_table<NsEcsApi>},
+    {NORTHSTARCPP_CAPABILITY_VEHICLE,NORTHSTARCPP_VEHICLE_ABI,
+        sizeof(NorthStarVehicleApi),valid_table<NorthStarVehicleApi>},
     {NORTHSTARCPP_CAPABILITY_PHYSICS,NORTHSTARCPP_PHYSICS_ABI,
         sizeof(NorthStarPhysicsApi),valid_table<NorthStarPhysicsApi>},
     {NORTHSTARCPP_CAPABILITY_RENDER,NORTHSTARCPP_RENDER_ABI,
@@ -147,7 +149,7 @@ bool is_module_candidate(QString const& filename) {
     // Do not load the application's unrelated Qt/CRT runtime DLLs.
     for(auto prefix:{"render_","ecs_","physics_","audio_","input_",
                      "assets_","logger_","perlin_","time_","geometry_",
-                     "collision_","scripting_","script_"})
+                     "collision_","vehicle_","scripting_","script_"})
         if(lower.startsWith(prefix))return true;
     return false;
 }

@@ -1,5 +1,6 @@
 // NorthStarCpp GPU gbuffer pass — independent translation unit.
 #include "renderer_private.hpp"
+#include "../../shared/frame_memory_counters.hpp"
 namespace northstarcpp::render::d3d12::detail {
 void RendererState::record_gbuffer_pass(FramePassContext& context) {
     using northstarcpp::math::float3;
@@ -51,15 +52,16 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
         if(has_deferred_geometry) {
             // All opaque authored/primitive geometry shares the same
             // G-buffer/depth; skydome and editor lines remain forward.
-            std::array<D3D12_CPU_DESCRIPTOR_HANDLE,3> targets{};
+            std::array<D3D12_CPU_DESCRIPTOR_HANDLE,4> targets{};
             auto target=deferred_rtvs->GetCPUDescriptorHandleForHeapStart();
             constexpr float empty[4]{0.f,0.f,0.f,0.f};
-            for(UINT i=0;i<3;++i) {
+            for(UINT i=0;i<(gbuffer_v2?4u:3u);++i) {
                 targets[i]=target;
-                commands->ClearRenderTargetView(target,empty,0,nullptr);
+                constexpr float neutral_aux[4]{1.f,0.f,0.f,0.f};
+                commands->ClearRenderTargetView(target,i==3?neutral_aux:empty,0,nullptr);
                 target.ptr+=deferred_rtv_stride;
             }
-            commands->OMSetRenderTargets(UINT(targets.size()),targets.data(),FALSE,&dsv);
+            commands->OMSetRenderTargets(gbuffer_v2?4u:3u,targets.data(),FALSE,&dsv);
             if(hud_tri_start>grid) {
                 commands->SetGraphicsRootSignature(signature.Get());
                 commands->SetGraphicsRootConstantBufferView(
@@ -81,8 +83,13 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
         if(!material_draws.empty()) {
             if(!material_vertex_data||!material_constant_data||!deferred_constant_data)
                 throw std::runtime_error("D3D12 deferred buffers not initialized");
-            std::memcpy(material_vertex_data,material_cpu_vertices.data(),
-                material_cpu_vertices.size()*sizeof(NorthStarMaterialVertex));
+            if(material_vertices_dirty) {
+                const auto bytes=material_cpu_vertices.size()*sizeof(NorthStarMaterialVertex);
+                std::memcpy(material_vertex_data,material_cpu_vertices.data(),bytes);
+                diagnostics::frame_memory::copied(
+                    &NorthStarFrameMemoryCounters::geometry_copy_bytes,bytes);
+                material_vertices_dirty=false;
+            }
             ID3D12DescriptorHeap* material_heaps[]{material_srv_heap.Get()};
             commands->SetDescriptorHeaps(1,material_heaps);
             commands->SetGraphicsRootSignature(material_signature.Get());
@@ -97,8 +104,9 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
             for(UINT i=0;i<material_draws.size();++i) {
                 auto const& draw=material_draws[i];
                 if(draw.blend_mode==2)continue;
-                commands->SetPipelineState(draw.variant_pipeline?
-                    draw.variant_pipeline.Get():material_pipeline.Get());
+                commands->SetPipelineState(hot_pipeline(i)?hot_pipeline(i):
+                (draw.variant_pipeline?
+                    draw.variant_pipeline.Get():material_pipeline.Get()));
                 commands->SetGraphicsRootConstantBufferView(1,
                     material_constant_gpu->GetGPUVirtualAddress()+UINT64(i)*256u);
                 auto handle=base;

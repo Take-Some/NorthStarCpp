@@ -1,6 +1,9 @@
 // D3D11 materials methods; independently compiled provider implementation.
 #include "renderer_private.hpp"
+#include "../../shared/frame_memory_counters.hpp"
 #include "../shared/shader_disk_cache.hpp"
+namespace frame_memory = northstarcpp::diagnostics::frame_memory;
+
 namespace northstarcpp::render::d3d11::detail {
 std::shared_ptr<CachedTexture> RendererState::upload_material_texture(
         NorthStarMaterialTexture const& image,bool is_srgb){
@@ -18,9 +21,22 @@ std::shared_ptr<CachedTexture> RendererState::upload_material_texture(
         for(std::uint32_t i=0;i<image.data_bytes;++i)feed(image.rgba8[i]);
         if(auto it=material_texture_cache.find(hash);it!=material_texture_cache.end())
             return it->second;
-        if(material_texture_cache_bytes + image.data_bytes > 96u*1024u*1024u) {
-            material_texture_cache.clear();
-            material_texture_cache_bytes=0;
+        // A fixed 96 MiB full-cache purge re-uploads large character
+        // textures repeatedly. Evict only resources unused by active draws.
+        if(material_texture_cache_bytes + image.data_bytes >
+           material_texture_cache_budget) {
+            for(auto it=material_texture_cache.begin();
+                it!=material_texture_cache.end() &&
+                material_texture_cache_bytes+image.data_bytes>
+                    material_texture_cache_budget;) {
+                if(it->second.use_count()!=1) {++it;continue;}
+                D3D11_TEXTURE2D_DESC old{};
+                it->second->gpu->GetDesc(&old);
+                const auto bytes=std::uint64_t(old.Width)*old.Height*4u;
+                material_texture_cache_bytes-=std::min(
+                    material_texture_cache_bytes,bytes);
+                it=material_texture_cache.erase(it);
+            }
         }
         auto result=std::make_shared<CachedTexture>();
         D3D11_TEXTURE2D_DESC desc{};
@@ -35,6 +51,7 @@ std::shared_ptr<CachedTexture> RendererState::upload_material_texture(
               "Upload authored material texture");
         check(device->CreateShaderResourceView(result->gpu.get(),nullptr,
             result->view.put()),"Create authored material SRV");
+        frame_memory::copied(&NorthStarFrameMemoryCounters::texture_copy_bytes,image.data_bytes);
         material_texture_cache.emplace(hash,result);
         material_texture_cache_bytes+=image.data_bytes;
         return result;
@@ -44,7 +61,7 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,s
             throw std::invalid_argument("Invalid material batches");
         std::vector<NorthStarMaterialVertex> submitted;
         std::vector<MaterialDraw> draws;
-        draws.reserve(count);
+        frame_memory::reserve(draws,count);
         for(std::uint32_t index=0;index<count;++index) {
             auto const& input=batches[index];
             if(!input.vertex_count ||
@@ -80,8 +97,8 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,s
                     if(!std::isfinite(component)||std::abs(component)>1.e6f)
                         throw std::invalid_argument("Invalid UV material vertex");
             }
-            submitted.insert(submitted.end(),input.vertices,
-                             input.vertices+input.vertex_count);
+            frame_memory::append_geometry(submitted,input.vertices,
+                                          input.vertices+input.vertex_count);
             draws.push_back(std::move(draw));
         }
         material_cpu_vertices.swap(submitted);
@@ -166,7 +183,7 @@ void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batc
         if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES || (count&&!batches))
             throw std::invalid_argument("Invalid Material Graph batch count");
         std::vector<NorthStarMaterialBatch> base;
-        base.reserve(count);
+        frame_memory::reserve(base,count);
         for(std::uint32_t i=0;i<count;++i) {
             auto src=batches[i].material;
             if(!std::isfinite(batches[i].opacity)||
@@ -194,7 +211,7 @@ void RendererState::set_skinned_material_batches(
             throw std::invalid_argument("Invalid GPU skinned material batch count");
         std::vector<NorthStarSkinMaterialVertex> submitted;
         std::vector<SkinnedMaterialDraw> draws;
-        draws.reserve(count);
+        frame_memory::reserve(draws,count);
         for(std::uint32_t index=0;index<count;++index) {
             auto const& entry=batches[index];
             auto const& settings=entry.material;
@@ -232,8 +249,9 @@ void RendererState::set_skinned_material_batches(
                 base.maps[slot]=upload_material_texture(tex,slot==0 || slot==4);
                 base.params.present[0]|=1u<<slot;
             }
-            draw.palette.assign(entry.palette,
-                entry.palette+std::size_t(entry.joint_count)*16u);
+            frame_memory::assign(draw.palette,entry.palette,
+                entry.palette+std::size_t(entry.joint_count)*16u,
+                &NorthStarFrameMemoryCounters::palette_copy_bytes);
             for(auto value:draw.palette)
                 if(!std::isfinite(value)||std::abs(value)>1e6f)
                     throw std::invalid_argument("Invalid native GPU skin palette");
@@ -253,11 +271,19 @@ void RendererState::set_skinned_material_batches(
                 if(std::abs(sum-1.f)>0.01f)
                     throw std::invalid_argument("Native GPU skin weights must sum to one");
             }
-            submitted.insert(submitted.end(),entry.vertices,
-                             entry.vertices+entry.vertex_count);
+            frame_memory::append_geometry(submitted,entry.vertices,
+                                          entry.vertices+entry.vertex_count);
             draws.push_back(std::move(draw));
         }
-        skinned_vertices.swap(submitted);
+        // Animation changes the bone palette, not the original source YDD
+        // topology. Verify complete byte equality before reusing GPU data.
+        // Never trust pointer identity across provider ABI calls.
+        const bool unchanged=submitted.size()==skinned_vertices.size() &&
+            (submitted.empty() || std::memcmp(
+                submitted.data(),skinned_vertices.data(),
+                submitted.size()*sizeof(NorthStarSkinMaterialVertex))==0);
+        if(!unchanged)skinned_vertices.swap(submitted);
+        skinned_vertices_dirty|=!unchanged;
         skinned_draws.swap(draws);
     }
 
@@ -275,13 +301,19 @@ void RendererState::draw_skinned_materials(){
             check(device->CreateBuffer(&desc,nullptr,skinned_vertex_buffer.put()),
                 "Allocate native GPU skin vertices");
             skinned_vertex_capacity=next;
+            skinned_vertices_dirty=true;
         }
+        if(skinned_vertices_dirty) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         check(context->Map(skinned_vertex_buffer.get(),0,
             D3D11_MAP_WRITE_DISCARD,0,&mapped),"Upload original YDD bone indices");
         std::memcpy(mapped.pData,skinned_vertices.data(),
             skinned_vertices.size()*sizeof(NorthStarSkinMaterialVertex));
+        frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,
+                            skinned_vertices.size()*sizeof(NorthStarSkinMaterialVertex));
         context->Unmap(skinned_vertex_buffer.get(),0);
+        skinned_vertices_dirty=false;
+        }
         auto* gpu=skinned_vertex_buffer.get();
         UINT const stride=sizeof(NorthStarSkinMaterialVertex),offset=0;
         context->IASetInputLayout(skinned_layout.get());
@@ -344,6 +376,8 @@ void RendererState::draw_authored_materials(){
             D3D11_MAP_WRITE_DISCARD,0,&map),"Map authored material mesh");
         std::memcpy(map.pData,material_cpu_vertices.data(),
             material_cpu_vertices.size()*sizeof(NorthStarMaterialVertex));
+        frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,
+                            material_cpu_vertices.size()*sizeof(NorthStarMaterialVertex));
         context->Unmap(material_gpu_vertices.get(),0);
         auto* gpu=material_gpu_vertices.get();
         UINT const stride=sizeof(NorthStarMaterialVertex),offset=0;

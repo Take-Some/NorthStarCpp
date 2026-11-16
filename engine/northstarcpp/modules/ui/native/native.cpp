@@ -338,6 +338,8 @@ extern "C" const NorthStarModule* northstar_module_query(
     if (const auto* extension=northstarcpp::module_provider::match(
             input_module,host,capability,version)) return extension;
     if (const auto* extension=northstarcpp::module_provider::match(
+            raster_layers_module,host,capability,version)) return extension;
+    if (const auto* extension=northstarcpp::module_provider::match(
             raster_module,host,capability,version)) return extension;
     return northstarcpp::module_provider::match(module,host,capability,version);
 }

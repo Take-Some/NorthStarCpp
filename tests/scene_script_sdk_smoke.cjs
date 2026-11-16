@@ -7,9 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const original = [
-    {index: 0, name: "Road", player: false, mass: 0,
+    {index: 0, name: "Road", mass: 0,
         position: {x: 0, y: 0, z: 0}},
-    {index: 1, name: "Explorer", player: true, mass: 2,
+    {index: 1, name: "Explorer", mass: 2,
         position: {x: 2, y: 0, z: 0}},
     {index: 2, name: "Crate", player: false, mass: 0,
         position: {x: 4, y: 0, z: 0}},
@@ -21,6 +21,7 @@ const colors = new Map();
 const animations = new Map();
 const cameraActions = [];
 const engine = {
+    player: {controlledIndex: () => 1},
     camera: {
         cut() { cameraActions.push(["cut"]); },
         shake(amount, seconds) {
@@ -36,7 +37,7 @@ const engine = {
         objects(start = 0, count = 256) { return data.slice(start, start + count); },
         objectCount() { return data.length; },
         moveStatic(index, x, y, z) {
-            assert.ok(index < data.length && data[index].mass === 0 && !data[index].player);
+            assert.ok(index < data.length && data[index].mass === 0 && index !== 1);
             data[index].position = {x, y, z};
         },
         setColor(index, value) {
@@ -52,7 +53,7 @@ const engine = {
 };
 const sandbox = vm.createContext({engine});
 const bootstrap = path.resolve(__dirname,
-    "../sharedAssets/scripts/northstar/bootstrap.js");
+    "../engine/northstarcpp/resources/sharedAssets/api/northstar/bootstrap.js");
 vm.runInContext(fs.readFileSync(bootstrap, "utf8"), sandbox,
     {filename: bootstrap, timeout: 1500});
 const Scene = vm.runInContext("NorthStar.modules.engine.Scene", sandbox);
@@ -87,6 +88,7 @@ assert.equal(Scene.get(1).name, "Explorer");
 assert.equal(Scene.get(999), null);
 assert.equal(Scene.findByName("Road").index, 0);
 assert.equal(Scene.findByName("Missing"), null);
+assert.equal(Scene.findPawn().index, 1);
 assert.equal(Scene.findPlayer().index, 1);
 assert.deepEqual(Array.from(Scene.iterate(2), x => x.index), [0,1,2,3]);
 assert.deepEqual(Array.from(Scene.nearby({x:0,y:0,z:0}, 5),

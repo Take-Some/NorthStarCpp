@@ -34,7 +34,7 @@ int step_physics(void* state, float seconds, float input_x, float input_z)
     for (auto& body : static_cast<Physics*>(state)->bodies) {
         if (body.mass > 0)
             body.y = std::max(0.f, body.y - seconds * 3.f);
-        if (body.player) {
+        if (body.initially_controlled) {
             body.x += input_x * seconds * 2.f;
             body.z += input_z * seconds * 2.f;
         }
@@ -92,7 +92,7 @@ int fixture_impulse(void* state,uint32_t index,float x,float y,float z)
 {
     if(!state) return 0;
     auto& objects=static_cast<Physics*>(state)->bodies;
-    if(index>=objects.size() || objects[index].mass<=0.f || objects[index].player)
+    if(index>=objects.size() || objects[index].mass<=0.f || objects[index].initially_controlled)
         return 0;
     objects[index].x+=x*0.05f; objects[index].y+=y*0.05f;
     objects[index].z+=z*0.05f;
@@ -101,11 +101,50 @@ int fixture_impulse(void* state,uint32_t index,float x,float y,float z)
 NorthStarPhysicsApi const physics_api{create_physics, destroy_physics, step_physics,
     read_physics, jump_physics, move_static_physics, fixture_sweep, fixture_mesh, fixture_impulse};
 NorthStarAudioApi const audio_api{create_audio, destroy_audio, play_audio, stop_audio};
+
+// Mock ABI 2 implementation for provider negotiation and voice lifecycle tests.
+// A single fixture voice is sufficient to exercise the dispatch path without
+// installing a device, a proprietary SDK, or a second audio implementation.
+NorthStarAudioVoiceId fixture_play_voice(void* state, NorthStarPcm16 const* pcm,
+                                          NorthStarAudioVoiceOptions const* options)
+{
+    if (!options || options->struct_size < sizeof(*options) ||
+        options->gain < 0.0f || !play_audio(state, pcm))
+        return 0;
+    return 73;
+}
+int fixture_stop_voice(void* state, NorthStarAudioVoiceId id)
+{
+    if (!state || id != 73 || !*static_cast<bool*>(state)) return 0;
+    stop_audio(state);
+    return 1;
+}
+int fixture_gain(void* state, NorthStarAudioVoiceId id, float gain)
+{
+    return state && *static_cast<bool*>(state) && id == 73 && gain >= 0.0f;
+}
+int fixture_position(void* state, NorthStarAudioVoiceId id, NorthStarAudioVector3)
+{
+    return state && *static_cast<bool*>(state) && id == 73;
+}
+int fixture_listener(void* state, NorthStarAudioListener const* listener)
+{
+    return state && listener && listener->struct_size >= sizeof(*listener);
+}
+void fixture_update(void*, float) {}
+NorthStarAudioVoicesApi const voices_api{
+    NORTHSTARCPP_AUDIO_VOICES_ABI, sizeof(NorthStarAudioVoicesApi),
+    fixture_play_voice, fixture_stop_voice, fixture_gain, fixture_position,
+    fixture_listener, fixture_update};
+
 NorthStarModule const modules[]{
     {sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI, NORTHSTARCPP_CAPABILITY_PHYSICS,
         "Fixture Physics", "1.0", NORTHSTARCPP_PHYSICS_ABI, sizeof(physics_api), &physics_api, error},
     {sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI, NORTHSTARCPP_CAPABILITY_AUDIO,
-        "Fixture Audio", "1.0", NORTHSTARCPP_AUDIO_ABI, sizeof(audio_api), &audio_api, error}
+        "Fixture Audio", "1.0", NORTHSTARCPP_AUDIO_ABI, sizeof(audio_api), &audio_api, error},
+    {sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI, NORTHSTARCPP_CAPABILITY_AUDIO,
+        "Fixture Audio", "1.0", NORTHSTARCPP_AUDIO_VOICES_ABI,
+        sizeof(voices_api), &voices_api, error}
 };
 
 } // namespace

@@ -1,0 +1,241 @@
+{
+  "schema": 1,
+  "shots": [
+    {
+      "name": "establishing",
+      "duration": 2.5,
+      "transition_seconds": 0,
+      "track": {
+        "schema": 1,
+        "keyframes": [
+          {
+            "time": 0,
+            "position": [
+              -6,
+              3,
+              -10
+            ],
+            "yaw": 0.35,
+            "pitch": -0.08,
+            "roll": 0,
+            "fov_y_degrees": 68,
+            "near": 0.08,
+            "far": 650
+          },
+          {
+            "time": 2.5,
+            "position": [
+              -3,
+              3.5,
+              -6
+            ],
+            "yaw": 0.3,
+            "pitch": -0.1,
+            "roll": 0,
+            "fov_y_degrees": 58,
+            "near": 0.08,
+            "far": 650
+          }
+        ]
+      }
+    },
+    {
+      "name": "closeup",
+      "duration": 2,
+      "transition_seconds": 0.7,
+      "track": {
+        "schema": 1,
+        "keyframes": [
+          {
+            "time": 0,
+            "position": [
+              -1.2,
+              2.1,
+              -2.7
+            ],
+            "yaw": 0.12,
+            "pitch": -0.12,
+            "roll": 0,
+            "fov_y_degrees": 46,
+            "near": 0.08,
+            "far": 650
+          },
+          {
+            "time": 2,
+            "position": [
+              -0.7,
+              2,
+              -1.8
+            ],
+            "yaw": 0,
+            "pitch": 0,
+            "roll": 0,
+            "fov_y_degrees": 42,
+            "near": 0.08,
+            "far": 650
+          }
+        ]
+      }
+    },
+    {
+      "name": "reveal",
+      "duration": 2.5,
+      "transition_seconds": 0,
+      "track": {
+        "schema": 1,
+        "keyframes": [
+          {
+            "time": 0,
+            "position": [
+              4,
+              4,
+              5
+            ],
+            "yaw": -0.72,
+            "pitch": -0.16,
+            "roll": 0.02,
+            "fov_y_degrees": 72,
+            "near": 0.08,
+            "far": 650
+          },
+          {
+            "time": 2.5,
+            "position": [
+              8,
+              4.8,
+              8
+            ],
+            "yaw": -0.85,
+            "pitch": -0.2,
+            "roll": 0,
+            "fov_y_degrees": 75,
+            "near": 0.08,
+            "far": 650
+          }
+        ]
+      }
+    }
+  ],
+  "tracks": [
+    {
+      "type": "animation",
+      "name": "actor",
+      "keys": [
+        {
+          "time": 0,
+          "target": "player",
+          "action": "play",
+          "value": "idle"
+        },
+        {
+          "time": 4.5,
+          "target": "player",
+          "action": "play",
+          "value": "look_around"
+        }
+      ]
+    },
+    {
+      "type": "audio",
+      "name": "sound",
+      "keys": [
+        {
+          "time": 0.2,
+          "target": "scene",
+          "action": "play",
+          "value": "intro.ambience"
+        },
+        {
+          "time": 4.6,
+          "target": "scene",
+          "action": "play",
+          "value": "intro.reveal"
+        }
+      ]
+    },
+    {
+      "type": "dialogue",
+      "name": "voice",
+      "keys": [
+        {
+          "time": 3,
+          "target": "narrator",
+          "action": "line",
+          "value": "intro.line_01"
+        }
+      ]
+    },
+    {
+      "type": "event",
+      "name": "story",
+      "keys": [
+        {
+          "time": 6.9,
+          "target": "intro",
+          "action": "complete",
+          "value": "intro.done"
+        }
+      ]
+    },
+    {
+      "type": "overlay",
+      "name": "titles",
+      "keys": [
+        {
+          "time": 0.1,
+          "target": "hud",
+          "action": "title",
+          "value": "NorthStar"
+        },
+        {
+          "time": 3.5,
+          "target": "hud",
+          "action": "clear",
+          "value": ""
+        }
+      ]
+    },
+    {
+      "type": "lens",
+      "name": "cinematic_lens",
+      "keys": [
+        {
+          "time": 0,
+          "focus_m": 12,
+          "aperture_f": 5.6,
+          "exposure_ev": 0,
+          "motion_blur": 0.12,
+          "letterbox": 0.12,
+          "dof_strength": 0.4
+        },
+        {
+          "time": 2.5,
+          "focus_m": 3,
+          "aperture_f": 2.8,
+          "exposure_ev": 0.55,
+          "motion_blur": 0.08,
+          "letterbox": 0.12,
+          "dof_strength": 0.75
+        },
+        {
+          "time": 4.5,
+          "focus_m": 6,
+          "aperture_f": 4,
+          "exposure_ev": -0.15,
+          "motion_blur": 0.2,
+          "letterbox": 0.12,
+          "dof_strength": 0.45
+        },
+        {
+          "time": 7.0,
+          "focus_m": 20,
+          "aperture_f": 8,
+          "exposure_ev": 0,
+          "motion_blur": 0.05,
+          "letterbox": 0.0,
+          "dof_strength": 0.1
+        }
+      ]
+    }
+  ]
+}

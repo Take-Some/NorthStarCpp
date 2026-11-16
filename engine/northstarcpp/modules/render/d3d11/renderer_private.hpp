@@ -163,6 +163,7 @@ struct RendererState {
     Com<ID3D11Buffer> skinned_palette_buffer, skinned_vertex_buffer;
     std::size_t skinned_vertex_capacity=0;
     std::vector<NorthStarSkinMaterialVertex> skinned_vertices;
+    bool skinned_vertices_dirty=true;
     std::vector<SkinnedMaterialDraw> skinned_draws;
     Com<ID3D11PixelShader> authored_ps;
     Com<ID3D11InputLayout> authored_layout;
@@ -183,6 +184,7 @@ struct RendererState {
     std::vector<MaterialDraw> material_draws;
     std::unordered_map<std::uint64_t,std::shared_ptr<CachedTexture>> material_texture_cache;
     std::uint64_t material_texture_cache_bytes=0;
+    std::uint64_t material_texture_cache_budget=512ull*1024ull*1024ull;
     Com<ID3D11Buffer> vertex_buffer;
     unsigned vertex_buffer_capacity=0;
     unsigned underutilized_frames=0;
@@ -215,6 +217,12 @@ struct RendererState {
     std::uint64_t sky_gpu_bytes=0;
     std::vector<Vertex> vertices;
     std::vector<Vertex> mesh_triangles;
+    struct PickCube {
+        northstarcpp::math::float4x4 transform;
+        std::uint32_t id_color=0;
+    };
+    std::vector<PickCube> pick_cubes;
+    std::vector<Vertex> pick_cube_vertices;
     std::array<Com<ID3D11Texture2D>,9> surface_textures;
     std::array<Com<ID3D11ShaderResourceView>,9> surface_views;
     std::vector<std::uint32_t> surface_ids;
@@ -253,5 +261,7 @@ struct RendererState {
     void set_surface_texture(NorthStarSurfaceTexture const& image);
     void set_cube_surfaces(std::uint32_t const* ids,std::uint32_t count);
     void draw(NorthStarRenderFrame const& frame);
+    // GPU ID pass for visible primitive cubes, excluding editor gizmos and meshes.
+    int pick_cube(std::uint32_t x,std::uint32_t y);
 };
 }

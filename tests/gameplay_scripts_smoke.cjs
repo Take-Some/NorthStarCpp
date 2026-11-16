@@ -15,6 +15,26 @@ function harness(source, objects, options = {}) {
     let characterSpec = null;
     let pointer = { x: 0, y: 0 }, jumped = 0, paused = false;
     let currentView = "first_person", wheel = 0, followDistance = 4;
+    // The current Scene/Prefab SDK creates real entity handles. Mirror its
+    // neutral host interface rather than bypassing project weapon scripts.
+    const resolvePrefab = resource => {
+        assert.equal(resource, "prefabs/pistol.nprefab");
+        const file = path.join(ROOT, "Projects/NorthStarFirstPersonPlatform", resource);
+        const text = fs.readFileSync(file, "utf8");
+        assert.match(text, /^NorthStarCpp\.Scene 3/m);
+        const records = [...text.matchAll(/^entity\s+(\d+)\s+(\d+)\s+"([^"]+)"\s+"([^"]+)"\s+"([^"]*)"\s+"([^"]*)"\s+"([^"]+)"\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/gm)];
+        assert.ok(records.length, "prefab fixture must contain entities");
+        return {objects:records.map(match => ({
+            id:match[1], parent:match[2], name:match[3],
+            layer:match[4], asset:match[7],
+            position:{x:Number(match[8]),y:Number(match[9]),z:Number(match[10])},
+            size:1, mass:0, color:0x6c86a4, collision:false
+        }))};
+    };
+    const entityById = id => objects.find(o => o && o.id === String(id));
+    for(const [index,object] of objects.entries())
+        if(object) { object.id ??= String(index+1); object.index ??= index; }
+
     const viewChanges = [], distances = [];
     const engine = {
         on(event, fn) {
@@ -28,10 +48,41 @@ function harness(source, objects, options = {}) {
             warn: s => logs.push(["warn", s]),
             error: s => logs.push(["error", s])
         },
+        prefab: {read:resolvePrefab},
         scene: {
             objects(start = 0, count = 256) { return objects.slice(start, start + count); },
-            moveStatic(index, x, y, z) { transforms.push({index, x, y, z}); },
-            setColor(index, color) { colors.push({index, color}); }
+            objectCount() { return objects.filter(Boolean).length; },
+            spawn(name,x,y,z,size,mass,color,asset,layer,parentId,collision) {
+                const index=objects.length, id=String(index+1);
+                objects.push({index,id,name,mass,size,color,asset,layer,
+                    parentId,collision:collision!==false,position:{x,y,z}});
+                return {index,id};
+            },
+            destroy(id) {
+                const object=entityById(id);
+                if(!object)throw new Error("Unknown runtime entity");
+                objects[object.index]=null;
+                return true;
+            },
+            moveRuntime(id,x,y,z) {
+                const object=entityById(id);
+                if(!object)throw new Error("Unknown runtime entity");
+                object.position={x,y,z};
+            },
+            rotateRuntime(id,x,y,z) {
+                const object=entityById(id);
+                if(!object)throw new Error("Unknown runtime entity");
+                object.rotation={x,y,z};
+            },
+            setAnimation(index,clip) {assert.ok(objects[index]); return clip;},
+            moveStatic(index, x, y, z) {
+                transforms.push({index,x,y,z});
+                if(objects[index])objects[index].position={x,y,z};
+            },
+            setColor(index, color) {
+                colors.push({index, color});
+                if(objects[index])objects[index].color=color;
+            }
         },
         input: {
             isDown(code) { return held.has(code); },
@@ -41,9 +92,12 @@ function harness(source, objects, options = {}) {
             gamepad() { return null; }
         },
         player: {
+            controlledIndex() { return objects.findIndex(object => object?.player); },
+            controlledEntity() { const i = objects.findIndex(object => object?.player); return i < 0 ? null : String(i + 1); },
             setEyeHeight(value) {assert.ok(value > 0);},
             eye() {return {x:0,y:1.45,z:0};},
             move(x,z) {moves.push({x,z});},
+            sprint(active) { return Boolean(active); },
             jump() {jumped++;}
         },
         camera: {
@@ -102,7 +156,16 @@ function harness(source, objects, options = {}) {
             state() { return {finished:false,time:0}; },
             stop(id) { animationStops.push(id); }
         },
-        ui: {setTitle(value) {titles.push(value);}}
+        ui: {
+            apply(document) {
+                assert.equal(document.target,"screen");
+                assert.ok(Array.isArray(document.nodes));
+                titles.push(...document.nodes.filter(n=>n.type==="text")
+                    .map(n=>String(n.props?.text?.value ?? n.props?.text ?? "")));
+                return true;
+            },
+            setTitle(value) {titles.push(value);}
+        }
     };
     const sourceCode = fs.readFileSync(source, "utf8");
     const context = vm.createContext({engine, Math, Object, Number, Map, Set,
@@ -128,14 +191,14 @@ function harness(source, objects, options = {}) {
             lowered + "\n})();" : lowered,
             context, {filename, timeout:1500});
     }
-    const shared = path.join(ROOT, "sharedAssets/scripts/northstar/bootstrap.js");
+    const shared = path.join(ROOT, "engine/northstarcpp/resources/sharedAssets/api/northstar/bootstrap.js");
     vm.runInContext(fs.readFileSync(shared, "utf8"), context,
         {filename:shared, timeout:1500});
     // Input enum classes register immediately after bootstrap, before any
     // script can import Keys or GamepadButtons from @northstar/engine.
     for (const name of ["input/Keys.js", "input/GamepadButtons.js",  "scene/Entity.js", "scene/Prefab.js"]) {
         const preferred = path.join(path.dirname(source), name);
-        const sharedFile = path.join(ROOT, "sharedAssets/scripts", name);
+        const sharedFile = path.join(ROOT, "engine/northstarcpp/resources/sharedAssets/api", name);
         const selected = fs.existsSync(preferred) ? preferred : sharedFile;
         evaluate(fs.readFileSync(selected, "utf8"), selected);
     }
@@ -156,7 +219,7 @@ function harness(source, objects, options = {}) {
             flat === "playerConfig.js" ? options.configScript : null;
         const preferred = path.join(path.dirname(source),grouped);
         const legacy = option || path.join(path.dirname(source),flat);
-        const shared = path.join(ROOT,"sharedAssets/scripts",grouped);
+        const shared = path.join(ROOT,"engine/northstarcpp/resources/sharedAssets/api",grouped);
         const chosen=fs.existsSync(preferred) ? preferred :
             fs.existsSync(legacy) ? legacy : shared;
         evaluate(fs.readFileSync(chosen, "utf8"), chosen);
@@ -189,9 +252,16 @@ function platform() {
         {index:1,name:"Physics Crate",player:false,mass:2,position:{x:0,y:0,z:3}}
     ]);
     game.dispatch("start");
-    assert.equal(game.currentView, "third_person", "shared controller selects initial view");
+    assert.equal(game.currentView, "first_person", "project-authored first-person camera initializes");
     assert.ok(game.characterSpec?.animations.some(clip => clip.name === "idle"));
-    assert.ok(game.characterCalls.some(call => call.event === "pose" && call.animation === "idle"));
+    assert.ok(game.characterCalls.some(call => call.event === "hide"),
+        "first-person initialization hides third-person character mesh");
+    // Exercise third-person zoom after switching from the project-authored first-person default.
+    game.held.add(86);
+    game.dispatch("update",0.016);
+    game.held.delete(86);
+    game.dispatch("update",0.016);
+    assert.equal(game.currentView, "third_person");
     game.held.add(87); // W
     game.setPointer({x:4,y:0});
     game.dispatch("update",0.016);
@@ -227,7 +297,7 @@ function platform() {
         game.hideInFirstPerson ? "hide" : "pose",
         "Character visibility follows its project-authored camera policy");
     game.dispatch("update",0.016);
-    assert.equal(game.viewChanges.length, 2, "holding V must not retrigger");
+    assert.equal(game.viewChanges.length, 3, "holding V must not retrigger after initial third-person toggle");
     game.setWheel(2);
     game.dispatch("update",0.016);
     assert.equal(game.followDistance, 10, "first-person scroll cannot alter follow distance");

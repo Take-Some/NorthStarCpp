@@ -11,6 +11,10 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         char enable_bloom[8]{};
         bloom_enabled=GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_BLOOM",
             enable_bloom,sizeof(enable_bloom))>0 && enable_bloom[0]=='1';
+        char look_enabled[8]{};
+        film_look_resources_requested=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_POSTFX_LOOK",look_enabled,sizeof(look_enabled))>0 &&
+            look_enabled[0]=='1';
         char enable_hdr[8]{};
         hdr_enabled=GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_HDR",
             enable_hdr,sizeof(enable_hdr))>0 && enable_hdr[0]=='1';
@@ -27,10 +31,29 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
             GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_PCSS",
                 enable_pcss,sizeof(enable_pcss))>0 && enable_pcss[0]=='1';
         // Experimental eight-tap ambient depth occlusion; opt in for QA.
+        char gbuffer_version[8]{};
+        gbuffer_v2=GetEnvironmentVariableA("NORTHSTARCPP_GBUFFER_VERSION",
+            gbuffer_version,sizeof(gbuffer_version))>0 &&
+            gbuffer_version[0]=='2' && gbuffer_version[1]=='\0';
         char enable_ssao[4]{};
         ssao_enabled=GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_SSAO",
             enable_ssao,sizeof(enable_ssao))>0 &&
             enable_ssao[0]=='1';
+        // Inspect packed GBuffer channels through the existing deferred
+        // pass, without allocating another MRT or stalling GPU readback.
+        char debug_mode[24]{};
+        DWORD const debug_length=GetEnvironmentVariableA(
+            "NORTHSTARCPP_GBUFFER_DEBUG",debug_mode,sizeof(debug_mode));
+        if(debug_length>0 && debug_length<sizeof(debug_mode)) {
+            constexpr char const* names[]{
+                "off","albedo","normal","roughness","metallic",
+                "emissive","depth","ao","coverage"};
+            for(unsigned i=0;i<sizeof(names)/sizeof(names[0]);++i)
+                if(std::strcmp(debug_mode,names[i])==0) {
+                    gbuffer_debug_mode=i;
+                    break;
+                }
+        }
         check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"Create DXGI");
         if(software) {
             ComPtr<IDXGIAdapter> warp;
@@ -205,14 +228,15 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         check(device->CreateGraphicsPipelineState(&pso,IID_PPV_ARGS(&triangles)),
             "Create D3D12 triangles PSO");
-        auto gbuffer_ps=compile("ps_gbuffer");
+        auto gbuffer_ps=compile(gbuffer_v2?"ps_gbuffer_v2":"ps_gbuffer");
         D3D12_GRAPHICS_PIPELINE_STATE_DESC geometry_pso=pso;
         geometry_pso.PS={gbuffer_ps->GetBufferPointer(),gbuffer_ps->GetBufferSize()};
-        geometry_pso.NumRenderTargets=3;
+        geometry_pso.NumRenderTargets=gbuffer_v2?4:3;
         geometry_pso.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
         geometry_pso.RTVFormats[1]=DXGI_FORMAT_R16G16B16A16_FLOAT;
         geometry_pso.RTVFormats[2]=DXGI_FORMAT_R16G16B16A16_FLOAT;
-        for(UINT i=0;i<3;++i)
+        geometry_pso.RTVFormats[3]=gbuffer_v2?DXGI_FORMAT_R8G8B8A8_UNORM:DXGI_FORMAT_UNKNOWN;
+        for(UINT i=0;i<(gbuffer_v2?4u:3u);++i)
             geometry_pso.BlendState.RenderTarget[i].RenderTargetWriteMask=
                 D3D12_COLOR_WRITE_ENABLE_ALL;
         check(device->CreateGraphicsPipelineState(&geometry_pso,
@@ -272,7 +296,11 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         check(device->CreateRootSignature(0,binary->GetBufferPointer(),binary->GetBufferSize(),
             IID_PPV_ARGS(&material_signature)),"Create authored material root signature");
         auto mat_vs=compile_authored_material("material_vs","vs_5_0");
-        auto mat_ps=compile_authored_material("material_gbuffer_ps","ps_5_0");
+        auto mat_ps=gbuffer_v2?
+            compile_material_variant(
+                std::string("#define NS_GBUFFER_V2 1\n")+authored_material_shader,
+                "material_gbuffer_ps","ps_5_0"):
+            compile_authored_material("material_gbuffer_ps","ps_5_0");
         D3D12_INPUT_ELEMENT_DESC material_elements[]{
             {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,offsetof(NorthStarMaterialVertex,x),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
@@ -291,18 +319,19 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         material_pso.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         // Only authored materials are deferred. Existing world/sky/HUD passes
         // remain direct-to-backbuffer and share the depth buffer.
-        material_pso.NumRenderTargets=3;
+        material_pso.NumRenderTargets=gbuffer_v2?4:3;
         material_pso.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
         material_pso.RTVFormats[1]=DXGI_FORMAT_R16G16B16A16_FLOAT;
         material_pso.RTVFormats[2]=DXGI_FORMAT_R16G16B16A16_FLOAT;
-        for(UINT i=0;i<3;++i)
+        material_pso.RTVFormats[3]=gbuffer_v2?DXGI_FORMAT_R8G8B8A8_UNORM:DXGI_FORMAT_UNKNOWN;
+        for(UINT i=0;i<(gbuffer_v2?4u:3u);++i)
             material_pso.BlendState.RenderTarget[i].RenderTargetWriteMask=
                 D3D12_COLOR_WRITE_ENABLE_ALL;
         check(device->CreateGraphicsPipelineState(&material_pso,
             IID_PPV_ARGS(&material_pipeline)),"Create authored PBR pipeline");
         D3D12_DESCRIPTOR_HEAP_DESC material_heap{};
         material_heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        material_heap.NumDescriptors=NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES*5;
+        material_heap.NumDescriptors=static_cast<UINT>(material_batch_capacity*5u);
         material_heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(device->CreateDescriptorHeap(&material_heap,
             IID_PPV_ARGS(&material_srv_heap)),"Create material SRV descriptor heap");
@@ -316,7 +345,7 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         deferred_params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
         D3D12_DESCRIPTOR_RANGE deferred_range{};
         deferred_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        deferred_range.NumDescriptors=7;
+        deferred_range.NumDescriptors=8;
         deferred_range.BaseShaderRegister=0;
         deferred_params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         deferred_params[1].DescriptorTable.NumDescriptorRanges=1;
@@ -350,16 +379,27 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         }
         D3D12_DESCRIPTOR_HEAP_DESC deferred_heap{};
         deferred_heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        deferred_heap.NumDescriptors=3;
+        deferred_heap.NumDescriptors=4;
         check(device->CreateDescriptorHeap(&deferred_heap,
             IID_PPV_ARGS(&deferred_rtvs)),"Create deferred RTV heap");
         deferred_rtv_stride=device->GetDescriptorHandleIncrementSize(
             D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         deferred_heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        deferred_heap.NumDescriptors=7;
+        deferred_heap.NumDescriptors=8;
         deferred_heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(device->CreateDescriptorHeap(&deferred_heap,
             IID_PPV_ARGS(&deferred_srvs)),"Create deferred SRV heap");
+        // Reserve t7 for G-buffer v2 without shifting depth, light, or shadow slots.
+        // Initialize the superset descriptor table for legacy v1 as well.
+        D3D12_SHADER_RESOURCE_VIEW_DESC neutral_aux{};
+        neutral_aux.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+        neutral_aux.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+        neutral_aux.Texture2D.MipLevels=1;
+        neutral_aux.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        auto neutral_slot=deferred_srvs->GetCPUDescriptorHandleForHeapStart();
+        neutral_slot.ptr+=UINT64(7)*device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        device->CreateShaderResourceView(nullptr,&neutral_aux,neutral_slot);
         deferred_srv_stride=device->GetDescriptorHandleIncrementSize(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         // First directional shadow region. Its resource is independent of

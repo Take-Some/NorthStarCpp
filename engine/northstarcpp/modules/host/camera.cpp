@@ -1,6 +1,8 @@
 // NorthStarCpp — independent native camera director.
 #include <northstarcpp/camera.hpp>
+#include <northstarcpp/scene_camera_actor.hpp>
 #include <northstarcpp/camera_track.hpp>
+#include <northstarcpp/camera_cutscene.hpp>
 #include <northstarcpp/physics.hpp>
 #include <northstarcpp/assets.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -209,7 +211,10 @@ void CameraDirector::configure(CameraSettings settings) {
 void CameraDirector::set_mode(CameraMode mode, float duration) {
     ensure(finite(duration) && duration>=0.f && duration<=10.f,
            "Invalid camera transition duration");
-    if (mode_==mode) return;
+    if (mode_==mode && !cutscene_) return;
+    // Explicit gameplay mode switches relinquish cutscene ownership.
+    if(cutscene_)stop_cutscene(0.f);
+    transition_source_mode_=mode_;
     mode_=mode;
     follow_velocity_={0.f,0.f,0.f};
     lookahead_offset_={0.f,0.f,0.f};
@@ -262,6 +267,67 @@ void CameraDirector::set_track(CameraTrack track, bool loop) {
     track_loop_=loop;
     track_playing_=true;
 }
+void CameraDirector::play_cutscene(CameraCutscene scene, bool loop,
+                                    float entry, float exit) {
+    ensure(!scene.empty() && finite(entry) && finite(exit) &&
+           entry>=0.f && entry<=10.f && exit>=0.f && exit<=10.f,
+           "Invalid camera cutscene or entry/exit blend");
+    transition_from_=pose_;
+    transition_seconds_=initialized_?entry:0.f;
+    transition_elapsed_=0.f;
+    follow_velocity_={0.f,0.f,0.f};
+    cutscene_=std::make_unique<CameraCutscene>(std::move(scene));
+    cutscene_time_=0.f;
+    cutscene_exit_seconds_=exit;
+    cutscene_loop_=loop;
+    cutscene_playing_=true;
+    cutscene_finished_=false;
+    cutscene_shot_.clear();
+    cutscene_anchor_valid_=false;
+    cutscene_first_tick_=true;
+    pending_cutscene_cues_json_="[]";
+    cutscene_exposure_ev_=0.f;
+    cutscene_lens_active_=true;
+}
+void CameraDirector::stop_cutscene(float exit) {
+    ensure(finite(exit) && exit>=0.f && exit<=10.f,
+           "Invalid camera cutscene exit blend");
+    if(!cutscene_)return;
+    cutscene_.reset();
+    cutscene_shot_.clear();
+    cutscene_anchor_valid_=false;
+    cutscene_first_tick_=false;
+    cutscene_lens_active_=false;
+    cutscene_exposure_ev_=0.f;
+    pending_cutscene_cues_json_="[]";
+    cutscene_time_=0.f;
+    cutscene_finished_=false;
+    cutscene_playing_=true;
+    follow_velocity_={0.f,0.f,0.f};
+    lookahead_offset_={0.f,0.f,0.f};
+    collision_limit_=-1.f;
+    transition_from_=pose_;
+    transition_seconds_=initialized_?exit:0.f;
+    transition_elapsed_=0.f;
+}
+void CameraDirector::seek_cutscene(float seconds) {
+    ensure(cutscene_ && finite(seconds) && seconds>=0.f &&
+           seconds<=cutscene_->duration(),"Invalid cutscene seek");
+    cutscene_time_=seconds;
+    cutscene_first_tick_=false;
+    pending_cutscene_cues_json_="[]";
+    cutscene_finished_=false;
+    // Timeline seek is a deliberate cut; no frame-space temporal trail.
+    cut();
+}
+std::string CameraDirector::drain_cutscene_cues_json() {
+    std::string result=std::move(pending_cutscene_cues_json_);
+    pending_cutscene_cues_json_="[]";
+    return result.empty()?std::string("[]"):result;
+}
+CameraCinematicLens CameraDirector::cinematic_lens() const {
+    return cutscene_?cutscene_->lens_at(cutscene_time_):CameraCinematicLens{};
+}
 void CameraDirector::clear_track() noexcept {
     track_.reset();
     track_time_=0.f;
@@ -300,6 +366,15 @@ void CameraDirector::reset() {
     shake_remaining_=shake_duration_=shake_amplitude_=0.f;
     time_=orbit_phase_=0.f;
     track_time_=0.f;
+    cutscene_.reset();
+    cutscene_shot_.clear();
+    cutscene_anchor_valid_=false;
+    cutscene_first_tick_=false;
+    cutscene_lens_active_=false;
+    cutscene_exposure_ev_=0.f;
+    pending_cutscene_cues_json_="[]";
+    cutscene_time_=0.f;
+    cutscene_finished_=false;
 }
 CameraPose CameraDirector::desired(CameraTarget const& t, float dt) {
     CameraPose p;
@@ -455,6 +530,38 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
     if(initialized_ &&
        distance(pivot,previous_eye_)>settings_.teleport_cut_distance)
         cut(); // No temporal trail or stale collision state across sectors.
+    // Non-looping cutscenes show the final frame before transitioning
+    // automatically to the gameplay camera on the next update.
+    if(cutscene_ && cutscene_finished_ && !cutscene_loop_)
+        stop_cutscene(cutscene_exit_seconds_);
+    if(cutscene_ && cutscene_playing_) {
+        const float previous=cutscene_first_tick_?-1.f:cutscene_time_;
+        cutscene_first_tick_=false;
+        cutscene_time_+=dt*track_rate_;
+        auto const duration=cutscene_->duration();
+        std::vector<CameraCutsceneCue> crossed;
+        if(cutscene_loop_ && duration>0.f && cutscene_time_>=duration) {
+            // An event at timeline zero belongs to the new loop, not the
+            // end of the previous pass. Each segment is emitted once.
+            auto outgoing=cutscene_->cues_between(previous,duration);
+            crossed.insert(crossed.end(),outgoing.begin(),outgoing.end());
+            cutscene_time_=std::fmod(cutscene_time_,duration);
+            auto incoming=cutscene_->cues_between(-1.f,cutscene_time_);
+            crossed.insert(crossed.end(),incoming.begin(),incoming.end());
+        } else {
+            if(cutscene_time_>=duration) {
+                cutscene_time_=duration;
+                cutscene_finished_=true;
+            }
+            crossed=cutscene_->cues_between(previous,cutscene_time_);
+        }
+        if(!crossed.empty())
+            pending_cutscene_cues_json_=serialize_camera_cues(crossed);
+    }
+    if(cutscene_) {
+        cutscene_exposure_ev_=cutscene_->lens_at(cutscene_time_).exposure_ev;
+        cutscene_lens_active_=true;
+    }
     // Deterministic request arbitration; the most recently registered
     // request wins priority ties. A gameplay camera remains authoritative
     // whenever there is no active cinematic request.
@@ -464,14 +571,21 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
            (request.shot.priority==selected->shot.priority &&
             request.order>selected->order))
             selected=&request;
-    std::string const winner=selected?selected->shot.source:std::string{};
+    // Scene Camera Actors participate in the existing shot arbitration.
+    // Never enqueue a persistent shot: disabling/removing a camera is immediate.
+    auto const sceneShot=world?scene_camera::active_shot(*world):
+        std::optional<CameraShot>{};
+    CameraShot const* selectedShot=selected?&selected->shot:nullptr;
+    if(sceneShot && (!selectedShot || sceneShot->priority>selectedShot->priority))
+        selectedShot=&*sceneShot;
+    std::string const winner=selectedShot?selectedShot->source:std::string{};
     if(winner!=active_shot_) {
         transition_from_=pose_;
-        auto const blend_seconds=selected?
-            selected->shot.blend_seconds :
+        auto const blend_seconds=selectedShot?
+            selectedShot->blend_seconds :
             (mode_==CameraMode::first_person?0.f:last_shot_blend_seconds_);
-        if(selected)
-            last_shot_blend_seconds_=selected->shot.blend_seconds;
+        if(selectedShot)
+            last_shot_blend_seconds_=selectedShot->blend_seconds;
         transition_seconds_=initialized_?blend_seconds:0.f;
         transition_elapsed_=0.f;
         follow_velocity_={0.f,0.f,0.f};
@@ -479,7 +593,31 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         lookahead_offset_={0.f,0.f,0.f};
         active_shot_=winner;
     }
-    CameraPose wanted=selected?selected->shot.pose:desired(t,dt);
+    CameraPose wanted;
+    if(selectedShot)wanted=selectedShot->pose;
+    else if(cutscene_) {
+        auto frame=cutscene_->sample(cutscene_time_);
+        cutscene_shot_=std::move(frame.shot);
+        wanted=frame.pose;
+        if(cutscene_->space()==CameraCutsceneSpace::target) {
+            // Freeze the local-space origin on first camera activation.
+            // Actor motion must not drag an authored cinematic shot.
+            if(!cutscene_anchor_valid_) {
+                cutscene_anchor_=pivot;
+                cutscene_anchor_yaw_=
+                    mode_==CameraMode::vehicle_chase?t.heading:t.yaw;
+                cutscene_anchor_valid_=true;
+            }
+            const float sn=std::sin(cutscene_anchor_yaw_);
+            const float cs=std::cos(cutscene_anchor_yaw_);
+            const auto relative=wanted.position;
+            wanted.position={
+                cutscene_anchor_.x+relative.x*cs+relative.z*sn,
+                cutscene_anchor_.y+relative.y,
+                cutscene_anchor_.z-relative.x*sn+relative.z*cs};
+            wanted.yaw=wrap(wanted.yaw+cutscene_anchor_yaw_);
+        }
+    } else wanted=desired(t,dt);
     try {check_pose(wanted);}
     catch(std::invalid_argument const& error) {
         throw std::invalid_argument(
@@ -498,9 +636,14 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
                        pivot.y+ray.y*fraction,
                        pivot.z+ray.z*fraction};
     };
-    bool const has_collision = !selected &&
+    // A first-person target sits at the eye. Its zero arm distance must not
+    // squash the intermediate third-to-first dolly into an immediate cut.
+    bool const has_collision = !selectedShot && !cutscene_ &&
         mode_!=CameraMode::first_person &&
         mode_!=CameraMode::free && mode_!=CameraMode::cinematic;
+    bool const returning_from_third = !selectedShot && !cutscene_ &&
+        mode_==CameraMode::first_person && transition_seconds_>0.f &&
+        transition_source_mode_==CameraMode::third_person;
     if (has_collision && (physics || world)) {
         Vector3 const requested=wanted.position;
         if (physics)
@@ -547,6 +690,7 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
     previous_eye_=pivot;
     if (snap) {
         pose_=wanted;
+        follow_pose_=wanted;
         follow_velocity_={0.f,0.f,0.f};
         transition_seconds_=transition_elapsed_=0.f;
         initialized_=true;
@@ -555,28 +699,28 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         float const a=tau>0.f ? 1.f-std::exp(-dt/tau) : 1.f;
         // FPS camera must exactly track gameplay orientation and eye point:
         // aiming and hitscan use the same authoritative yaw/pitch.
-        if(selected || mode_==CameraMode::cinematic ||
+        if(selectedShot || cutscene_ || mode_==CameraMode::cinematic ||
            mode_==CameraMode::free) {
             // Authored cinematic tracks and free-camera poses are already
             // authoritative. Do not apply third-person follow inertia
             // when returning from a priority override.
-            pose_=wanted;
+            follow_pose_=wanted;
             follow_velocity_={0.f,0.f,0.f};
         } else if (mode_==CameraMode::first_person) {
-            float const previous_fov=pose_.fov_y_degrees;
-            pose_=wanted;
+            float const previous_fov=follow_pose_.fov_y_degrees;
+            follow_pose_=wanted;
             follow_velocity_={0.f,0.f,0.f};
             // FPS aiming remains exact; only the lens FOV eases.
-            pose_.fov_y_degrees=lerp(previous_fov,wanted.fov_y_degrees,a);
+            follow_pose_.fov_y_degrees=lerp(previous_fov,wanted.fov_y_degrees,a);
         } else {
-            CameraPose smoothed=blend(pose_,wanted,a);
+            CameraPose smoothed=blend(follow_pose_,wanted,a);
             float const frequency=settings_.follow_spring_frequency_hz;
             if (frequency>0.f) {
                 float const omega=2.f*pi*frequency;
                 // Apply the analytic spring to the previous authoritative
                 // position, never to an already linearly filtered value:
                 // that would make the response depend on frame subdivision.
-                smoothed.position=pose_.position;
+                smoothed.position=follow_pose_.position;
                 critically_damped(smoothed.position.x,follow_velocity_.x,
                     wanted.position.x,omega,dt);
                 critically_damped(smoothed.position.y,follow_velocity_.y,
@@ -584,18 +728,20 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
                 critically_damped(smoothed.position.z,follow_velocity_.z,
                     wanted.position.z,omega,dt);
             } else follow_velocity_={0.f,0.f,0.f};
-            pose_=smoothed;
+            follow_pose_=smoothed;
         }
+        pose_=follow_pose_;
         if (transition_seconds_>0.f) {
             transition_elapsed_+=dt;
             float const progress=std::min(1.f,transition_elapsed_/transition_seconds_);
             float const eased=progress*progress*(3.f-2.f*progress);
-            pose_=blend(transition_from_,pose_,eased);
+            pose_=blend(transition_from_,follow_pose_,eased);
             if (progress>=1.f) transition_seconds_=0.f;
         }
     }
-    // Never leave a third-person camera behind an occluder after smoothing.
-    if (has_collision && (physics || world)) {
+    // Clip the actual blended dolly on TPS -> FPS to avoid crossing walls.
+    // The FPS desired eye itself has no spring-arm distance to constrain.
+    if ((has_collision || returning_from_third) && (physics || world)) {
         auto const attempted=pose_.position;
         if (physics)
             pose_.position=clip_physics(pose_.position);
@@ -603,7 +749,7 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
             pose_.position=clip_line_of_sight(
                 pivot,pose_.position,*world,t.ignore_object);
         auto const length=distance(pivot,pose_.position);
-        if (collision_limit_>=0.f && length>collision_limit_ &&
+        if (has_collision && collision_limit_>=0.f && length>collision_limit_ &&
             length>1.e-6f) {
             float const ratio=collision_limit_/length;
             pose_.position={
@@ -611,8 +757,11 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
                 pivot.y+(pose_.position.y-pivot.y)*ratio,
                 pivot.z+(pose_.position.z-pivot.z)*ratio};
         }
-        if (distance(attempted,pose_.position)>1.e-4f)
+        if (distance(attempted,pose_.position)>1.e-4f) {
             follow_velocity_={0.f,0.f,0.f}; // Contact must not leave hidden spring energy.
+            if(transition_seconds_<=0.f)
+                follow_pose_.position=pose_.position;
+        }
     }
 
     CameraPose render=pose_;

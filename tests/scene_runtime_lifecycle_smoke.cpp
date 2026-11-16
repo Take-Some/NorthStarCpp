@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // Scene V3 verified NEF8 payload -> live ECS / Bullet/Jolt residency regression.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/scene_world.hpp>
@@ -25,7 +26,7 @@ static Scene make_world()
     player.name="Driver";
     player.node.id=1;
     player.node.cell="Near";
-    player.player=true;
+    // Pawn identity is an explicit Scene component.
     player.mass=1.f;
     player.position={0.f,0.f,0.f};
     SceneObject near;
@@ -49,6 +50,7 @@ static Scene make_world()
     dynamic.mass=5.f;
     dynamic.position={18.f,0.f,0.f};
     scene.objects={player,near,far,persistent,dynamic};
+    scene_pawn::migrate_imported_local(scene,1);
     validate_scene(scene);
     return scene;
 }

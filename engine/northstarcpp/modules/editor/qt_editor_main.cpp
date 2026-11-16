@@ -1,9 +1,11 @@
 #include "qt_editor_window.hpp"
 #include "qt_native_ui_preview.hpp"
 #include "../shared/startup_report.hpp"
+#include "../shared/crash_handler.hpp"
 #include <northstarcpp/logger.hpp>
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
+#include "qt_nsp_icons.hpp"
 #include <QDockWidget>
 #include <QTreeWidget>
 #include <QLabel>
@@ -11,6 +13,7 @@
 #include <QScrollBar>
 #include <QPushButton>
 #include <QGroupBox>
+#include <QFormLayout>
 #include <QAction>
 #include <QToolButton>
 #include "qt_camera_studio.hpp"
@@ -27,6 +30,7 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QStatusBar>
 #include <QFileInfo>
@@ -61,6 +65,7 @@ static int run_editor(int argc,char** argv,
     auto app=startup.measure("qt.application", [&] {
         return std::make_unique<QApplication>(argc,argv);
     });
+    northstarcpp::editor::ensure_northstar_qt_icons();
     app->setApplicationName("NorthStar Qt Editor");
     app->setOrganizationName("Kayla's Systems");
     northstarcpp::editor::installMenuTheme(
@@ -70,8 +75,12 @@ static int run_editor(int argc,char** argv,
     parser.addHelpOption();
     QCommandLineOption scene({"s","scene"},"Scene file to open (.nscn/.nscene).","file");
     QCommandLineOption smoke("smoke","Run dock/scene/binary/asset-drop smoke.");
+    QCommandLineOption placeActorsSmoke("place-actors-smoke",
+        "Validate Place Actors catalog, camera/light ECS and viewport drag/drop.");
     QCommandLineOption nativeUiSmoke("native-ui-smoke",
         "Open engine.ui.native preview, render RGBA and dispatch a mouse click.");
+    QCommandLineOption prefabGpuSmoke("visual-prefab-gpu-smoke",
+        "Validate a saved visual prefab on real GPU with mouse picking and DPI.");
     QCommandLineOption gpuSmoke("gpu-smoke",
         "Render one real engine.render GPU frame inside Qt native viewport.");
     QCommandLineOption mouseLookSmoke("mouse-look-smoke",
@@ -98,15 +107,21 @@ static int run_editor(int argc,char** argv,
         "Run a real WARP Player scene in the full Editor overlay and Escape back.");
     QCommandLineOption focusContentBrowser("focus-content-browser",
         "Show and focus the project Content Browser dock in Qt Editor.");
+    QCommandLineOption qaCaptureEditor("qa-capture-editor",
+        "Capture the actual Qt Editor window using isolated QA settings.",
+        "filename");
     QCommandLineOption playerCheck("player-check",
         "Verify installed Player can load a scene authored by this editor.");
     parser.addOption(scene);
     parser.addOption(smoke);
+    parser.addOption(placeActorsSmoke);
     parser.addOption(nativeUiSmoke);
     parser.addOption(gpuSmoke);
+    parser.addOption(prefabGpuSmoke);
     parser.addOption(mouseLookSmoke);
     parser.addOption(smokeOutput);
     parser.addOption(playerCheck);
+    parser.addOption(qaCaptureEditor);
     parser.addOption(materialGraphSmoke);
     parser.addOption(functionSmoke);
     parser.addOption(cameraStudioSmoke);
@@ -118,6 +133,23 @@ static int run_editor(int argc,char** argv,
     parser.addOption(materialInstanceSmoke);
     parser.addOption(materialPreviewGpuSmoke);
     startup.measure("qt.arguments", [&] {parser.process(*app);});
+    // GPU function QA owns its own isolated preview widget. Constructing a
+    // complete QtEditorWindow starts unrelated async Asset Browser scans;
+    // their VFS/NEF8 work can race GPU acceptance and mask its real result.
+    // Run the focused test without those background subsystems or project
+    // settings, while preserving the normal Editor startup path.
+    if(parser.isSet(functionSmoke)) {
+        startup.info("qa.material_function", "mode=isolated_native_gpu");
+        return run_material_function_smoke();
+    }
+    if(parser.isSet(qaCaptureEditor) || parser.isSet(contentDockSmoke) ||
+       parser.isSet(placeActorsSmoke)) {
+        // Screenshot QA may run while a production editor is open. Never
+        // touch that editor's persisted layout or shortcuts/settings.
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,
+            QDir(QCoreApplication::applicationDirPath()).filePath("qa-settings"));
+    }
     auto window=startup.measure("qt.window", [&] {
         return std::make_unique<northstarcpp::editor::QtEditorWindow>();
     });
@@ -134,6 +166,30 @@ static int run_editor(int argc,char** argv,
         }
     }
     startup.measure("qt.window_show", [&] {window->show();});
+    if(parser.isSet(qaCaptureEditor)) {
+        window->showContentBrowser();
+        QString const path=parser.value(qaCaptureEditor);
+
+        // Wait for the async Content Browser catalog, not just a fixed
+        // start-up delay. Keep the QA capture bounded at approximately 12 s.
+        auto* timer=new QTimer(window.get());
+        timer->setInterval(350);
+        auto probes=std::make_shared<int>(0);
+        QObject::connect(timer,&QTimer::timeout,window.get(),
+                [&app,&window,timer,probes,path] {
+            if(window->contentBrowser()->recordCount()==0 && ++*probes<35)
+                return;
+            timer->stop();
+            QCoreApplication::processEvents();
+            bool const success=window->grab().save(path,"PNG");
+            std::cout<<(success?"Qt Windows editor screenshot saved: ":
+                        "Qt Windows editor screenshot failed: ")
+                     <<path.toStdString()<<std::endl;
+            app->exit(success?0:19);
+        });
+        timer->start();
+        return app->exec();
+    }
     if(parser.isSet(focusContentBrowser))
         window->showContentBrowser();
     if(parser.isSet(mouseLookSmoke)) {
@@ -288,8 +344,6 @@ static int run_editor(int argc,char** argv,
                  <<(passed?"PASS":"FAIL")<<std::endl;
         return passed?0:17;
     }
-    if(parser.isSet(functionSmoke))
-        return run_material_function_smoke();
     if(parser.isSet(embeddedRenderSmoke)) {
         QTemporaryDir temporary;
         bool success=false;
@@ -325,16 +379,35 @@ static int run_editor(int argc,char** argv,
         QString error;
         auto* inspector=window->findChild<QDockWidget*>("inspectorDock");
         auto* content=window->findChild<QDockWidget*>("contentDock");
+        auto* panel=window->findChild<QWidget*>("inspectorPanel");
+        auto* search=window->findChild<QLineEdit*>("detailsPropertySearch");
         auto* scroll=window->findChild<QScrollArea*>("inspectorScrollArea");
         auto* form=window->findChild<QWidget*>("inspectorFormContent");
         auto* apply=window->findChild<QPushButton*>("applyObjectProperties");
         auto* components=window->findChild<QTreeWidget*>("sceneComponentsTree");
         auto* help=window->findChild<QLabel*>("inspectorHelpText");
         try {
-            if(!inspector || !content || !scroll || !form || !apply ||
-               !components || !help || inspector->widget()!=scroll ||
-               scroll->widget()!=form)
+            if(!inspector || !content || !panel || !search || !scroll ||
+               !form || !apply || !components || !help ||
+               inspector->widget()!=panel || scroll->parentWidget()!=panel ||
+               scroll->widget()!=form || !search->isClearButtonEnabled())
                 throw std::runtime_error("Inspector scroll widget hierarchy incomplete");
+            // Filtering must preserve the search bar and restore hidden rows.
+            auto* propertyForm=qobject_cast<QFormLayout*>(form->layout());
+            auto* collisionGroup=window->findChild<QGroupBox*>("collisionShapeGroup");
+            if(!propertyForm || !collisionGroup)
+                throw std::runtime_error("Inspector filter has no property form");
+            search->setText("collision");
+#if QT_VERSION >= QT_VERSION_CHECK(6,4,0)
+            if(!propertyForm->isRowVisible(collisionGroup) ||
+               propertyForm->isRowVisible(apply))
+                throw std::runtime_error("Details property filter returned wrong rows");
+#endif
+            search->clear();
+#if QT_VERSION >= QT_VERSION_CHECK(6,4,0)
+            if(!propertyForm->isRowVisible(apply))
+                throw std::runtime_error("Clearing Details search did not restore rows");
+#endif
             if(inspector->features().testFlag(QDockWidget::DockWidgetFloatable))
                 throw std::runtime_error("Inspector can float above another panel");
             if(inspector->minimumHeight()>80 || scroll->minimumHeight()>80)
@@ -428,7 +501,7 @@ static int run_editor(int argc,char** argv,
             auto* roots=browser->findChild<QTreeWidget*>("folderTree");
             auto* addAsset=browser->findChild<QToolButton*>("browserAddAsset");
             auto* importAsset=browser->findChild<QToolButton*>("browserImportAsset");
-            if(!roots || roots->topLevelItemCount()!=2 ||
+            if(!roots || roots->topLevelItemCount()!=3 ||
                roots->topLevelItem(0)->text(0)!="Project Assets" ||
                roots->topLevelItem(1)->text(0)!="Engine Shared Assets" ||
                !addAsset || !importAsset)
@@ -480,6 +553,10 @@ static int run_editor(int argc,char** argv,
                !waitAsset("models/weapon/pistol.ydd"))
                 throw std::runtime_error(
                     "Shared engine assets were not visible in the separate root");
+            if(!waitAsset("engine-api://scripts/northstar/bootstrap.js") ||
+               !waitAsset("engine-api://scripts/ui/UI.js"))
+                throw std::runtime_error(
+                    "Compiled engine API scripts missing from read-only Asset Browser");
             if(addAsset->isEnabled() || importAsset->isEnabled())
                 throw std::runtime_error(
                     "Shared engine assets unexpectedly allow project mutations");
@@ -487,8 +564,46 @@ static int run_editor(int argc,char** argv,
             if(!waitAsset("scripts/alpha.js") || browser->viewingSharedAssets())
                 throw std::runtime_error(
                     "Project assets were not restored after browsing engine assets");
+            auto* drawer=window->findChild<QAction*>("toggleContentDrawerAction");
+            auto* newTab=window->findChild<QAction*>("newContentBrowserTabAction");
+            if(!drawer || !newTab)
+                throw std::runtime_error("Missing drawer/browser-tab actions");
+            auto* overlay=window->findChild<QWidget*>("contentDrawerOverlay");
+            if(!overlay || overlay->isVisible())
+                throw std::runtime_error("Content Drawer overlay not initially hidden");
+            dock->show();dock->raise();QCoreApplication::processEvents();
+            drawer->trigger();QCoreApplication::processEvents();
+            if(!overlay->isVisible() || !dock->isVisible() ||
+               overlay->geometry().bottom()>window->height())
+                throw std::runtime_error("Content Drawer did not overlay the editor");
+            drawer->trigger();QCoreApplication::processEvents();
+            if(overlay->isVisible())
+                throw std::runtime_error("Content Drawer did not close");
+            drawer->trigger();QCoreApplication::processEvents();
+            auto* outside=window->centralWidget();
+            if(!outside)throw std::runtime_error("Editor central view missing");
+            QMouseEvent outsidePress(QEvent::MouseButtonPress,QPointF(5,5),
+                QPointF(outside->mapToGlobal(QPoint(5,5))),
+                Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(outside,&outsidePress);
+            QCoreApplication::processEvents();
+            if(overlay->isVisible())
+                throw std::runtime_error("Content Drawer did not dismiss outside click");
+            newTab->trigger();QCoreApplication::processEvents();
+            auto* secondaryDock=window->findChild<QDockWidget*>("contentDockInstance2");
+            auto* secondary=secondaryDock?
+                qobject_cast<northstarcpp::editor::QtContentBrowser*>(
+                    secondaryDock->widget()):nullptr;
+            if(!secondary || secondary->isVisible()==false ||
+               secondaryDock->isFloating() ||
+               secondary->contentRoot()!=browser->contentRoot() ||
+               secondary->sharedContentRoot()!=browser->sharedContentRoot())
+                throw std::runtime_error("Independent Content Browser not docked");
+            secondary->setSearchText("name:alpha");
             if(!window->openScene(betaScene))
                 throw std::runtime_error("Could not switch to Beta project scene");
+            if(secondary->contentRoot()!=QDir::cleanPath(beta+"/assets"))
+                throw std::runtime_error("Secondary Content Browser did not follow project switch");
             if(browser->contentRoot()!=QDir::cleanPath(beta+"/assets") ||
                browser->recordCount()!=0)
                 throw std::runtime_error(
@@ -514,6 +629,17 @@ static int run_editor(int argc,char** argv,
                 if(top->objectName()=="northstarAssetBrowserWindow")
                     throw std::runtime_error(
                         "Separate Content Browser window launched from Qt Editor");
+            if(!window->close())
+                throw std::runtime_error("Failed to close QA Editor for layout save");
+            QCoreApplication::processEvents();
+            auto restoredWindow=std::make_unique<northstarcpp::editor::QtEditorWindow>();
+            auto* restoredTab=restoredWindow->findChild<QDockWidget*>(
+                "contentDockInstance2");
+            if(!restoredTab ||
+               restoredWindow->dockWidgetArea(restoredTab)==Qt::NoDockWidgetArea ||
+               restoredTab->isFloating())
+                throw std::runtime_error(
+                    "Second Content Browser tab layout was not restored");
             ok=true;
         } catch(std::exception const& e) {
             ok=false;diagnostic=QString::fromUtf8(e.what());
@@ -796,6 +922,45 @@ static int run_editor(int argc,char** argv,
                after.value("y").toDouble()!=before.value("y").toDouble()+12. ||
                lookupX(authored)!=memberX+24.)
                 throw std::runtime_error("Group/member transform not serialized");
+            // Inspector is part of the material graph, not a separate modal.
+            auto* inspector=graph.findChild<QWidget*>("materialGraphDetailsPanel");
+            auto* snap=graph.findChild<QCheckBox*>("materialGraphSnapToGrid");
+            auto* stats=graph.findChild<QLabel*>("materialGraphCompileStats");
+            if(!inspector||!snap||!snap->isChecked()||!stats)
+                throw std::runtime_error("Material Graph Details workspace incomplete");
+            auto* nodePalette=graph.findChild<QComboBox*>("materialGraphNodePalette");
+            if(!nodePalette || nodePalette->findData("scalar")<0)
+                throw std::runtime_error("Scalar graph palette missing");
+            nodePalette->setCurrentIndex(nodePalette->findData("scalar"));
+            graph.addAt(QPointF(1168,360));
+            canvas->scene()->clearSelection();
+            bool pickedScalar=false;
+            for(auto* item:canvas->scene()->items()) {
+                if((item->flags()&QGraphicsItem::ItemIsSelectable) &&
+                   std::abs(item->scenePos().x()-1168.)<.01 &&
+                   std::abs(item->scenePos().y()-360.)<.01) {
+                    item->setSelected(true);pickedScalar=true;break;
+                }
+            }
+            if(!pickedScalar)
+                throw std::runtime_error("Scalar graph selection missing");
+            auto* value=graph.findChild<QDoubleSpinBox*>("materialGraphDetailScalar");
+            if(!value)
+                throw std::runtime_error("Material Node Details scalar absent");
+            value->setValue(.625);
+            QMetaObject::invokeMethod(value,"editingFinished",Qt::DirectConnection);
+            QCoreApplication::processEvents();
+            QCoreApplication::processEvents();
+            bool preservedScalar=false;
+            for(auto const& node:graph.graph().value("nodes").toArray()) {
+                auto data=node.toObject();
+                if(data.value("op").toString()=="scalar" &&
+                   std::abs(data.value("value").toDouble()-.625)<.0001)
+                    preservedScalar=true;
+            }
+            if(!preservedScalar || !graph.validate(&diagnostic))
+                throw std::runtime_error("Graph Node Details value not persisted");
+            authored=graph.graph();
             QJsonObject descriptor{
                 {"schema",1},{"name","PreviewAcceptance"},
                 {"shader","standard_lit"},{"base_color","#8090a0"},
@@ -887,6 +1052,12 @@ static int run_editor(int argc,char** argv,
                  <<std::endl;
         return ok?0:6;
     }
+    if(parser.isSet(prefabGpuSmoke)) {
+        bool const ok=window->runVisualPrefabGpuSmoke();
+        std::cout<<"Qt visual prefab native GPU + ID picking: "
+                 <<(ok?"PASS":"FAIL")<<std::endl;
+        return ok?0:32;
+    }
     if(parser.isSet(gpuSmoke)) {
         QTemporaryDir temp;
         bool ok=temp.isValid() && window->runGpuSmoke(temp.path());
@@ -898,6 +1069,13 @@ static int run_editor(int argc,char** argv,
     if(parser.isSet(playerCheck)) {
         QTemporaryDir temp;
         return temp.isValid() && window->runPlayerCheckSmoke(temp.path())?0:7;
+    }
+    if(parser.isSet(placeActorsSmoke)) {
+        bool const ok=window->runPlaceActorsSmoke();
+        QCoreApplication::processEvents();
+        std::cout<<"Qt Place Actors / Camera / Lights / Drop: "
+                 <<(ok?"PASS":"FAIL")<<std::endl;
+        return ok?0:21;
     }
     if(parser.isSet(smoke)) {
         QTemporaryDir temporary;
@@ -914,6 +1092,7 @@ static int run_editor(int argc,char** argv,
 }
 
 int main(int argc,char** argv) {
+    northstarcpp::diagnostics::install_crash_handler();
     northstarcpp::diagnostics::StartupReport startup;
     startup.info("process.begin","host=qt_editor");
     std::unique_ptr<northstarcpp::Logger> logger;

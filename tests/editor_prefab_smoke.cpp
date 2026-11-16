@@ -2,6 +2,9 @@
 #include "editor_prefab.hpp"
 #include "editor_tools.hpp"
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/collision_authoring.hpp>
+#include <northstarcpp/collision_mesh.hpp>
+#include <northstarcpp/collision_hulls.hpp>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -33,9 +36,47 @@ int main(int argc, char** argv) {
     source.objects[3].node.cell="Area";
     source.objects[2].node.script="scripts/door.js";
     source.objects[1].node.asset="buildings/workshop.ydd";
+    source.objects[2].node.collision=false;
+    collision_authoring::Collider custom;
+    custom.shape=collision_authoring::Shape::Capsule;
+    custom.dimensions={1.f,2.5f,1.f};
+    custom.offset={.25f,0.f,-.1f};
+    custom.responses[1]=collision_authoring::Response::Overlap;
+    custom.responses[4]=collision_authoring::Response::Ignore;
+    custom.responses[7]=collision_authoring::Response::Overlap;
+    custom.preset="DoorSensor";
+    collision_authoring::assign(source,source.objects[2].node.id,custom);
+    collision_mesh::Mesh triangle;
+    triangle.source="Models/door.obj";
+    triangle.xyz={0.f,0.f,0.f,1.f,0.f,0.f,0.f,1.f,0.f};
+    triangle.indices={0,1,2};
+    source.objects[2].node.asset=triangle.source;
+    collision_mesh::assign(source,source.objects[2].node.id,triangle);
+    collision_cooker::Hull tetra;
+    tetra.xyz={0,0,0,1,0,0,0,1,0,0,0,1};
+    tetra.indices={0,1,2,0,3,1,0,2,3,1,3,2};
+    collision_hulls::assign(source,source.objects[2].node.id,
+        collision_hulls::Set{triangle.source,4,{tetra}});
     validate_scene(source);
 
     auto prefab=capture_prefab(source,1);
+    if(prefab.components.size()!=3 ||
+       !collision_hulls::lookup(prefab,prefab.objects[1].node.id) ||
+       !collision_mesh::lookup(prefab,prefab.objects[1].node.id) ||
+       !collision_authoring::lookup(prefab,prefab.objects[1].node.id) ||
+       prefab.objects[1].node.collision)
+        return 21;
+    auto textRoundTrip=parse_scene_v3(serialize_scene_v3(prefab));
+    auto restored=collision_authoring::lookup(
+        textRoundTrip,textRoundTrip.objects[1].node.id);
+    if(!restored || restored->shape!=collision_authoring::Shape::Capsule ||
+       restored->dimensions.y!=2.5f || restored->offset.x!=.25f ||
+       restored->responses[1]!=collision_authoring::Response::Overlap ||
+       restored->responses[4]!=collision_authoring::Response::Ignore ||
+       restored->responses[7]!=collision_authoring::Response::Overlap ||
+       restored->preset!="DoorSensor" ||
+       !collision_hulls::lookup(textRoundTrip,textRoundTrip.objects[1].node.id))
+        return 22;
     if(prefab.version!=3 || prefab.objects.size()!=3 ||
        prefab.objects[0].node.parent!=0 || prefab.objects[0].position.x!=0.f ||
        prefab.objects[1].position.x!=2.f || prefab.objects[2].position.y!=1.f ||
@@ -61,6 +102,20 @@ int main(int argc, char** argv) {
        source.objects[i1+1].node.script!="scripts/door.js" ||
        source.cells.size()!=3 ||
        source.objects[i1].node.cell==source.objects[i2].node.cell) return 2;
+
+    auto instanceCollider1=collision_authoring::lookup(
+        source,source.objects[i1+1].node.id);
+    auto instanceCollider2=collision_authoring::lookup(
+        source,source.objects[i2+1].node.id);
+    if(!collision_hulls::lookup(source,source.objects[i1+1].node.id) ||
+       !collision_hulls::lookup(source,source.objects[i2+1].node.id) ||
+       !collision_mesh::lookup(source,source.objects[i1+1].node.id) ||
+       !collision_mesh::lookup(source,source.objects[i2+1].node.id) ||
+       !instanceCollider1 || !instanceCollider2 ||
+       instanceCollider1->shape!=collision_authoring::Shape::Capsule ||
+       instanceCollider2->dimensions.y!=2.5f ||
+       source.objects[i2+1].node.collision)
+        return 23;
 
     std::unordered_set<std::uint64_t> ids;
     for(auto const& e:source.objects) {

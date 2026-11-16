@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const base = path.resolve(__dirname, "../sharedAssets/scripts");
+const base = path.resolve(__dirname, "../engine/northstarcpp/resources/sharedAssets/api");
 const context = vm.createContext({});
 for (const file of [
     "northstar/bootstrap.js",

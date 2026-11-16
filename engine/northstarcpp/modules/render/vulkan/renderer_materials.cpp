@@ -1,6 +1,8 @@
 // Vulkan material ABI v1. Native GPU texture sampling and GGX PBR.
 // CPU copies of all host-owned vertices/texels, bounded and lazy GPU uploads.
 #include "renderer_private.hpp"
+#include "renderer_material_submission.hpp"
+#include "../../shared/frame_memory_counters.hpp"
 #include "material_spirv.hpp"
 #include "material_graph_glsl.hpp"
 #include "../shared/render_light_validation.hpp"
@@ -12,6 +14,8 @@
 #include <stdexcept>
 #include <string>
 
+namespace frame_memory = northstarcpp::diagnostics::frame_memory;
+
 namespace northstarcpp::render::vulkan {
 namespace {
 void check(VkResult result,const char* name) {
@@ -19,7 +23,7 @@ void check(VkResult result,const char* name) {
         throw std::runtime_error(std::string(name)+" failed: VkResult="+
                                  std::to_string(static_cast<int>(result)));
 }
-std::uint64_t hash_texture(const std::vector<std::uint8_t>& bytes,
+std::uint64_t hash_texture(std::uint8_t const* data,std::size_t count,
                            std::uint32_t width,std::uint32_t height,VkFormat format) {
     std::uint64_t hash=14695981039346656037ull;
     auto add=[&](std::uint8_t n) {hash^=n;hash*=1099511628211ull;};
@@ -28,7 +32,7 @@ std::uint64_t hash_texture(const std::vector<std::uint8_t>& bytes,
         add(static_cast<std::uint8_t>(height>>(i*8)));
         add(static_cast<std::uint8_t>(static_cast<unsigned>(format)>>(i*8)));
     }
-    for(auto byte:bytes)add(byte);
+    for(std::size_t i=0;i<count;++i)add(data[i]);
     return hash;
 }
 std::array<std::uint8_t,4> fallback_rgba(std::uint32_t slot) {
@@ -42,8 +46,11 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
     if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES || (count&&!batches))
         throw std::invalid_argument("Vulkan material batch count/pointer invalid");
     std::vector<MaterialSource> next;
-    next.reserve(count);
-    std::uint64_t total_vertices=0,total_texels=0;
+    frame_memory::reserve(next,count);
+    std::uint64_t total_vertices=0;
+    bool textures_same=count==material_sources_.size();
+    VkPhysicalDeviceProperties gpu_properties{};
+    vkGetPhysicalDeviceProperties(physical_,&gpu_properties);
     for(std::uint32_t i=0;i<count;++i) {
         auto const& input=batches[i];
         if(!input.vertices||input.vertex_count==0||
@@ -57,6 +64,7 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
            input.roughness<0||input.roughness>1||input.unlit>1)
             throw std::invalid_argument("Invalid Vulkan PBR material parameters");
         MaterialSource source;
+        auto const* previous=i<material_sources_.size()?&material_sources_[i]:nullptr;
         for(unsigned component=0;component<4;++component) {
             if(!std::isfinite(input.base_color[component]))
                 throw std::invalid_argument("Invalid material base color");
@@ -70,37 +78,33 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
             if(!image.rgba8) {
                 if(image.width||image.height||image.data_bytes)
                     throw std::invalid_argument("Incomplete Vulkan texture slot");
+                textures_same &= stage_material_texture(source,previous,k,image);
                 continue;
             }
-            if(!image.width||!image.height||image.width>4096||image.height>4096||
+            if(!image.width||!image.height||
+               image.width>gpu_properties.limits.maxImageDimension2D||
+               image.height>gpu_properties.limits.maxImageDimension2D||
                static_cast<std::uint64_t>(image.width)*image.height*4!=image.data_bytes)
                 throw std::invalid_argument("Malformed Vulkan RGBA8 material texture");
-            total_texels+=image.data_bytes;
-            if(total_texels>256ull*1024*1024)
-                throw std::invalid_argument("Vulkan material texture budget exceeded");
-            source.widths[k]=image.width;source.heights[k]=image.height;
-            source.textures[k].assign(image.rgba8,image.rgba8+image.data_bytes);
+            textures_same &= stage_material_texture(source,previous,k,image);
         }
-        for(std::uint32_t k=0;k<input.vertex_count;++k) {
-            auto const& vertex=input.vertices[k];
-            if(!std::isfinite(vertex.x)||!std::isfinite(vertex.y)||
-               !std::isfinite(vertex.z)||!std::isfinite(vertex.nx)||
-               !std::isfinite(vertex.ny)||!std::isfinite(vertex.nz)||
-               !std::isfinite(vertex.u)||!std::isfinite(vertex.v))
-                throw std::invalid_argument("Vulkan material geometry contains NaN/Inf");
+        if(!previous || !matches_geometry(previous->vertices,input.vertices,input.vertex_count)) {
+            for(std::uint32_t k=0;k<input.vertex_count;++k) {
+                auto const& vertex=input.vertices[k];
+                if(!std::isfinite(vertex.x)||!std::isfinite(vertex.y)||
+                   !std::isfinite(vertex.z)||!std::isfinite(vertex.nx)||
+                   !std::isfinite(vertex.ny)||!std::isfinite(vertex.nz)||
+                   !std::isfinite(vertex.u)||!std::isfinite(vertex.v))
+                    throw std::invalid_argument("Vulkan material geometry contains NaN/Inf");
+            }
+            frame_memory::assign(source.vertices,input.vertices,input.vertices+input.vertex_count,
+                &NorthStarFrameMemoryCounters::geometry_copy_bytes);
         }
-        source.vertices.assign(input.vertices,input.vertices+input.vertex_count);
         next.push_back(std::move(source));
     }
-    bool textures_same=next.size()==material_sources_.size();
-    if(textures_same)for(std::size_t i=0;i<next.size()&&textures_same;++i) {
-        for(unsigned slot=0;slot<5;++slot) {
-            if(next[i].widths[slot]!=material_sources_[i].widths[slot] ||
-               next[i].heights[slot]!=material_sources_[i].heights[slot] ||
-               next[i].textures[slot]!=material_sources_[i].textures[slot]) {
-                textures_same=false;break;
-            }
-        }
+    for(std::size_t i=0;i<std::min(next.size(),material_sources_.size());++i) {
+        adopt_retained_textures(next[i],material_sources_[i]);
+        if(next[i].vertices.empty())next[i].vertices.swap(material_sources_[i].vertices);
     }
     material_sources_=std::move(next); // Atomic update after all validation.
     if(!textures_same)material_textures_dirty_=true;
@@ -112,7 +116,7 @@ void Renderer::set_material_batches_v2(
         throw std::invalid_argument("Invalid Vulkan Material Graph v2 batches");
     std::vector<NorthStarMaterialBatch> base;
     std::vector<std::string> programs;
-    base.reserve(count);programs.reserve(count);
+    frame_memory::reserve(base,count);programs.reserve(count);
     for(std::uint32_t i=0;i<count;++i) {
         const auto& batch=batches[i];
         if(!std::isfinite(batch.opacity)||batch.opacity<0.f||batch.opacity>1.f)
@@ -156,9 +160,58 @@ void Renderer::upload_light_buffer() {
     vkUnmapMemory(device_,lights_memory_);
     lights_dirty_=false;
 }
+// Full-resolution vertex streams grow on demand; native YDR is never
+// tessellated down or replaced by proxy meshes. A small empty scene keeps a
+// small upload buffer. Growth happens only after the previous GPU work ends.
+void Renderer::ensure_material_vertex_capacity(VkDeviceSize required_bytes) {
+    if(required_bytes<=material_vertex_capacity_bytes_)return;
+    if(required_bytes>max_material_vertex_bytes_)
+        throw std::length_error("Vulkan high-detail material capacity exceeded");
+    VkDeviceSize next=std::max<VkDeviceSize>(material_vertex_capacity_bytes_,
+                                              4ull*1024*1024);
+    while(next<required_bytes)
+        next=std::min(next*2,max_material_vertex_bytes_);
+    VkBufferCreateInfo descriptor{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    descriptor.size=next;
+    descriptor.usage=VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    VkBuffer next_buffer=VK_NULL_HANDLE;
+    check(vkCreateBuffer(device_,&descriptor,nullptr,&next_buffer),
+          "vkCreateBuffer(high-detail material vertices)");
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_,next_buffer,&requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize=requirements.size;
+    allocation.memoryTypeIndex=find_memory_type(requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory next_memory=VK_NULL_HANDLE;
+    auto result=vkAllocateMemory(device_,&allocation,nullptr,&next_memory);
+    if(result!=VK_SUCCESS) {
+        vkDestroyBuffer(device_,next_buffer,nullptr);
+        check(result,"vkAllocateMemory(high-detail material vertices)");
+    }
+    result=vkBindBufferMemory(device_,next_buffer,next_memory,0);
+    if(result!=VK_SUCCESS) {
+        vkFreeMemory(device_,next_memory,nullptr);
+        vkDestroyBuffer(device_,next_buffer,nullptr);
+        check(result,"vkBindBufferMemory(high-detail material vertices)");
+    }
+    check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(material buffer resize)");
+    if(material_vertices_buffer_)
+        vkDestroyBuffer(device_,material_vertices_buffer_,nullptr);
+    if(material_vertices_memory_)
+        vkFreeMemory(device_,material_vertices_memory_,nullptr);
+    material_vertices_buffer_=next_buffer;
+    material_vertices_memory_=next_memory;
+    material_vertex_capacity_bytes_=next;
+    std::fprintf(stderr,
+        "[INFO] [engine.render] vulkan.material_vertex_capacity_bytes=%llu\\n",
+        static_cast<unsigned long long>(next));
+}
+
 void Renderer::create_material_resources() {
     VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    buffer.size=max_material_vertex_bytes_;
+    material_vertex_capacity_bytes_=4ull*1024*1024;
+    buffer.size=material_vertex_capacity_bytes_;
     buffer.usage=VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     check(vkCreateBuffer(device_,&buffer,nullptr,&material_vertices_buffer_),
           "vkCreateBuffer(material vertices)");
@@ -230,13 +283,15 @@ void Renderer::reset_material_textures() {
     if(material_descriptor_pool_)
         vkDestroyDescriptorPool(device_,material_descriptor_pool_,nullptr);
     material_descriptor_pool_=VK_NULL_HANDLE;
+    const auto source_count=material_sources_.size()+skinned_sources_.size();
+    if(source_count>UINT32_MAX/5u)
+        throw std::length_error("Vulkan material descriptor count overflow");
+    const auto capacity=static_cast<std::uint32_t>(std::max<std::size_t>(1,source_count));
     VkDescriptorPoolSize sizes[2]{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            5u*NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES}};
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,5u*capacity},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,capacity}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pool.maxSets=NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES;
+    pool.maxSets=capacity;
     pool.poolSizeCount=2;pool.pPoolSizes=sizes;
     check(vkCreateDescriptorPool(device_,&pool,nullptr,&material_descriptor_pool_),
           "vkCreateDescriptorPool(material)");
@@ -272,8 +327,8 @@ MaterialTextureGpu Renderer::upload_material_texture(
 {
     auto const& values=source.textures[slot];
     auto const defaults=fallback_rgba(slot);
-    std::vector<std::uint8_t> raw=values.empty()?
-        std::vector<std::uint8_t>(defaults.begin(),defaults.end()):values;
+    auto const* data=values.empty()?defaults.data():values.data();
+    auto const count=values.empty()?defaults.size():values.size();
     auto const width=values.empty()?1u:source.widths[slot];
     auto const height=values.empty()?1u:source.heights[slot];
     auto const format=(slot==0||slot==4)?
@@ -281,7 +336,9 @@ MaterialTextureGpu Renderer::upload_material_texture(
 
     MaterialTextureGpu texture;
     texture.width=width;texture.height=height;texture.format=format;
-    texture.source_bytes=raw;
+    frame_memory::assign(texture.source_bytes,data,data+count,
+        &NorthStarFrameMemoryCounters::texture_copy_bytes);
+    auto const& raw=texture.source_bytes;
     VkBuffer staging=VK_NULL_HANDLE;
     VkDeviceMemory staging_memory=VK_NULL_HANDLE;
     VkCommandBuffer cmd=VK_NULL_HANDLE;
@@ -335,6 +392,7 @@ MaterialTextureGpu Renderer::upload_material_texture(
         check(vkMapMemory(device_,staging_memory,0,raw.size(),0,&mapped),
               "vkMapMemory(material staging)");
         std::memcpy(mapped,raw.data(),raw.size());
+        frame_memory::copied(&NorthStarFrameMemoryCounters::texture_copy_bytes,raw.size());
         vkUnmapMemory(device_,staging_memory);
 
         VkCommandBufferAllocateInfo alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -399,8 +457,6 @@ void Renderer::upload_material_textures() {
     check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(material refresh)");
     reset_material_textures();
     const auto total=material_sources_.size()+skinned_sources_.size();
-    if(total>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES)
-        throw std::runtime_error("Combined Vulkan authored + GPU skinned batch budget exceeded");
     material_sets_.resize(total,VK_NULL_HANDLE);
     for(std::size_t batch_id=0;batch_id<total;++batch_id) {
         auto const& source=batch_id<material_sources_.size()?
@@ -410,13 +466,13 @@ void Renderer::upload_material_textures() {
         for(std::uint32_t slot=0;slot<5;++slot) {
             auto const& bytes=source.textures[slot];
             auto const defaults=fallback_rgba(slot);
-            auto const raw=bytes.empty()?
-                std::vector<std::uint8_t>(defaults.begin(),defaults.end()):bytes;
+            auto const* data=bytes.empty()?defaults.data():bytes.data();
+            auto const count=bytes.empty()?defaults.size():bytes.size();
             auto const width=bytes.empty()?1u:source.widths[slot];
             auto const height=bytes.empty()?1u:source.heights[slot];
             auto const format=(slot==0||slot==4)?
                 VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;
-            auto key=hash_texture(raw,width,height,format);
+            auto key=hash_texture(data,count,width,height,format);
             while(true) {
                 auto it=material_texture_cache_.find(key);
                 if(it==material_texture_cache_.end()) {
@@ -424,7 +480,8 @@ void Renderer::upload_material_textures() {
                     it=material_texture_cache_.emplace(key,std::move(image)).first;
                 }
                 if(it->second.width==width&&it->second.height==height &&
-                   it->second.format==format&&it->second.source_bytes==raw) {
+                   it->second.format==format&&it->second.source_bytes.size()==count&&
+                   std::memcmp(it->second.source_bytes.data(),data,count)==0) {
                     images[slot]={material_sampler_,it->second.view,
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
                     break;
@@ -481,16 +538,35 @@ void Renderer::create_material_pipeline() {
           "vkCreatePipelineLayout(material)");
     material_pipeline_=create_pipeline_for_material_fragment(
         material_fragment_shader_,0);
+    if(deferred_enabled_) {
+        VkShaderModuleCreateInfo gb{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        gb.codeSize=sizeof(shaders::material_gbuffer_fragment);
+        gb.pCode=shaders::material_gbuffer_fragment;
+        VkShaderModule module=VK_NULL_HANDLE;
+        check(vkCreateShaderModule(device_,&gb,nullptr,&module),
+              "vkCreateShaderModule(material GBuffer)");
+        try {
+            material_gbuffer_pipeline_=create_pipeline_for_material_fragment(
+                module,0,true);
+        } catch(...) {
+            vkDestroyShaderModule(device_,module,nullptr);
+            throw;
+        }
+        vkDestroyShaderModule(device_,module,nullptr);
+    }
 }
 VkPipeline Renderer::create_pipeline_for_material_fragment(
-    VkShaderModule fragment,std::uint32_t blend_mode) {
+    VkShaderModule fragment,std::uint32_t blend_mode,bool deferred,
+    VkShaderModule vertex_override) {
+    if(deferred && blend_mode==2)
+        throw std::invalid_argument("Translucent GBuffer material is unsupported");
     if(!fragment||blend_mode>2)
         throw std::invalid_argument("Invalid Vulkan material pipeline variant");
     VkPipelineShaderStageCreateInfo stages[2]{};
     for(unsigned i=0;i<2;++i) {
         stages[i].sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[i].stage=i?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_VERTEX_BIT;
-        stages[i].module=i?fragment:material_vertex_shader_;
+        stages[i].module=i?fragment:(vertex_override?vertex_override:material_vertex_shader_);
         stages[i].pName="main";
     }
     VkVertexInputBindingDescription binding{0,sizeof(MaterialClipVertex),
@@ -528,29 +604,31 @@ VkPipeline Renderer::create_pipeline_for_material_fragment(
     depth.depthTestEnable=VK_TRUE;
     depth.depthWriteEnable=blend_mode==2?VK_FALSE:VK_TRUE;
     depth.depthCompareOp=VK_COMPARE_OP_LESS;
-    VkPipelineColorBlendAttachmentState write{};
-    write.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
-                         VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+    std::array<VkPipelineColorBlendAttachmentState,4> writes{};
+    for(auto& write:writes)
+        write.colorWriteMask=VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
+                             VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
     if(blend_mode==2) {
-        write.blendEnable=VK_TRUE;
-        write.srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
-        write.dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        write.colorBlendOp=VK_BLEND_OP_ADD;
-        write.srcAlphaBlendFactor=VK_BLEND_FACTOR_ONE;
-        write.dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        write.alphaBlendOp=VK_BLEND_OP_ADD;
+        writes[0].blendEnable=VK_TRUE;
+        writes[0].srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
+        writes[0].dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        writes[0].colorBlendOp=VK_BLEND_OP_ADD;
+        writes[0].srcAlphaBlendFactor=VK_BLEND_FACTOR_ONE;
+        writes[0].dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        writes[0].alphaBlendOp=VK_BLEND_OP_ADD;
     }
     VkPipelineColorBlendStateCreateInfo blend{
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blend.attachmentCount=1;blend.pAttachments=&write;
+    blend.attachmentCount=deferred?(gbuffer_v2_?4u:3u):1u;
+    blend.pAttachments=writes.data();
     VkDynamicState dynamic_states[]{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{
         VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dynamic.dynamicStateCount=2;dynamic.pDynamicStates=dynamic_states;
     VkPipelineRenderingCreateInfo rendering{
         VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    rendering.colorAttachmentCount=1;
-    rendering.pColorAttachmentFormats=&format_;
+    rendering.colorAttachmentCount=deferred?(gbuffer_v2_?4u:3u):1u;
+    rendering.pColorAttachmentFormats=deferred?gbuffer_formats_.data():&format_;
     rendering.depthAttachmentFormat=depth_format_;
     VkGraphicsPipelineCreateInfo pipeline{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -572,9 +650,10 @@ VkPipeline Renderer::create_pipeline_for_material_fragment(
     return created;
 }
 VkPipeline Renderer::material_graph_pipeline(
-    const std::string& prefix,std::uint32_t blend_mode) {
-    if(prefix.empty() && blend_mode==0)return material_pipeline_;
-    auto key=std::to_string(blend_mode)+"|"+prefix;
+    const std::string& prefix,std::uint32_t blend_mode,bool deferred) {
+    if(prefix.empty() && blend_mode==0)
+        return deferred?material_gbuffer_pipeline_:material_pipeline_;
+    auto key=(deferred?"G|":"F|")+std::to_string(blend_mode)+"|"+prefix;
     if(auto found=material_variant_pipelines_.find(key);
        found!=material_variant_pipelines_.end())return found->second;
     if(material_variant_pipelines_.size()>=128)
@@ -583,7 +662,8 @@ VkPipeline Renderer::material_graph_pipeline(
     auto const directive=glsl.find('\n');
     if(directive==std::string::npos || glsl.rfind("#version",0)!=0)
         throw std::logic_error("Invalid embedded Vulkan Material Graph GLSL");
-    glsl.insert(directive+1,prefix);
+    glsl.insert(directive+1,
+        (deferred?std::string("#define NS_GBUFFER 1\n"):std::string{})+prefix);
     auto bytecode=compile_material_fragment_spirv(glsl);
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize=bytecode.size()*sizeof(std::uint32_t);
@@ -592,7 +672,8 @@ VkPipeline Renderer::material_graph_pipeline(
     check(vkCreateShaderModule(device_,&ci,nullptr,&module),
           "vkCreateShaderModule(Material Graph SPIR-V)");
     try {
-        auto pipeline=create_pipeline_for_material_fragment(module,blend_mode);
+        auto pipeline=create_pipeline_for_material_fragment(
+            module,blend_mode,deferred);
         material_variant_pipelines_.emplace(key,pipeline);
         vkDestroyShaderModule(device_,module,nullptr);
         return pipeline;
@@ -621,8 +702,21 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
         draw.first=static_cast<std::uint32_t>(material_frame_vertices_.size());
         draw.textures=material_sets_.at(index);
         draw.blend_mode=batch.blend_mode;
-        draw.pipeline=material_graph_pipeline(
+        // Render-provider-owned PSO override is looked up by explicit material ID.
+        if(index<material_references_.size()) {
+            auto it=hot_materials_.find(material_references_[index]);
+            if(it!=hot_materials_.end() && it->second.installed_forward &&
+               it->second.blend_mode==batch.blend_mode) {
+                draw.pipeline=it->second.installed_forward;
+                if(deferred_enabled_ && batch.blend_mode!=2)
+                    draw.gbuffer_pipeline=it->second.installed_gbuffer;
+            }
+        }
+        if(!draw.pipeline)draw.pipeline=material_graph_pipeline(
             batch.variant_prefix,batch.blend_mode);
+        if(deferred_enabled_ && batch.blend_mode!=2)
+            if(!draw.gbuffer_pipeline)draw.gbuffer_pipeline=material_graph_pipeline(
+                batch.variant_prefix,batch.blend_mode,true);
         for(std::size_t i=0;i+2<batch.vertices.size();i+=3) {
             MaterialClipVertex tri[3]{};
             bool visible=true;
@@ -664,10 +758,12 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
     if(bytes>max_material_vertex_bytes_)
         throw std::runtime_error("Vulkan transformed material buffer overflow");
     if(bytes) {
+        ensure_material_vertex_capacity(static_cast<VkDeviceSize>(bytes));
         void* mapped=nullptr;
         check(vkMapMemory(device_,material_vertices_memory_,0,bytes,0,&mapped),
               "vkMapMemory(material vertices)");
         std::memcpy(mapped,material_frame_vertices_.data(),bytes);
+        frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,bytes);
         vkUnmapMemory(device_,material_vertices_memory_);
     }
 }

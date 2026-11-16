@@ -56,10 +56,12 @@ def _chunk_body(records: list[tuple[int, int, bytes, int, int]]) -> bytes:
 
 def pack_listfile(records: list[tuple[int, int, bytes]],
                   entity_cells: dict[int, str] | None = None,
-                  cell_order: list[str] | None = None) -> bytes:
+                  cell_order: list[str] | None = None,
+                  record_versions: dict[int,int] | None = None) -> bytes:
     if not 1 <= len(records) <= MAX_RECORDS or records[0][0] != 1:
         raise ValueError("NEF8 Scene ListFile requires the document record")
     entity_cells = entity_cells or {}
+    record_versions = record_versions or {}
     grouped: dict[str, list[tuple[int,int,bytes,int,int]]] = {"": []}
     for cell in cell_order or []:
         if not cell or len(cell.encode("utf8")) > 96 or cell in grouped:
@@ -69,7 +71,8 @@ def pack_listfile(records: list[tuple[int, int, bytes]],
         cell = entity_cells.get(entity_id, "") if (kind == 2 or kind >= 7) else ""
         if cell not in grouped:
             raise ValueError("NEF8 component refers to unknown cell")
-        grouped[cell].append((kind, entity_id, body, 1, ordinal))
+        grouped[cell].append((kind, entity_id, body,
+                              record_versions.get(kind,1), ordinal))
     chunks = []
     for name, components in grouped.items():
         if not components:

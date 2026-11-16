@@ -44,7 +44,6 @@ struct SceneObject {
     Vector3 position{0.f, 0.f, 0.f};
     float size = 1.f;
     std::uint32_t color = 0x46b9d8;
-    bool player = false;
     float mass = 0.f; // kilograms; zero makes a static body
 
     // The scene runtime preserves this authoring metadata through ECS editing.

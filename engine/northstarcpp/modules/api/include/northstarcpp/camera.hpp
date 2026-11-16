@@ -12,6 +12,8 @@
 namespace northstarcpp {
 class AssetStore;
 class CameraTrack;
+class CameraCutscene;
+struct CameraCinematicLens;
 class PhysicsScene;
 
 enum class CameraMode : std::uint8_t {
@@ -124,6 +126,23 @@ public:
     void set_free_pose(CameraPose pose);
     void set_cinematic_pose(CameraPose pose);
     void set_track(CameraTrack track, bool loop = false);
+    // Native multi-shot cutscenes keep the existing gameplay mode intact.
+    // Entry/exit blends cannot change gameplay input or attached cameras.
+    void play_cutscene(CameraCutscene cutscene, bool loop = false,
+                       float entry_seconds = 0.55f,
+                       float exit_seconds = 0.55f);
+    void stop_cutscene(float exit_seconds = 0.55f);
+    void pause_cutscene(bool paused) noexcept { cutscene_playing_=!paused; }
+    void seek_cutscene(float seconds);
+    bool cutscene_active() const noexcept { return bool(cutscene_); }
+    // Payload is a validated JSON array of all cues crossed in the most
+    // recent update; the caller drains it exactly once on the game thread.
+    std::string drain_cutscene_cues_json();
+    float cutscene_time() const noexcept { return cutscene_time_; }
+    float cutscene_exposure_ev() const noexcept { return cutscene_exposure_ev_; }
+    bool cutscene_lens_active() const noexcept { return cutscene_lens_active_; }
+    CameraCinematicLens cinematic_lens() const;
+    std::string const& cutscene_shot() const noexcept { return cutscene_shot_; }
     void clear_track() noexcept;
     void seek_track(float seconds);
     void set_track_playing(bool playing) noexcept { track_playing_ = playing; }
@@ -155,10 +174,27 @@ private:
     CameraSettings settings_;
     CameraMode mode_ = CameraMode::first_person;
     CameraPose pose_{};
+    // Follow state must not absorb its own partially blended render output.
+    CameraPose follow_pose_{};
     CameraPose transition_from_{};
+    CameraMode transition_source_mode_=CameraMode::first_person;
     CameraPose free_pose_{};
     CameraPose cinematic_pose_{};
     std::unique_ptr<CameraTrack> track_;
+    std::unique_ptr<CameraCutscene> cutscene_;
+    float cutscene_time_=0.f;
+    float cutscene_exit_seconds_=0.55f;
+    bool cutscene_loop_=false;
+    bool cutscene_playing_=true;
+    bool cutscene_finished_=false;
+    std::string cutscene_shot_;
+    Vector3 cutscene_anchor_{0.f,0.f,0.f};
+    float cutscene_anchor_yaw_=0.f;
+    bool cutscene_anchor_valid_=false;
+    bool cutscene_first_tick_=false;
+    std::string pending_cutscene_cues_json_="[]";
+    float cutscene_exposure_ev_=0.f;
+    bool cutscene_lens_active_=false;
     float track_time_ = 0.f;
     bool track_loop_ = false;
     bool track_playing_ = true;

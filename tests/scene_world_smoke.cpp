@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp
 // Copyright (c) 2026 Kayla's Systems - Kayla Verner.
 // Scene v3 compatibility and independent streaming/spatial regression suite.
@@ -52,7 +53,7 @@ Scene build()
     };
     SceneObject player;
     player.name="Player";
-    player.player=true;
+    // Player identity is the component, not a SceneObject field.
     player.mass=2.f;
     player.node.id=1;
     player.node.layer="World";
@@ -97,6 +98,7 @@ Scene build()
     persistent.node.layer="Default";
     persistent.node.collision=true;
     scene.objects={player,child,distant,hidden,persistent};
+    scene_pawn::migrate_imported_local(scene,1);
     validate_scene(scene);
     return scene;
 }
@@ -321,6 +323,8 @@ int main(int argc, char** argv)
             check(planner.loaded_cell_count()==5 &&
                   planner.streaming_diagnostics().pending_loads==0,
                   "streaming pending work did not converge");
+            check(planner.streaming_diagnostics().cell_selection_passes==1,
+                  "stationary camera sorted the pending load work again");
             planner.update({5000.f,0.f,0.f});
             check(planner.loaded_cell_count()==4 &&
                   planner.cell_loaded("Forced") &&
@@ -333,6 +337,8 @@ int main(int argc, char** argv)
                   planner.cell_loaded("Forced") &&
                   planner.streaming_diagnostics().pending_unloads==0,
                   "mandatory cell evicted or unload work failed to converge");
+            check(planner.streaming_diagnostics().cell_selection_passes==2,
+                  "stationary camera sorted the pending unload work again");
             planner.pin_cell("NearA",true);
             planner.update({5000.f,0.f,0.f});
             check(planner.cell_loaded("NearA") &&
@@ -341,6 +347,16 @@ int main(int argc, char** argv)
             check(planner.streaming_diagnostics().loaded_cells==2 &&
                   planner.streaming_diagnostics().generation>=9,
                   "scene diagnostic counters do not match actual residency");
+            check(planner.streaming_diagnostics().cell_selection_passes==3,
+                  "changing a pin did not invalidate selection");
+            planner.pin_cell("NearA",true);
+            planner.update({5000.f,0.f,0.f});
+            check(planner.streaming_diagnostics().cell_selection_passes==3 &&
+                  planner.cell_transitions().empty(),
+                  "reasserting a pin did not preserve cached selection");
+            planner.update({5000.f,0.f,0.f},{-750.f,0.f,0.f});
+            check(planner.streaming_diagnostics().cell_selection_passes==4,
+                  "changing the predicted position did not invalidate selection");
         }
         {
             // Coarse distance bands use a 64m and 256m proxy hierarchy.

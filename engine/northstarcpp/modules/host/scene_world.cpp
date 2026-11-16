@@ -3,6 +3,8 @@
 // Independent scene spatial query + deterministic streaming implementation.
 
 #include <northstarcpp/scene_world.hpp>
+#include <northstarcpp/scene_pawn.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -223,7 +225,7 @@ SceneWorld::SceneWorld(Scene scene)
         std::map<Key,std::vector<std::size_t>> groups;
         for (std::size_t i=0;i<scene_.objects.size();++i) {
             auto const& o=scene_.objects[i];
-            if (o.player || o.mass>0.f || !o.node.visible)
+            if (scene_pawn::is_pawn(scene_,o) || o.mass>0.f || !o.node.visible)
                 continue;
             for (int level=1;level<=2;++level) {
                 float const width=level==1 ? 64.f : 256.f;
@@ -278,6 +280,84 @@ SceneWorld::SceneWorld(Scene scene)
     }
 }
 
+void SceneWorld::update_cell_selection(Vector3 position,Vector3 predicted)
+{
+    const auto equal=[](Vector3 a,Vector3 b) {
+        return a.x==b.x && a.y==b.y && a.z==b.z;
+    };
+    transitions_.clear();
+    if(!selection_valid_ || !equal(position,selection_position_) ||
+       !equal(predicted,selection_prediction_)) {
+        selection_valid_=false;
+        cell_loads_.clear();
+        cell_unloads_.clear();
+        next_load_=next_unload_=0;
+        for (std::size_t i=0;i<scene_.cells.size();++i) {
+            auto const& cell=scene_.cells[i];
+            auto const loaded=loaded_cells_[i]!=0;
+            auto const range=loaded ? scene_.streaming.unload_radius :
+                                       scene_.streaming.load_radius;
+            auto const range_sq=range*range;
+            auto const distance_current=cell_distance_sq(position,cell);
+            auto const distance_predicted=cell_distance_sq(predicted,cell);
+            auto const forced=cell.always_loaded || pinned_.count(cell.name)!=0;
+            bool const needed=forced || distance_current<=range_sq ||
+                distance_predicted<=range_sq;
+            if (needed && !loaded) {
+                // Higher priority wins. A nearby cell always outranks a lookahead
+                // cell at the same distance, even when speed is very high.
+                float const now_priority=distance_current<=range_sq ?
+                    100000.f / (1.f+std::sqrt(distance_current)) : 0.f;
+                float const ahead_priority=distance_predicted<=range_sq ?
+                    30000.f / (1.f+std::sqrt(distance_predicted)) : 0.f;
+                cell_loads_.push_back({i,forced ? 1000000.f :
+                    now_priority+ahead_priority,forced});
+            } else if (!needed && loaded) {
+                // Evict farthest first, retaining nearer scene collision/visual
+                // placeholders as long as the current budget allows.
+                cell_unloads_.push_back({i,std::sqrt(std::min(distance_current,distance_predicted)),false});
+            }
+        }
+        auto priority_order=[](CellCandidate const& lhs,CellCandidate const& rhs) {
+            if (lhs.priority != rhs.priority)
+                return lhs.priority > rhs.priority;
+            return lhs.index < rhs.index;
+        };
+        std::sort(cell_loads_.begin(),cell_loads_.end(),priority_order);
+        std::sort(cell_unloads_.begin(),cell_unloads_.end(),priority_order);
+        selection_position_=position;
+        selection_prediction_=predicted;
+        selection_valid_=true;
+        ++diagnostics_.cell_selection_passes;
+    }
+
+    // For stationary sources, keep the sorted work until its budgets drain.
+    // Load/unload hysteresis guarantees a completed transition cannot
+    // create an opposite candidate until the position or pin set changes.
+    const auto unloads=std::min<std::size_t>(scene_.streaming.max_cell_unloads_per_update,
+                                            cell_unloads_.size()-next_unload_);
+    for(std::size_t i=0;i<unloads;++i) {
+        const auto& entry=cell_unloads_[next_unload_];
+        transitions_.push_back({scene_.cells[entry.index].name,false,false,entry.priority});
+        loaded_cells_[entry.index]=0;
+        --diagnostics_.loaded_cells;
+        ++next_unload_;
+    }
+    std::size_t regular_loads=0;
+    while(next_load_<cell_loads_.size()) {
+        const auto& entry=cell_loads_[next_load_];
+        if(!entry.forced && regular_loads>=scene_.streaming.max_cell_loads_per_update)
+            break;
+        transitions_.push_back({scene_.cells[entry.index].name,true,entry.forced,entry.priority});
+        loaded_cells_[entry.index]=1;
+        ++diagnostics_.loaded_cells;
+        if(!entry.forced)++regular_loads;
+        ++next_load_;
+    }
+    diagnostics_.pending_loads=cell_loads_.size()-next_load_;
+    diagnostics_.pending_unloads=cell_unloads_.size()-next_unload_;
+}
+
 void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
                         std::string current_room, Scene const* live_scene)
 {
@@ -296,7 +376,7 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
             bool const moved=position.x!=previous.x || position.y!=previous.y ||
                              position.z!=previous.z;
             last_live_positions_[i]=position;
-            if (!moved || object.player || object.node.cell.empty())
+            if (!moved || scene_pawn::is_pawn(scene_,object) || object.node.cell.empty())
                 continue;
             auto index=effective_cell_indices_[i];
             if (index!=npos &&
@@ -321,77 +401,7 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
     auto predicted=add(camera_position,
         scaled(camera_velocity,scene_.streaming.lookahead_seconds));
 
-    // Score the streaming work rather than transitioning every cell at once.
-    // This bounds a fast-travel spike for large scenes and prioritizes near
-    // visible cells over distant lookahead candidates. The stable cell index
-    // provides deterministic ordering for ties.
-    struct Candidate {
-        std::size_t index = 0;
-        float priority = 0.f;
-        bool forced = false;
-    };
-    std::vector<Candidate> loads, unloads;
-    loads.reserve(scene_.cells.size());
-    unloads.reserve(scene_.cells.size());
-    transitions_.clear();
-
-    for (std::size_t i=0;i<scene_.cells.size();++i) {
-        auto const& cell=scene_.cells[i];
-        auto const loaded=loaded_cells_[i]!=0;
-        auto const range=loaded ? scene_.streaming.unload_radius :
-                                   scene_.streaming.load_radius;
-        auto const range_sq=range*range;
-        auto const distance_current=cell_distance_sq(camera_position,cell);
-        auto const distance_predicted=cell_distance_sq(predicted,cell);
-        auto const forced=cell.always_loaded || pinned_.count(cell.name)!=0;
-        bool const needed=forced || distance_current<=range_sq ||
-            distance_predicted<=range_sq;
-        if (needed && !loaded) {
-            // Higher priority wins. A nearby cell always outranks a lookahead
-            // cell at the same distance, even when speed is very high.
-            float const now_priority=distance_current<=range_sq ?
-                100000.f / (1.f+std::sqrt(distance_current)) : 0.f;
-            float const ahead_priority=distance_predicted<=range_sq ?
-                30000.f / (1.f+std::sqrt(distance_predicted)) : 0.f;
-            loads.push_back({i,forced ? 1000000.f :
-                now_priority+ahead_priority,forced});
-        } else if (!needed && loaded) {
-            // Evict farthest first, retaining nearer scene collision/visual
-            // placeholders as long as the current budget allows.
-            unloads.push_back({i,std::sqrt(std::min(distance_current,distance_predicted)),false});
-        }
-    }
-    auto priority_order=[](Candidate const& lhs,Candidate const& rhs) {
-        if (lhs.priority != rhs.priority)
-            return lhs.priority > rhs.priority;
-        return lhs.index < rhs.index;
-    };
-    std::sort(loads.begin(),loads.end(),priority_order);
-    std::sort(unloads.begin(),unloads.end(),priority_order);
-    std::size_t loaded_budget=0,unloaded_budget=0;
-    for (auto const& entry:unloads) {
-        if (unloaded_budget>=scene_.streaming.max_cell_unloads_per_update)
-            break;
-        loaded_cells_[entry.index]=0;
-        transitions_.push_back({scene_.cells[entry.index].name,false,false,
-                                entry.priority});
-        ++unloaded_budget;
-    }
-    for (auto const& entry:loads) {
-        if (!entry.forced &&
-            loaded_budget>=scene_.streaming.max_cell_loads_per_update)
-            continue;
-        loaded_cells_[entry.index]=1;
-        transitions_.push_back({scene_.cells[entry.index].name,true,
-                                entry.forced,entry.priority});
-        if (!entry.forced) ++loaded_budget;
-    }
-    diagnostics_.pending_loads=0;
-    diagnostics_.pending_unloads=0;
-    for (auto const& entry:loads)
-        if (!loaded_cells_[entry.index]) ++diagnostics_.pending_loads;
-    for (auto const& entry:unloads)
-        if (loaded_cells_[entry.index]) ++diagnostics_.pending_unloads;
+    update_cell_selection(camera_position,predicted);
 
     // Interior visibility is a graph traversal over open portals. Explicit
     // current_room selects a connected component; empty means no restriction.
@@ -421,7 +431,8 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
 
     resident_indices_.clear();
     visible_indices_.clear();
-    std::vector<std::uint8_t> local(scene_.objects.size(),0);
+    std::fill(visible_mask_.begin(),visible_mask_.end(),0);
+    auto& local=visible_mask_;
     for (size_t i=0;i<scene_.objects.size();++i) {
         auto const& object=scene_.objects[i];
         auto const& node=object.node;
@@ -429,7 +440,7 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
         // WorldPartition's desired logical cell state is not evidence of a
         // successfully read NEF8 payload. Static entities wait for decoded
         // data; player and dynamic traffic must not be evicted mid-simulation.
-        bool const resident=object.player || object.mass>0.f ||
+        bool const resident=scene_pawn::is_pawn(scene_,object) || object.mass>0.f ||
             owner==std::numeric_limits<std::size_t>::max() ||
             (loaded_cells_[owner]!=0 &&
              (!payload_gate_ || payload_ready_[owner]!=0));
@@ -444,7 +455,7 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
                                         object.position;
         auto const distance=std::sqrt(distance_sq(position,camera_position));
         auto const layer=layer_visibility.find(node.layer);
-        bool const visible=object.player || (node.visible &&
+        bool const visible=scene_pawn::is_pawn(scene_,object) || (node.visible &&
             (layer==layer_visibility.end() || layer->second) &&
             room_allowed && distance>=node.lod_near && distance<=node.lod_far);
         local[i]=static_cast<std::uint8_t>(visible);
@@ -452,7 +463,8 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
 
     // Hierarchical visibility: a child cannot be visible while its parent is
     // hidden, but persistent/player root entities remain resident.
-    std::vector<std::uint8_t> state(local.size(),0);
+    hierarchy_state_.assign(local.size(),0);
+    auto& state=hierarchy_state_;
     auto resolve=[&](auto&& self, std::size_t index)->bool {
         if (state[index] == 2) return local[index]!=0;
         if (state[index] == 1)
@@ -468,21 +480,20 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
         return local[index]!=0;
     };
     for (size_t i=0;i<scene_.objects.size();++i) {
-        visible_mask_[i]=static_cast<std::uint8_t>(resolve(resolve,i));
+        (void)resolve(resolve,i);
     }
 
     // Select the first (coarsest) distant HLOD cluster with all members
     // visible and resident. Never merge player/dynamic bodies; the original
     // collision geometry is unchanged by HLOD selection.
     hlod_proxies_.clear();
-    std::vector<std::uint8_t> proxy_assigned(scene_.objects.size(),0);
     for (auto const& cluster:hlod_clusters_) {
         float const threshold=cluster.level==2 ? 350.f : 90.f;
         if (distance_sq(cluster.center,camera_position)<threshold*threshold)
             continue;
         bool eligible=true;
         for (auto const member:cluster.members) {
-            if (!visible_mask_[member] || proxy_assigned[member]) {
+            if (!visible_mask_[member]) {
                 eligible=false;
                 break;
             }
@@ -490,16 +501,13 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
         if (!eligible)
             continue;
         hlod_proxies_.push_back(cluster);
-        for (auto const member:cluster.members) {
-            proxy_assigned[member]=1;
+        for (auto const member:cluster.members)
             visible_mask_[member]=0;
-        }
     }
     for (std::size_t i=0;i<scene_.objects.size();++i)
         if (visible_mask_[i])
             visible_indices_.push_back(i);
     ++generation_;
-    diagnostics_.loaded_cells=loaded_cell_count();
     diagnostics_.resident_entities=resident_indices_.size();
     diagnostics_.visible_entities=visible_indices_.size();
     diagnostics_.generation=generation_;
@@ -529,8 +537,8 @@ void SceneWorld::pin_cell(std::string const& name, bool pinned)
 {
     if (cell_lookup_.count(name)==0)
         throw std::invalid_argument("Unknown scene streaming cell");
-    if (pinned) pinned_.insert(name);
-    else pinned_.erase(name);
+    const bool modified=pinned?pinned_.insert(name).second:pinned_.erase(name)!=0;
+    if(modified)selection_valid_=false;
 }
 void SceneWorld::enable_payload_gate(bool enabled)
 {
@@ -622,7 +630,7 @@ bool SceneWorld::volume_contains(std::string const& name, Vector3 position) cons
 }
 std::size_t SceneWorld::loaded_cell_count() const
 {
-    return static_cast<size_t>(std::count(loaded_cells_.begin(),loaded_cells_.end(),1));
+    return diagnostics_.loaded_cells;
 }
 
 } // namespace northstarcpp

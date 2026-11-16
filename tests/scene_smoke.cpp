@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp
 // Author: Kayla Verner
 // Updated: 2026
@@ -23,14 +24,15 @@ int main(int argc, char** argv)
     save_scene(scene, path);
     auto reopened = load_scene(path);
     if (reopened.objects.size() != scene.objects.size() ||
-        reopened.objects[0].name != scene.objects[0].name || !reopened.objects[0].player ||
+        reopened.objects[0].name != scene.objects[0].name || !scene_pawn::is_local(reopened,reopened.objects[0]) ||
         reopened.objects[0].mass != 2.f || reopened.objects[1].mass != 0.f || reopened.objects[2].mass != 1.f)
         return 2;
 
     reopened.objects[0].position.x = 2.f;
     auto const& position = reopened.objects[0].position;
 
-    reopened.objects[1].player = true;
+    auto const prior_id = reopened.objects[1].node.id;
+    reopened.objects[1].node.id = reopened.objects[0].node.id; // Reject duplicate stable ID.
     bool rejected = false;
     try {
         save_scene(reopened, path);
@@ -40,7 +42,7 @@ int main(int argc, char** argv)
     if (!rejected || load_scene(path).objects[0].position.x != 0.f)
         return 4;
 
-    reopened.objects[1].player = false;
+    reopened.objects[1].node.id = prior_id;
     reopened.objects[1].size = std::numeric_limits<float>::infinity();
     try {
         validate_scene(reopened);

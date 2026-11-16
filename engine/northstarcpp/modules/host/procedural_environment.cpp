@@ -1,5 +1,7 @@
 // Native procedural clouds and world authoring using engine.perlin ABI 1.
 #include <northstarcpp/procedural_environment.hpp>
+#include <northstarcpp/scene_pawn.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include <northstarcpp/perlin.hpp>
 #include <algorithm>
 #include <cmath>
@@ -127,10 +129,12 @@ Scene make_perlin_world(PerlinWorldSettings settings) {
                      (center_row-center_z)*tile};
     player.size=1.f;
     player.color=0x46b9d8;
-    player.player=true;
+
     player.mass=2.f;
     player.node.id=id;
     result.objects.push_back(std::move(player));
+    scene_pawn::migrate_imported_local(result,id);
+    scene_pawn::migrate_imported_local(result,id);
     validate_scene(result);
     return result;
 }

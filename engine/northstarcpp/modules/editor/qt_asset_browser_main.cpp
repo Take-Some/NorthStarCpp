@@ -1,10 +1,17 @@
 // NorthStar native Qt 6 Content Browser host.
 // QtContentBrowser is owned by Qt Editor; this executable is a QA/compatibility launcher.
 #include "qt_content_browser.hpp"
+#include "qt_nsp_icons.hpp"
+#include "../shared/crash_handler.hpp"
+#include "qt_nac_icons_smoke.hpp"
+#include "qt_git_status_smoke.hpp"
+#include "qt_content_browser_layout_smoke.hpp"
+#include "qt_collision_icons_smoke.hpp"
 #include "qt_menu_theme.hpp"
 #include "qt_asset_card_delegate.hpp"
 #include "qt_prefab_preview.hpp"
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/nac.hpp>
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
@@ -18,6 +25,7 @@
 #include <QTreeWidget>
 #include <QAbstractItemModel>
 #include <QMainWindow>
+#include <QDockWidget>
 #include <QProcess>
 #include <QDialog>
 #include <QMetaObject>
@@ -39,7 +47,9 @@
 #include <memory>
 
 int main(int argc,char** argv) {
+    northstarcpp::diagnostics::install_crash_handler();
     QApplication app(argc,argv);
+    northstarcpp::editor::ensure_northstar_qt_icons();
     app.setApplicationName("NorthStar Content Browser");
     app.setOrganizationName("Kayla's Systems");
     northstarcpp::editor::installMenuTheme(
@@ -58,6 +68,14 @@ int main(int argc,char** argv) {
         "Verify physical and virtual NEF8 folder artwork in grid, tree and details.");
     QCommandLineOption categoryIconsSmoke("category-icons-smoke",
         "Verify Other and Material Function PNG icons in grid, list and details.");
+    QCommandLineOption gitBadgeSmoke("git-badge-smoke",
+        "Verify the Git status badge on a real untracked project asset.");
+    QCommandLineOption layoutStabilitySmoke("layout-stability-smoke",
+        "Check selection and metadata do not change dock height.");
+    QCommandLineOption nacIconsSmoke("nac-icons-smoke",
+        "Verify NAC audio container and individual sound file PNG artwork.");
+    QCommandLineOption collisionIconsSmoke("collision-icons-smoke",
+        "Verify collision directory and .ybn file PNG artwork.");
     QCommandLineOption embeddedIconsSmoke("embedded-icons-smoke",
         "Verify native YMT/YCD virtual children use skeleton/animation file icons.");
     QCommandLineOption previewModalSmoke("preview-modal-smoke",
@@ -66,6 +84,8 @@ int main(int argc,char** argv) {
         "Verify project prefab card, original 3D preview and modal inspection.");
     QCommandLineOption multiPrefabSmoke("prefab-composition-smoke",
         "Verify native two-object Prefab composition, transforms and lighting.");
+    QCommandLineOption mini14PrefabSmoke("mini14-prefab-smoke",
+        "Check shared Mini-14 prefab native 3D modal, not its schematic fallback.");
     QCommandLineOption screenshot("screenshot",
         "Save a screenshot after the asset catalog finishes indexing.","filename");
     parser.addOption(scene);
@@ -74,20 +94,28 @@ int main(int argc,char** argv) {
     parser.addOption(assetCardsSmoke);
     parser.addOption(folderIconsSmoke);
     parser.addOption(categoryIconsSmoke);
+    parser.addOption(nacIconsSmoke);
+    parser.addOption(layoutStabilitySmoke);
+    parser.addOption(gitBadgeSmoke);
+    parser.addOption(collisionIconsSmoke);
     parser.addOption(embeddedIconsSmoke);
     parser.addOption(previewModalSmoke);
     parser.addOption(prefabCardsSmoke);
     parser.addOption(multiPrefabSmoke);
+    parser.addOption(mini14PrefabSmoke);
     parser.addOption(screenshot);
     parser.process(app);
     // Compatibility launcher only. Normal authoring uses the engine-owned
     // Content Browser dock inside northstarcpp_editor_qt.exe. Keep this
     // standalone process solely for explicit thumbnail/preview QA modes.
-    bool const qa=parser.isSet(smoke) || parser.isSet(assetCardsSmoke) ||
+    bool const qa=parser.isSet(gitBadgeSmoke) ||
+        parser.isSet(layoutStabilitySmoke) || parser.isSet(smoke) || parser.isSet(assetCardsSmoke) ||
         parser.isSet(folderIconsSmoke) || parser.isSet(categoryIconsSmoke) ||
-        parser.isSet(embeddedIconsSmoke) || parser.isSet(previewModalSmoke) ||
+        parser.isSet(embeddedIconsSmoke) || parser.isSet(nacIconsSmoke) ||
+        parser.isSet(collisionIconsSmoke) ||
+        parser.isSet(previewModalSmoke) ||
         parser.isSet(prefabCardsSmoke) || parser.isSet(multiPrefabSmoke) ||
-        parser.isSet(screenshot);
+        parser.isSet(mini14PrefabSmoke) || parser.isSet(screenshot);
     if(!qa) {
         auto const executable=QDir(QCoreApplication::applicationDirPath())
             .filePath("northstarcpp_editor_qt.exe");
@@ -125,7 +153,26 @@ int main(int argc,char** argv) {
     }
     auto browser=std::make_unique<northstarcpp::editor::QtContentBrowser>();
     std::unique_ptr<QTemporaryDir> sandbox;
-    if(parser.isSet(categoryIconsSmoke) && !parser.isSet(scene) &&
+    if(parser.isSet(gitBadgeSmoke) && !parser.isSet(scene) &&
+       !parser.isSet(content)) {
+        sandbox=std::make_unique<QTemporaryDir>();
+        if(!northstarcpp::editor::git_browser_qa::prepare(*sandbox,*browser))
+            return 4;
+    } else if(parser.isSet(layoutStabilitySmoke) && !parser.isSet(scene) &&
+       !parser.isSet(content)) {
+        sandbox=std::make_unique<QTemporaryDir>();
+        if(!northstarcpp::editor::browser_layout_qa::prepare(*sandbox,*browser))
+            return 4;
+    } else if(parser.isSet(collisionIconsSmoke) && !parser.isSet(scene) &&
+       !parser.isSet(content)) {
+        sandbox=std::make_unique<QTemporaryDir>();
+        if(!northstarcpp::editor::collision_browser_qa::prepare(
+               *sandbox,*browser))return 4;
+    } else if(parser.isSet(nacIconsSmoke) && !parser.isSet(scene) &&
+       !parser.isSet(content)) {
+        sandbox=std::make_unique<QTemporaryDir>();
+        if(!northstarcpp::editor::nac_browser_qa::prepare(*sandbox,*browser))return 4;
+    } else if(parser.isSet(categoryIconsSmoke) && !parser.isSet(scene) &&
        !parser.isSet(content)) {
         sandbox=std::make_unique<QTemporaryDir>();
         if(!sandbox->isValid())return 3;
@@ -191,18 +238,85 @@ int main(int argc,char** argv) {
     });
     window.statusBar()->showMessage("Native Content Browser  |  F5 Refresh  |  "
         "Double-click to preview assets  |  Right-click to insert meshes");
+    QDockWidget* layoutDock=nullptr;
+    if(parser.isSet(layoutStabilitySmoke)) {
+        QWidget* embedded=window.takeCentralWidget();
+        layoutDock=new QDockWidget("Content Browser",&window);
+        layoutDock->setObjectName("contentDock");
+        layoutDock->setWidget(embedded);
+        auto* center=new QWidget(&window);
+        center->setMinimumSize(640,240);
+        window.setCentralWidget(center);
+        window.addDockWidget(Qt::BottomDockWidgetArea,layoutDock);
+    }
     window.show();
 
-    if(parser.isSet(smoke) || parser.isSet(folderIconsSmoke) ||
+    if(parser.isSet(gitBadgeSmoke) || parser.isSet(layoutStabilitySmoke) ||
+       parser.isSet(smoke) ||
+       parser.isSet(folderIconsSmoke) ||
        parser.isSet(categoryIconsSmoke) || parser.isSet(embeddedIconsSmoke) ||
+       parser.isSet(nacIconsSmoke) || parser.isSet(collisionIconsSmoke) ||
        parser.isSet(assetCardsSmoke) || parser.isSet(prefabCardsSmoke) ||
-       parser.isSet(multiPrefabSmoke) || parser.isSet(screenshot)) {
+       parser.isSet(multiPrefabSmoke) || parser.isSet(mini14PrefabSmoke) ||
+       parser.isSet(screenshot)) {
         QElapsedTimer elapsed;
         elapsed.start();
         while(elapsed.elapsed()<10000 &&
               view->recordCount()==0) {
             QCoreApplication::processEvents(QEventLoop::AllEvents,50);
             QThread::msleep(10);
+        }
+        if(parser.isSet(mini14PrefabSmoke)) {
+            namespace role=northstarcpp::editor::asset_card_roles;
+            view->browseTo("prefabs");
+            auto* grid=view->findChild<QListView*>("assetGrid");
+            auto* model=grid?grid->model():nullptr;
+            QModelIndex selected;
+            if(model)for(int i=0;i<model->rowCount();++i) {
+                auto candidate=model->index(i,0);
+                if(candidate.data(role::title).toString()=="rifle_mini14.nprefab") {
+                    selected=candidate;
+                    break;
+                }
+            }
+            bool okay=selected.isValid();
+            if(okay) {
+                grid->setCurrentIndex(selected);
+                bool rendered=false;
+                QElapsedTimer timeout;timeout.start();
+                QTimer poll;poll.setInterval(35);
+                QObject::connect(&poll,&QTimer::timeout,&window,[&] {
+                    auto* modal=qobject_cast<QDialog*>(
+                        QApplication::activeModalWidget());
+                    if(modal && modal->objectName()=="prefabPreviewDialog") {
+                        auto* canvas=modal->findChild<QWidget*>(
+                            "prefabPreviewCanvas");
+                        auto* info=modal->findChild<QLabel*>(
+                            "prefabPreviewDetails");
+                        if(canvas && info &&
+                           canvas->property("previewReady").toBool() &&
+                           canvas->property("previewRendered").toBool() &&
+                           canvas->property("prefabActorCount").toInt()==1 &&
+                           canvas->property("previewMode").toString()==
+                               "prefab-composition" &&
+                           info->text().contains("Native models: 1") &&
+                           info->text().contains("Missing models: 0")) {
+                            rendered=!canvas->grab().isNull();
+                            modal->accept();
+                        }
+                    }
+                    if(timeout.elapsed()>20000 && modal)modal->reject();
+                });
+                poll.start();
+                bool invoked=QMetaObject::invokeMethod(
+                    grid,"doubleClicked",Qt::DirectConnection,
+                    Q_ARG(QModelIndex,selected));
+                poll.stop();
+                okay=invoked && rendered;
+            }
+            std::cout<<"Mini-14 shared prefab native 3D Qt preview: "
+                     <<(okay?"PASS":"FAIL")<<"\n";
+            return okay?0:13;
         }
         if(parser.isSet(multiPrefabSmoke)) {
             namespace role=northstarcpp::editor::asset_card_roles;
@@ -490,6 +604,15 @@ int main(int argc,char** argv) {
                      <<" ("<<checked<<" painted category cards)\n";
             return okay?0:9;
         }
+        if(parser.isSet(gitBadgeSmoke))
+            return northstarcpp::editor::git_browser_qa::verify(*view)?0:17;
+        if(parser.isSet(layoutStabilitySmoke))
+            return northstarcpp::editor::browser_layout_qa::verify(
+                window,*view,*layoutDock)?0:16;
+        if(parser.isSet(collisionIconsSmoke))
+            return northstarcpp::editor::collision_browser_qa::verify(*view)?0:15;
+        if(parser.isSet(nacIconsSmoke))
+            return northstarcpp::editor::nac_browser_qa::verify(*view)?0:13;
         if(parser.isSet(embeddedIconsSmoke)) {
             auto* grid=view->findChild<QListView*>("assetGrid");
             auto* details=view->findChild<QLabel*>("assetPreviewIcon");

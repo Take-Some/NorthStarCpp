@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 #include <northstarcpp/fps_assets.hpp>
 #include <northstarcpp/fps_game.hpp>
 #include <northstarcpp/assets.hpp>
@@ -35,8 +36,8 @@ int main(int argc,char** argv)
             content.shot.channels != 1 || content.shot.frames() < 200 ||
             content.reload.frames() < 200) return 3;
         Scene scene;
-        scene.objects.push_back({"Player", {0,0,0},1.5f,0xffffff,true,2.f});
-        scene.objects.push_back({"Target Center", {0,1,6},1.3f,0xff4040,false,0.f});
+        qa::append(scene,{"Player", {0,0,0},1.5f,0xffffff,true,2.f});
+        qa::append(scene,{"Target Center", {0,1,6},1.3f,0xff4040,false,0.f});
         FpsArena game(scene,w);
         if (game.ammunition() != 18 || game.reserve_ammunition() != 108 || game.magazine_size()!=18) return 4;
         if (!game.fire(scene) || game.ammunition() != 17) return 5;

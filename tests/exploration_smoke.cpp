@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp First Person Platform — repeatable gameplay test
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/camera.hpp>
@@ -20,7 +21,7 @@ int main(int argc, char** argv)
     }
     try {
         auto scene = load_scene(argv[1]);
-        if (scene.objects.size() != 40 || !scene.objects[0].player)
+        if (scene.objects.size() != 40 || !scene_pawn::is_local(scene,scene.objects[0]))
             throw std::runtime_error("Exploration scene topology mismatch");
 
         // Existing FPS remains strict about target-based gameplay.

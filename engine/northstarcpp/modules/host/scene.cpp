@@ -4,6 +4,7 @@
 
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/scene_component_registry.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include <unordered_set>
 
 #ifndef NOMINMAX
@@ -65,9 +66,25 @@ void write_scene_file(std::filesystem::path const& path, std::string const& byte
     if (!CloseHandle(file) && failure == ERROR_SUCCESS)
         failure = GetLastError();
 
-    if (failure == ERROR_SUCCESS &&
-        !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        failure = GetLastError();
+    if (failure == ERROR_SUCCESS) {
+        // Content Browser and antivirus/thumbnail scanners may briefly hold
+        // the previous .nscn without FILE_SHARE_DELETE. Preserve the atomic
+        // replace, retry only Windows' transient sharing/access failures, and
+        // never delete or truncate the authored destination as a workaround.
+        constexpr unsigned max_attempts=15;
+        for(unsigned attempt=0;attempt<max_attempts;++attempt) {
+            if(MoveFileExW(temp.c_str(),path.c_str(),
+                           MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+                failure=ERROR_SUCCESS;
+                break;
+            }
+            failure=GetLastError();
+            if((failure!=ERROR_SHARING_VIOLATION &&
+                failure!=ERROR_ACCESS_DENIED) ||
+               attempt+1==max_attempts)break;
+            Sleep(20u+attempt*15u);
+        }
+    }
     if (failure != ERROR_SUCCESS) {
         DeleteFileW(temp.c_str());
         throw std::system_error(static_cast<int>(failure), std::system_category(), "Cannot save scene");
@@ -80,12 +97,18 @@ void validate_scene_v3(Scene const& scene);
 
 Scene make_startup_scene()
 {
-    return {{
-        {"Player", {0.f, 0.f, 0.f}, 1.5f, 0x46b9d8, true, 2.f},
-        {"Static Block", {0.f, 0.f, 3.f}, 1.5f, 0xf2a65a, false, 0.f},
-        {"Pushable Cube", {2.4f, 0.f, 0.f}, 1.f, 0x9bd783, false, 1.f},
-        {"Falling Cube", {-2.4f, 4.f, 2.f}, 1.f, 0xb486f0, false, 1.f},
-    }};
+    Scene scene;
+    scene.version=3;
+    scene.objects={
+        {"Player", {0.f, 0.f, 0.f}, 1.5f, 0x46b9d8, 2.f},
+        {"Static Block", {0.f, 0.f, 3.f}, 1.5f, 0xf2a65a, 0.f},
+        {"Pushable Cube", {2.4f, 0.f, 0.f}, 1.f, 0x9bd783, 1.f},
+        {"Falling Cube", {-2.4f, 4.f, 2.f}, 1.f, 0xb486f0, 1.f},
+    };
+    for(std::size_t i=0;i<scene.objects.size();++i)
+        scene.objects[i].node.id=i+1;
+    scene_pawn::migrate_imported_local(scene,scene.objects[0].node.id);
+    return scene;
 }
 
 void validate_scene(Scene const& scene)
@@ -97,7 +120,6 @@ void validate_scene(Scene const& scene)
     auto const coordinate_limit = legacy ? legacy_world_limit : large_world_limit;
     if (scene.objects.size() > limit)
         throw std::runtime_error("Scene has too many objects");
-    bool has_player = false;
     for (auto const& object : scene.objects) {
         if (object.name.empty() || object.name.size() > 96 ||
             std::any_of(object.name.begin(), object.name.end(), [](unsigned char c) { return c < 32 || c == 127; }) ||
@@ -115,9 +137,6 @@ void validate_scene(Scene const& scene)
         if (!std::isfinite(object.mass) || object.mass < 0.f || object.mass > 10000.f ||
             (object.mass > 0.f && object.mass < 0.001f))
             throw std::runtime_error("Mass must be zero or between 0.001 and 10000 kg");
-        if (object.player && (has_player || object.mass == 0.f))
-            throw std::runtime_error("The scene can have one player-controlled cube with positive mass");
-        has_player |= object.player;
     }
     if (!legacy) {
         validate_scene_v3(scene);
@@ -206,11 +225,18 @@ Scene parse_scene_data(std::string const& bytes)
 
         if (scene.objects.size() == max_legacy_scene_objects)
             throw std::runtime_error("Scene has too many objects");
-        object.player = player == 1;
-        if (legacy && object.player)
+        if (legacy && player == 1)
             object.mass = 1.f;
+        object.node.id=scene.objects.size()+1;
         scene.objects.push_back(std::move(object));
+        if(player==1) {
+            scene.version=3;
+            scene_pawn::migrate_imported_local(scene,scene.objects.back().node.id);
+        }
     }
+    // All legacy files are imported into component-based V3 scenes.
+    // Their old integer marker is not retained in SceneObject.
+    scene.version=3;
     validate_scene(scene);
     return scene;
 }

@@ -1,31 +1,62 @@
 // Materials subsystem: independent D3D12 implementation.
 #include "renderer_private.hpp"
+#include "../../shared/frame_memory_counters.hpp"
 #include "../shared/shader_disk_cache.hpp"
+namespace frame_memory = northstarcpp::diagnostics::frame_memory;
+
 namespace northstarcpp::render::d3d12::detail {
+namespace {
+std::uint64_t material_texture_fingerprint(NorthStarMaterialTexture const& image,
+                                          DXGI_FORMAT format)
+{
+    std::uint64_t hash=14695981039346656037ull;
+    auto mix=[&](std::uint64_t value) { hash=(hash^value)*1099511628211ull; };
+    mix(image.width);
+    mix(image.height);
+    mix(format);
+    // Sample for lookup only. Full byte comparison determines identity,
+    // including when the caller reuses a pointer for changed content.
+    const auto stride=std::max(1u,image.data_bytes/64);
+    for(std::uint64_t index=0;index<image.data_bytes;index+=stride)
+        mix(image.rgba8[index]);
+    return hash;
+}
+
+bool matches_vertices(std::vector<NorthStarMaterialVertex> const& previous,
+                      std::size_t offset,NorthStarMaterialBatch const& batch)
+{
+    return offset<=previous.size() && batch.vertex_count<=previous.size()-offset &&
+        std::memcmp(previous.data()+offset,batch.vertices,
+                    std::size_t(batch.vertex_count)*sizeof(NorthStarMaterialVertex))==0;
+}
+} // namespace
 std::shared_ptr<MaterialGpuTexture> RendererState::material_texture(
         NorthStarMaterialTexture const& image,bool is_srgb,
-        std::vector<MaterialTextureUpload>& pending){
+        std::vector<MaterialTextureUpload>& pending,UploadPages::Batch& uploads){
         if(!image.rgba8 || !image.width || !image.height ||
            image.width>4096 || image.height>4096 ||
            std::uint64_t(image.width)*image.height*4!=image.data_bytes)
             throw std::invalid_argument("Invalid D3D12 authored material texture");
-        std::uint64_t hash=14695981039346656037ull;
-        auto feed=[&](std::uint8_t byte){hash=(hash^byte)*1099511628211ull;};
-        for(unsigned b=0;b<4;++b) {
-            feed(std::uint8_t(image.width>>(b*8)));
-            feed(std::uint8_t(image.height>>(b*8)));
-        }
-        feed(is_srgb?1:0);
-        for(std::uint32_t i=0;i<image.data_bytes;++i)feed(image.rgba8[i]);
-        if(auto it=material_texture_cache.find(hash);it!=material_texture_cache.end())
-            return it->second;
-        if(material_cache_bytes+image.data_bytes>96u*1024u*1024u) {
-            material_texture_cache.clear();
-            material_cache_bytes=0;
-        }
+        const auto format=is_srgb?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                                  DXGI_FORMAT_R8G8B8A8_UNORM;
+        const auto key=material_texture_fingerprint(image,format);
+        auto matches=[&](MaterialGpuTexture const& candidate) {
+            return candidate.format==format && candidate.width==image.width &&
+                candidate.height==image.height && candidate.source.size()==image.data_bytes &&
+                std::memcmp(candidate.source.data(),image.rgba8,image.data_bytes)==0;
+        };
+        auto const [begin,end]=material_texture_cache.equal_range(key);
+        for(auto it=begin;it!=end;++it)
+            if(matches(*it->second))return it->second;
+        for(auto const& upload:pending)
+            if(upload.fingerprint==key && matches(*upload.texture))return upload.texture;
+
         auto texture=std::make_shared<MaterialGpuTexture>();
-        texture->format=is_srgb?DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-                                 DXGI_FORMAT_R8G8B8A8_UNORM;
+        texture->format=format;
+        texture->width=image.width;
+        texture->height=image.height;
+        frame_memory::assign(texture->source,image.rgba8,image.rgba8+image.data_bytes,
+            &NorthStarFrameMemoryCounters::texture_copy_bytes);
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width=image.width;desc.Height=image.height;
@@ -37,60 +68,65 @@ std::shared_ptr<MaterialGpuTexture> RendererState::material_texture(
             D3D12_RESOURCE_STATE_COPY_DEST,nullptr,
             IID_PPV_ARGS(&texture->texture)),"Create D3D12 authored texture");
         UINT const pitch=(image.width*4+255u)&~255u;
-        auto staging_desc=memory(UINT64(pitch)*image.height);
-        auto upload=heap(D3D12_HEAP_TYPE_UPLOAD);
         MaterialTextureUpload item{};
         item.texture=texture;item.width=image.width;item.height=image.height;
         item.pitch=pitch;
-        check(device->CreateCommittedResource(&upload,D3D12_HEAP_FLAG_NONE,
-            &staging_desc,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,
-            IID_PPV_ARGS(&item.staging)),"Create material texture staging");
-        unsigned char* data=nullptr;
-        check(item.staging->Map(0,nullptr,reinterpret_cast<void**>(&data)),
-            "Map material texture staging");
+        item.fingerprint=key;
+        item.staging=uploads.allocate(UINT64(pitch)*image.height);
+        auto* data=item.staging.data;
         for(UINT y=0;y<image.height;++y)
             std::memcpy(data+UINT64(y)*pitch,
                         image.rgba8+UINT64(y)*image.width*4,
                         UINT64(image.width)*4);
-        item.staging->Unmap(0,nullptr);
+        frame_memory::copied(&NorthStarFrameMemoryCounters::texture_copy_bytes,image.data_bytes);
         pending.push_back(std::move(item));
-        material_texture_cache.emplace(hash,texture);
-        material_cache_bytes+=image.data_bytes;
         return texture;
     }
 void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,UINT count){
         if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES||(count&&!batches))
             throw std::invalid_argument("Invalid D3D12 material batch count");
-        if(!count) {
-            material_draws.clear();
-            material_cpu_vertices.clear();
-            return;
-        }
-        // Descriptors and persistently mapped GPU uploads cannot be modified
-        // before the prior submitted frame has finished consuming them.
-        wait();
-        ensure_material_buffers();
-        std::vector<NorthStarMaterialVertex> vertices;
-        std::vector<MaterialDraw> draws;
-        std::vector<MaterialTextureUpload> pending;
-        draws.reserve(count);
+        std::size_t required_vertices=0;
+        bool geometry_unchanged=true;
         for(UINT i=0;i<count;++i) {
-            auto const& input=batches[i];
-            if(!input.vertices || !input.vertex_count ||
-               input.vertex_count%3 ||
-               input.vertex_count>NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES-
-                                  vertices.size())
-                throw std::invalid_argument("Invalid material draw vertices");
+            auto const& entry=batches[i];
+            if(!entry.vertices || !entry.vertex_count || entry.vertex_count%3 ||
+               entry.vertex_count>NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES-required_vertices)
+                throw std::invalid_argument("Invalid high-detail D3D12 material vertices");
             auto finite_unit=[](float f){
                 return std::isfinite(f)&&f>=0.f&&f<=1.f;
             };
-            for(float color:input.base_color)
+            for(float color:entry.base_color)
                 if(!finite_unit(color))
                     throw std::invalid_argument("Invalid material base color");
-            if(!finite_unit(input.roughness)||!finite_unit(input.metallic))
+            if(!finite_unit(entry.roughness)||!finite_unit(entry.metallic))
                 throw std::invalid_argument("Invalid material PBR constants");
+            if(!matches_vertices(material_cpu_vertices,required_vertices,entry)) {
+                geometry_unchanged=false;
+                for(UINT v=0;v<entry.vertex_count;++v) {
+                    auto const& point=entry.vertices[v];
+                    for(float value:{point.x,point.y,point.z,point.nx,point.ny,
+                                     point.nz,point.u,point.v})
+                        if(!std::isfinite(value)||std::abs(value)>1.e6f)
+                            throw std::invalid_argument("Nonfinite material mesh vertex");
+                }
+            }
+            required_vertices+=entry.vertex_count;
+        }
+        geometry_unchanged &= required_vertices==material_cpu_vertices.size();
+        auto& vertices=material_vertex_scratch;
+        vertices.clear();
+        if(!geometry_unchanged)
+            frame_memory::reserve(vertices,required_vertices);
+        std::vector<MaterialDraw> draws;
+        std::vector<MaterialTextureUpload> pending;
+        UploadPages::Batch uploads(upload_pages,device.Get(),fence->GetCompletedValue());
+        frame_memory::reserve(draws,count);
+        UINT first_vertex=0;
+        for(UINT i=0;i<count;++i) {
+            auto const& input=batches[i];
             MaterialDraw draw{};
-            draw.first=static_cast<UINT>(vertices.size());
+            draw.first=first_vertex;
+            first_vertex+=input.vertex_count;
             draw.count=input.vertex_count;
             std::copy(std::begin(input.base_color),std::end(input.base_color),
                       std::begin(draw.params.base_color));
@@ -101,20 +137,20 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
                 auto const& texture=input.textures[slot];
                 if(!texture.rgba8&&!texture.width&&!texture.height&&!texture.data_bytes)
                     continue;
-                draw.maps[slot]=material_texture(texture,slot==0||slot==4,pending);
+                draw.maps[slot]=material_texture(texture,slot==0||slot==4,pending,uploads);
                 draw.params.present[0]|=1u<<slot;
             }
-            for(UINT v=0;v<input.vertex_count;++v) {
-                auto const& point=input.vertices[v];
-                float const components[]{
-                    point.x,point.y,point.z,point.nx,point.ny,point.nz,point.u,point.v};
-                for(float f:components)
-                    if(!std::isfinite(f)||std::abs(f)>1.e6f)
-                        throw std::invalid_argument("Nonfinite material mesh vertex");
-            }
-            vertices.insert(vertices.end(),input.vertices,
-                            input.vertices+input.vertex_count);
+            if(!geometry_unchanged)
+                frame_memory::append_geometry(vertices,input.vertices,
+                                              input.vertices+input.vertex_count);
             draws.push_back(std::move(draw));
+        }
+        // Upload resources and descriptors are single-buffered. Validate and
+        // prepare all incoming batches before touching the active frame.
+        auto* old_heap=material_srv_heap.Get();
+        if(count) {
+            wait();
+            ensure_material_buffers(required_vertices,count);
         }
         if(!pending.empty()) {
             check(allocator->Reset(),"Reset material upload command allocator");
@@ -126,8 +162,9 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
                 dest.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                 dest.SubresourceIndex=0;
                 D3D12_TEXTURE_COPY_LOCATION source{};
-                source.pResource=image.staging.Get();
+                source.pResource=image.staging.resource;
                 source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                source.PlacedFootprint.Offset=image.staging.offset;
                 source.PlacedFootprint.Footprint.Format=image.texture->format;
                 source.PlacedFootprint.Footprint.Width=image.width;
                 source.PlacedFootprint.Footprint.Height=image.height;
@@ -144,15 +181,28 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
             }
             check(commands->Close(),"Close authored material texture upload");
             ID3D12CommandList* work[]{commands.Get()};
+            const auto ticket=++fence_value;
+            material_uploads_in_flight.swap(pending);
+            uploads.retire(ticket);
             queue->ExecuteCommandLists(1,work);
-            wait(); // Upload staging may now be released safely.
+            check(queue->Signal(fence.Get(),ticket),"Signal D3D12 material upload fence");
+            wait_for_fence(ticket);
+            for(auto const& image:material_uploads_in_flight) {
+                material_texture_cache.emplace(image.fingerprint,image.texture);
+                material_cache_bytes+=image.texture->source.size();
+            }
+            material_uploads_in_flight.clear();
         }
-        auto heap_start=material_srv_heap->GetCPUDescriptorHandleForHeapStart();
+        const auto heap_start=count?
+            material_srv_heap->GetCPUDescriptorHandleForHeapStart():D3D12_CPU_DESCRIPTOR_HANDLE{};
         for(UINT i=0;i<draws.size();++i) {
             auto const& draw=draws[i];
-            std::memcpy(material_constant_data+UINT64(i)*256,
-                        &draw.params,sizeof(MaterialParams));
+            auto const* old=old_heap==material_srv_heap.Get() && i<material_draws.size()?
+                &material_draws[i]:nullptr;
+            if(!old || std::memcmp(&old->params,&draw.params,sizeof(MaterialParams))!=0)
+                std::memcpy(material_constant_data+UINT64(i)*256,&draw.params,sizeof(MaterialParams));
             for(unsigned slot=0;slot<5;++slot) {
+                if(old && old->maps[slot]==draw.maps[slot])continue;
                 auto handle=heap_start;
                 handle.ptr+=SIZE_T(i*5+slot)*material_descriptor_increment;
                 D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -165,17 +215,35 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
                     draw.maps[slot]->texture.Get():nullptr,&srv,handle);
             }
         }
-        material_cpu_vertices.swap(vertices);
+        if(!geometry_unchanged) {
+            material_cpu_vertices.swap(vertices);
+            material_vertices_dirty=true;
+        }
         material_draws.swap(draws);
+        draws.clear();
+        // Keep active textures resident even above the cache target. Evict
+        // only entries the committed draw list no longer references.
+        constexpr std::uint64_t cache_target=96ull*1024*1024;
+        for(auto it=material_texture_cache.begin();
+            it!=material_texture_cache.end() && material_cache_bytes>cache_target;) {
+            if(it->second.use_count()==1) {
+                material_cache_bytes-=it->second->source.size();
+                it=material_texture_cache.erase(it);
+            } else ++it;
+        }
     }
-static ComPtr<ID3D12PipelineState> create_material_graph_pso(
+ComPtr<ID3D12PipelineState> create_material_graph_pso(
     ComPtr<ID3D12Device> device,
     ComPtr<ID3D12RootSignature> material_signature,
-    std::string const& prefix,unsigned blend_mode,bool hdr_enabled) {
-        std::string const source=(hdr_enabled&&blend_mode==2?
+    std::string const& prefix,unsigned blend_mode,bool hdr_enabled,bool gbuffer_v2,
+    const std::vector<std::uint8_t>& vertex,
+    const std::vector<std::uint8_t>& pixel) {
+        std::string const source=std::string(gbuffer_v2 && blend_mode!=2?
+            "#define NS_GBUFFER_V2 1\n":"")+(hdr_enabled&&blend_mode==2?
             "#define NS_HDR_OUTPUT 1\n":"")+prefix+authored_material_shader;
-        auto vs=compile_material_variant(source,"material_vs","vs_5_0");
-        auto ps=compile_material_variant(source,blend_mode==2?
+        ComPtr<ID3DBlob> vs,ps;
+        if(vertex.empty())vs=compile_material_variant(source,"material_vs","vs_5_0");
+        if(pixel.empty())ps=compile_material_variant(source,blend_mode==2?
             "material_ps":"material_gbuffer_ps","ps_5_0");
         D3D12_INPUT_ELEMENT_DESC const input[]{
             {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,
@@ -190,8 +258,10 @@ static ComPtr<ID3D12PipelineState> create_material_graph_pso(
         };
         D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
         desc.pRootSignature=material_signature.Get();
-        desc.VS={vs->GetBufferPointer(),vs->GetBufferSize()};
-        desc.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
+        desc.VS=vertex.empty()?D3D12_SHADER_BYTECODE{vs->GetBufferPointer(),vs->GetBufferSize()}:
+            D3D12_SHADER_BYTECODE{vertex.data(),vertex.size()};
+        desc.PS=pixel.empty()?D3D12_SHADER_BYTECODE{ps->GetBufferPointer(),ps->GetBufferSize()}:
+            D3D12_SHADER_BYTECODE{pixel.data(),pixel.size()};
         desc.InputLayout={input,3};
         desc.SampleMask=UINT_MAX;desc.SampleDesc.Count=1;
         desc.DSVFormat=DXGI_FORMAT_D32_FLOAT;
@@ -217,13 +287,21 @@ static ComPtr<ID3D12PipelineState> create_material_graph_pso(
             b.BlendOpAlpha=D3D12_BLEND_OP_ADD;
             b.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
         }else {
-            desc.NumRenderTargets=3;
+            desc.NumRenderTargets=gbuffer_v2?4:3;
             desc.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
             desc.RTVFormats[1]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             desc.RTVFormats[2]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            desc.RTVFormats[3]=gbuffer_v2?DXGI_FORMAT_R8G8B8A8_UNORM:DXGI_FORMAT_UNKNOWN;
             for(UINT i=0;i<3;++i)
                 desc.BlendState.RenderTarget[i].RenderTargetWriteMask=
                     D3D12_COLOR_WRITE_ENABLE_ALL;
+        }
+        // Revision-bound DXIL PSOs must never use old cached shader bytecode.
+        if(!vertex.empty() || !pixel.empty()) {
+            ComPtr<ID3D12PipelineState> hot;
+            check(device->CreateGraphicsPipelineState(&desc,IID_PPV_ARGS(&hot)),
+                  "Create D3D12 DXIL material hot pipeline");
+            return hot;
         }
         // D3D12 cached pipelines are device/driver specific. Include the
         // adapter LUID, shader source, shader targets and pipeline mode.
@@ -291,10 +369,11 @@ ComPtr<ID3D12PipelineState> RendererState::material_graph_pipeline(
     auto context=device;
     auto signature=material_signature;
     bool const hdr=hdr_enabled;
+    bool const v2=gbuffer_v2;
     material_pipeline_pending.emplace(key,std::async(std::launch::async,
-        [context,signature,prefix,blend_mode,hdr]() {
+        [context,signature,prefix,blend_mode,hdr,v2]() {
             return create_material_graph_pso(
-                context,signature,prefix,blend_mode,hdr);
+                context,signature,prefix,blend_mode,hdr,v2);
         }));
     return {}; // Keep last valid/fallback pipeline during async compile.
 }
@@ -309,7 +388,7 @@ void RendererState::set_material_batches_v2(NorthStarMaterialBatchV2 const* batc
         if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES||(count&&!batches))
             throw std::invalid_argument("Invalid D3D12 Material Graph batch count");
         std::vector<NorthStarMaterialBatch> base;
-        base.reserve(count);
+        frame_memory::reserve(base,count);
         for(UINT i=0;i<count;++i) {
             auto item=batches[i].material;
             float const opacity=batches[i].opacity;

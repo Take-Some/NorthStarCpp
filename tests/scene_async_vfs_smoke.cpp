@@ -40,9 +40,14 @@ static Scene demo() {
     return world;
 }
 static bool poll(SceneCellAsyncResidency& file,SceneCellAsyncResidency& vfs,
-                 SceneWorld const& world,std::string const& cell,
+                 SceneWorld& world,Vector3 camera,std::string const& cell,
                  std::string const& absent) {
+    const auto selection_passes=world.streaming_diagnostics().cell_selection_passes;
     for(int i=0;i<300;++i) {
+        world.update(camera);
+        if(world.streaming_diagnostics().cell_selection_passes!=selection_passes ||
+           !world.cell_transitions().empty())
+            return false;
         file.apply(world);
         vfs.apply(world);
         if(file.loaded("") && vfs.loaded("") &&
@@ -76,10 +81,10 @@ int main(int argc,char** argv) {
         SceneCellAsyncResidency disk_resident(path,2);
         SceneCellAsyncResidency vfs_resident(assets,"game/async.nscn",2);
         world.update({-20.f,0.f,-20.f});
-        if(!poll(disk_resident,vfs_resident,world,"Alpha","Beta"))
+        if(!poll(disk_resident,vfs_resident,world,{-20.f,0.f,-20.f},"Alpha","Beta"))
             return 2;
         world.update({390.f,0.f,390.f});
-        if(!poll(disk_resident,vfs_resident,world,"Beta","Alpha"))
+        if(!poll(disk_resident,vfs_resident,world,{390.f,0.f,390.f},"Beta","Alpha"))
             return 3;
         if(disk_resident.records("Beta")->front().entity_id!=30 ||
            vfs_resident.records("Beta")->front().entity_id!=30)

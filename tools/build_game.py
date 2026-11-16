@@ -627,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     cli.add_argument("--project", type=Path, help="Folder containing northstarcpp.project.json")
     cli.add_argument("--engine-package", type=Path, help="Verified NorthStarCpp engine distribution")
     cli.add_argument("--output-dir", type=Path, default=ROOT / "dist" / "games")
-    cli.add_argument("--physics", choices=("bullet", "jolt"), default="bullet")
+    cli.add_argument("--physics", choices=("bullet", "jolt"), default="jolt")
     cli.add_argument("--allow-debug", action="store_true")
     cli.add_argument("--no-zip", action="store_true")
     cli.add_argument("--verify", type=Path, metavar="GAME_DIR")

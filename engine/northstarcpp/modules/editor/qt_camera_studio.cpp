@@ -1,4 +1,5 @@
 #include "qt_camera_studio.hpp"
+#include "qt_cutscene_timeline.hpp"
 #include "qt_editor_viewport.hpp"
 #include <northstarcpp/camera.hpp>
 #include <QComboBox>
@@ -364,6 +365,17 @@ void openCameraStudio(QWidget* parent,QtEditorViewport* viewport,
             openGameplayTuning(dialog,project_assets);
         });
     body->addWidget(tuning);
+    auto* sequencer=new QPushButton("Multi-track Cutscene Sequencer...",dialog);
+    sequencer->setObjectName("cameraCutsceneSequencerOpen");
+    QObject::connect(sequencer,&QPushButton::clicked,dialog,
+        [dialog,viewport,project_assets] {
+            openCutsceneTimeline(dialog,project_assets,
+                [viewport](CameraPose const& pose) {
+                    viewport->setOrbitMode(false);
+                    viewport->setCameraPose(pose);
+                });
+        });
+    body->addWidget(sequencer);
     body->addWidget(close);
     auto fillCurrent=[state,viewport] {
         CameraShot shot;

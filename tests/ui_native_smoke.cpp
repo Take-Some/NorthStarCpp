@@ -95,10 +95,63 @@ int main() {
     };
     assert(px(static_cast<uint32_t>(bounds.x+2),static_cast<uint32_t>(bounds.y+2),0)==0x22);
     assert(px(static_cast<uint32_t>(bounds.x+2),static_cast<uint32_t>(bounds.y+2),1)==0x44);
+    // Opt-in textured neon skin: hover and press must change raster pixels,
+    // while the legacy plain button above retains its exact old colors.
+    auto neon=northstarcpp::ui::text("neon");
+    check(api.set_property(context,button_id,
+        northstarcpp::ui::string("style"),&neon));
+    auto primary=northstarcpp::ui::boolean(true);
+    check(api.set_property(context,button_id,
+        northstarcpp::ui::string("primary"),&primary));
+    // ABI 4: button-only RGBA includes the text and true alpha contour.
+    auto const* layers=module.query_extension<NorthStarUIRasterLayersApi>(
+        NORTHSTARCPP_UI_RASTER_LAYERS_MODULE_ABI);
+    assert(layers && layers->size>=sizeof(*layers));
+    std::vector<unsigned char> buttonOnly(rgba.size());
+    std::vector<unsigned char> withoutButton(rgba.size());
+    check(raster->draw_rgba(context,rgba.data(),1280u*4u,1280,720));
+    check(layers->draw_filtered_rgba(context,buttonOnly.data(),
+        1280u*4u,1280,720,button_id,2));
+    check(layers->draw_filtered_rgba(context,withoutButton.data(),
+        1280u*4u,1280,720,button_id,1));
+    assert(std::equal(rgba.begin(),rgba.end(),buttonOnly.begin()));
+    assert(std::all_of(withoutButton.begin(),withoutButton.end(),
+        [](unsigned char c){return c==0;}));
+    const auto cutCorner=(static_cast<std::size_t>(bounds.y)*1280u+
+        static_cast<std::size_t>(bounds.x+bounds.width-1))*4+3;
+    assert(buttonOnly[cutCorner]==0);
+    auto sample=[&]() {
+        check(raster->draw_rgba(context,rgba.data(),1280u*4u,1280,720));
+        return px(static_cast<uint32_t>(bounds.x+40),
+                  static_cast<uint32_t>(bounds.y+2),0);
+    };
+    check(raster->pointer(context,1200,700,2));
+    auto idlePixel=sample();
+    // The upper-right chamfer must be truly cut away; the neighboring
+    // surface remains opaque, rather than drawing a rectangular button.
+    const auto chamferRight=static_cast<uint32_t>(bounds.x+bounds.width-1);
+    const auto top=static_cast<uint32_t>(bounds.y);
+    assert(px(chamferRight,top,3)==0 && "Cyberpunk top-right corner is cut out");
+    assert(px(chamferRight-12,top,3)>0 && "Button face reaches the top bevel");
+    check(raster->pointer(context,bounds.x+5,bounds.y+5,2));
+    auto hoverPixel=sample();
+    assert(hoverPixel!=idlePixel &&
+           "Hover must alter the procedural neon button texture");
     check(raster->pointer(context,bounds.x+5,bounds.y+5,1));
+    auto pressedPixel=sample();
+    assert(pressedPixel!=hoverPixel &&
+           "Pressed buttons must have a distinct visual state");
     check(raster->pointer(context,bounds.x+5,bounds.y+5,0));
     check(api.pump_events(context));
-    assert(observed.names.size()==2 && observed.names.back()=="click");
+    // Initial "clicked" event, then native hover-entry/press/click events.
+    assert(observed.names.size()==4);
+    assert(observed.names[0]=="clicked");
+    assert(observed.names[1]=="pointer");
+    assert(observed.names[2]=="press");
+    assert(observed.names[3]=="click");
+    check(raster->pointer(context,1200,700,2));
+    check(api.pump_events(context));
+    assert(observed.names.size()==5 && observed.names.back()=="pointer");
     // Layout V2: grid, anchors, constraints and percentages.
     auto gridDesc=northstarcpp::ui::element(NORTHSTAR_UI_PANEL,root_id,"grid");
     NorthStarUIHandle grid=0,first=0,second=0;

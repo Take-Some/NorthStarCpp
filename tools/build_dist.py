@@ -69,15 +69,13 @@ QT_OPTIONAL_APPLICATIONS = ()
 
 
 def qt_tool_path(package: Path, name: str) -> Path:
-    """Locate standalone Qt process binaries without accepting search-path fallback."""
+    """Return the public bin/ executable (native launcher in isolated builds)."""
     if name not in QT_APPLICATIONS + QT_OPTIONAL_APPLICATIONS:
         raise DistError("Unsupported Qt tool name")
     manifest = json.loads((package / "qt.runtime.json").read_text("utf-8"))
-    layout = manifest.get("layout", "flat")
-    if layout not in ("flat", "process-isolated"):
+    if manifest.get("layout", "flat") not in ("flat", "process-isolated"):
         raise DistError("Unknown Qt runtime process layout")
-    root = "bin/qt_tools" if layout == "process-isolated" else "bin"
-    return confined(package, root + "/" + name)
+    return confined(package, "bin/" + name)
 
 
 
@@ -204,6 +202,10 @@ def check_binary_imports(package: Path, objdump: str) -> dict[str, list[dict]]:
     binaries = [package / "bin" / name for name in REQUIRED_BINARIES]
     # Every Qt process is mandatory, especially the single supported Editor.
     binaries.extend(qt_tool_path(package, name) for name in QT_APPLICATIONS)
+    qt_registry = json.loads((package / "qt.runtime.json").read_text(encoding="utf-8"))
+    if qt_registry.get("layout") == "process-isolated":
+        binaries.extend(confined(package, "bin/qt_tools/" + name)
+                        for name in QT_APPLICATIONS)
     legacy = package / "bin" / "northstarcpp_editor.exe"
     if legacy.exists() or (package / "bin/qt_tools/northstarcpp_editor.exe").exists():
         raise DistError("Deprecated Win32 Editor must not ship in dist")
@@ -287,10 +289,11 @@ def package_smoke(package: Path) -> None:
             cwd=bin_dir, timeout=45, silent=True, env=environment)
         environment["LOCALAPPDATA"] = temporary
         isolated_qt = environment.copy()
-        qt_dir = qt_tool_path(package, QT_APPLICATIONS[0]).parent
+        qt_dir = bin_dir
+        # Native launchers must work without Qt on PATH, like Explorer double-click.
         isolated_qt["PATH"] = os.pathsep.join([
-            str(qt_dir), str(Path(os.environ.get("SystemRoot","C:/Windows")) / "System32"),
-            os.environ.get("SystemRoot","C:/Windows")])
+            str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32"),
+            os.environ.get("SystemRoot", "C:/Windows")])
         isolated_qt.pop("QT_PLUGIN_PATH", None)
         isolated_qt.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
         qt_editor = qt_tool_path(package, "northstarcpp_editor_qt.exe")
@@ -302,14 +305,20 @@ def package_smoke(package: Path) -> None:
              "--check-scene",
              "--scene", str(scene)], cwd=bin_dir, timeout=45,
             silent=True, env=environment)
-        shared_assets = package / "sharedAssets"
-        if (shared_assets / "models" / "skydome.ydd").is_file():
-            run([str(bin_dir / "northstarcpp_player.exe"), "--check-shared-assets", str(shared_assets)],
-                cwd=bin_dir, timeout=30, silent=True, env=environment)
-            run([str(bin_dir / "northstarcpp_player.exe"), "--warp", "--check-scene",
-                 "--scene", str(scene), "--shared-assets", str(shared_assets),
-                 "--asset-zones", str(ROOT / "tests" / "fixtures" / "asset_zones.json")],
-                cwd=bin_dir, timeout=45, silent=True, env=environment)
+        # Installed engines use the mandatory NSP archive; never rely on a
+        # loose sharedAssets directory that exists only in a developer checkout.
+        from tools.pack_nsp import verify as verify_nsp
+        shared_pack = bin_dir / "archive" / "northstar_shared.nsp"
+        if not shared_pack.is_file():
+            raise DistError("Missing installed NorthStar shared pack")
+        try:
+            verify_nsp(shared_pack)
+        except (ValueError, OSError, UnicodeError) as error:
+            raise DistError("Invalid installed NorthStar shared pack") from error
+        run([str(bin_dir / "northstarcpp_player.exe"), "--warp", "--check-scene",
+             "--scene", str(scene),
+             "--asset-zones", str(ROOT / "tests" / "fixtures" / "asset_zones.json")],
+            cwd=bin_dir, timeout=45, silent=True, env=environment)
         run([str(qt_tool_path(package, "northstarcpp_project_manager.exe")), "--smoke"],
             cwd=qt_dir, timeout=30, silent=True, env=isolated_qt)
         run([str(qt_tool_path(package, "northstarcpp_camera_timeline_editor.exe")), "--self-test"],
@@ -564,6 +573,12 @@ def release(args: argparse.Namespace) -> dict:
             run([str(smoke), "v8", str(stage / "bin/scripting_v8.dll"),
                  str(ROOT / "tests/fixtures")],
                 cwd=stage / "bin", timeout=40, env=env, silent=True)
+        else:
+            # The root-bin launcher/private-Qt contract applies to every Release,
+            # even if no separate V8 runtime has been selected.
+            isolated = isolate_qt_runtime(stage)
+            if isolated.get("layout") != "process-isolated":
+                raise DistError("Qt process isolation failed")
         plugins, defaults = parse_registry(stage)
         version = str(plugins["engine_version"])
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.]+)?", version):

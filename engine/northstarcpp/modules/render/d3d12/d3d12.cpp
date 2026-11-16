@@ -1,8 +1,10 @@
 // NorthStarCpp D3D12 engine.render provider — stable C ABI 5.
+#include "../../shared/frame_memory_counters.hpp"
 #include "renderer_private.hpp"
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_device_api.h>
+#include <northstarcpp/render_pick_api.h>
 namespace {
 using namespace northstarcpp::module_provider;
 using Renderer = northstarcpp::render::d3d12::detail::RendererState;
@@ -42,6 +44,48 @@ int set_material_batches_v2(void* renderer,
 const NorthStarRenderMaterialsApiV2 materials_api_v2{
     NORTHSTARCPP_RENDER_MATERIALS_V2_ABI,set_material_batches_v2};
 
+const NorthStarRenderShaderReloadApiV2 shader_reload_v2{
+    NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_ABI,
+    sizeof(NorthStarRenderShaderReloadApiV2),
+    [](void* instance,const char* const* refs,std::uint32_t count)->int {
+        return guarded([&] {
+            if(!instance)throw std::invalid_argument("Null D3D12 shader renderer");
+            static_cast<Renderer*>(instance)->set_hot_material_references(refs,count);
+        });
+    },
+    [](void* instance,const char* ref,std::uint32_t stage,std::uint32_t format,
+       const std::uint8_t* bytes,std::uint32_t count)->int {
+        return guarded([&] {
+            if(!instance)throw std::invalid_argument("Null DXIL shader renderer");
+            static_cast<Renderer*>(instance)->queue_hot_shader(
+                ref,stage,format,bytes,count);
+        });
+    },
+    [](void* instance,const char* ref,NorthStarShaderReloadStatus* status)->int {
+        return guarded([&] {
+            if(!instance||!status||
+               !static_cast<Renderer*>(instance)->poll_hot_shader(ref,*status))
+                throw std::invalid_argument("Invalid DXIL shader reload status");
+        });
+    }};
+int set_film_look(void* renderer,NorthStarRenderPostFxSettings const* settings) {
+    return guarded([&] {
+        if(!renderer || !settings)
+            throw std::invalid_argument("D3D12 Film Look requires renderer and settings");
+        static_cast<Renderer*>(renderer)->set_film_look(*settings);
+    });
+}
+int get_film_look(void* renderer,NorthStarRenderPostFxSettings* settings) {
+    return guarded([&] {
+        if(!renderer || !settings ||
+           settings->struct_size<sizeof(NorthStarRenderPostFxSettings))
+            throw std::invalid_argument("D3D12 Film Look settings buffer too small");
+        *settings=static_cast<Renderer*>(renderer)->get_film_look();
+    });
+}
+const NorthStarRenderPostFxApi postfx_api{
+    NORTHSTARCPP_RENDER_POSTFX_ABI,sizeof(NorthStarRenderPostFxApi),
+    set_film_look,get_film_look};
 int read_memory(void* renderer,NorthStarRenderMemoryStats* result) {
     return guarded([&] {
         if(!renderer||!result)throw std::invalid_argument("Invalid D3D12 memory query");
@@ -82,6 +126,101 @@ int set_ui_rgba(void* renderer,const uint8_t* rgba,uint32_t w,
 }
 const NorthStarRenderUiApi ui_api{NORTHSTARCPP_RENDER_UI_ABI,
     sizeof(NorthStarRenderUiApi),set_ui_rgba};
+const NorthStarRenderUiEffectsApi ui_effects_api{
+    NORTHSTARCPP_RENDER_UI_EFFECTS_ABI,
+    sizeof(NorthStarRenderUiEffectsApi),
+    [](void* renderer,const NorthStarRenderUiHoverFx* fx)->int {
+        return guarded([&] {
+            if(!renderer)throw std::invalid_argument("Null D3D12 UI renderer");
+            static_cast<Renderer*>(renderer)->ui_hover_fx=
+                fx?*fx:NorthStarRenderUiHoverFx{};
+        });
+    }};
+// The game owns the complete HLSL UI implementation. Validate both stages
+// before installing; invalid project code never destroys the generic fallback.
+const NorthStarRenderUiShadersApi ui_shaders_api{
+    NORTHSTARCPP_RENDER_UI_SHADERS_ABI,sizeof(NorthStarRenderUiShadersApi),
+    [](void* renderer,const char* code,uint32_t length)->int {
+        return guarded([&] {
+            if(!renderer || (!code && length) || length>262144u)
+                throw std::invalid_argument("Invalid project UI HLSL");
+            auto* state=static_cast<Renderer*>(renderer);
+            std::string source=code?std::string(code,code+length):std::string{};
+            if(source.find('\0')!=std::string::npos)
+                throw std::invalid_argument("Embedded NUL in UI HLSL");
+            if(!source.empty()) {
+                for(auto stage:{"vs","ps"}) {
+                    Microsoft::WRL::ComPtr<ID3DBlob> compiled,error;
+                    HRESULT result=D3DCompile(source.data(),source.size(),nullptr,
+                        nullptr,nullptr,stage,
+                        std::strcmp(stage,"vs")==0?"vs_5_0":"ps_5_0",
+                        D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&compiled,&error);
+                    if(FAILED(result)) {
+                        std::string detail=error?
+                            std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                        error->GetBufferSize()):"compiler failed";
+                        throw std::runtime_error("Project UI HLSL: "+detail);
+                    }
+                }
+            }
+            if(source!=state->ui_shader_hlsl) {
+                state->ui_shader_hlsl=std::move(source);
+                state->ui_pso.Reset();
+            }
+        });
+    },nullptr};
+int read_cube_id(void* renderer,std::uint32_t x,std::uint32_t y,
+                 std::int32_t* index) {
+    return guarded([&] {
+        if(!renderer || !index)
+            throw std::invalid_argument("Invalid D3D12 GPU pick arguments");
+        *index=static_cast<Renderer*>(renderer)->pick_cube(x,y);
+    });
+}
+int pick_world_v2(void* renderer,NorthStarRenderPickVertex const* points,
+                  std::uint32_t count) {
+    return guarded([&]{if(!renderer)throw std::invalid_argument("D3D12 pick renderer missing");
+        static_cast<Renderer*>(renderer)->set_pick_triangles(points,count);});
+}
+int pick_cubes_v2(void* renderer,std::uint64_t const* ids,std::uint32_t count) {
+    return guarded([&]{if(!renderer)throw std::invalid_argument("D3D12 pick renderer missing");
+        static_cast<Renderer*>(renderer)->set_pick_cubes(ids,count);});
+}
+int pick_read_v2(void* renderer,std::uint32_t x,std::uint32_t y,
+                 std::uint64_t* out) {
+    return guarded([&]{if(!renderer||!out)throw std::invalid_argument("D3D12 pick result missing");
+        *out=static_cast<Renderer*>(renderer)->pick_entity(x,y);});
+}
+int async_pick_enqueue(void* renderer,NorthStarRenderPickAsyncRequest const* request) {
+    return guarded([&] {
+        if(!renderer || !request)
+            throw std::invalid_argument("Missing async GPU picking request");
+        if(!static_cast<Renderer*>(renderer)->enqueue_async_pick(*request))
+            throw std::runtime_error("Async GPU pick ring busy; retry after fence");
+    });
+}
+int async_pick_poll(void* renderer,std::uint64_t id,
+                    NorthStarRenderPickAsyncResult* result) {
+    return guarded([&] {
+        if(!renderer || !result)
+            throw std::invalid_argument("Missing async GPU picking result");
+        *result=static_cast<Renderer*>(renderer)->poll_async_pick(id);
+    });
+}
+int async_pick_invalidate(void* renderer,std::uint64_t minGeneration) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Missing async GPU picker");
+        static_cast<Renderer*>(renderer)->invalidate_async_pick(minGeneration);
+    });
+}
+const NorthStarRenderPickAsyncApi pick_async_api{
+    NORTHSTARCPP_RENDER_PICK_ASYNC_ABI,sizeof(NorthStarRenderPickAsyncApi),
+    async_pick_enqueue,async_pick_poll,async_pick_invalidate};
+const NorthStarRenderPickApiV2 pick_api_v2{
+    NORTHSTARCPP_RENDER_PICK_V2_ABI,sizeof(NorthStarRenderPickApiV2),
+    pick_world_v2,pick_cubes_v2,pick_read_v2};
+const NorthStarRenderPickApi pick_api{
+    NORTHSTARCPP_RENDER_PICK_ABI,sizeof(NorthStarRenderPickApi),read_cube_id};
 const NorthStarRenderApi api{create,destroy,draw,set_sky};
 const NorthStarRenderTrianglesApi triangles_api{
     NORTHSTARCPP_RENDER_TRIANGLES_ABI,set_triangles};
@@ -136,6 +275,69 @@ const NorthStarModule module{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
 }
 extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarModule*
 northstar_module_query(uint32_t host,const char* capability,uint32_t version) {
+    if(version==NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI) {
+        auto const& api=northstarcpp::diagnostics::frame_memory::api;
+        static const NorthStarModule extension{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI,sizeof(api),&api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI,
+            sizeof(postfx_api),&postfx_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI,
+            sizeof(shader_reload_v2),&shader_reload_v2,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI,sizeof(pick_async_api),
+            &pick_async_api,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI,sizeof(pick_api_v2),
+            &pick_api_v2,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_PICK_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_PICK_MODULE_ABI,sizeof(pick_api),&pick_api,
+            last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_UI_SHADERS_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.0.0",
+            NORTHSTARCPP_RENDER_UI_SHADERS_MODULE_ABI,
+            sizeof(ui_shaders_api),&ui_shaders_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_UI_EFFECTS_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.0.0",
+            NORTHSTARCPP_RENDER_UI_EFFECTS_MODULE_ABI,sizeof(ui_effects_api),
+            &ui_effects_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_UI_MODULE_ABI) {
         static const NorthStarModule extension{
             sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,

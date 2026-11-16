@@ -68,7 +68,13 @@ void register_geometry_primitive_component() {
     std::call_once(once,[]{
         if(!register_scene_component_type({
             geometry_primitive_component,geometry_primitive_schema,
-            geometry_primitive_schema,validate_payload,nullptr}))
+            geometry_primitive_schema,validate_payload,nullptr,
+            {{"Kind",SceneComponentFieldKind::UInt32,0},
+             {"Shape",SceneComponentFieldKind::UInt32,4},
+             {"Major Radius",SceneComponentFieldKind::Float32,8},
+             {"Minor Radius",SceneComponentFieldKind::Float32,12},
+             {"Segments U",SceneComponentFieldKind::UInt32,16},
+             {"Segments V",SceneComponentFieldKind::UInt32,20}}}))
             throw std::runtime_error("Cannot register engine.geometry.primitive");
     });
 }

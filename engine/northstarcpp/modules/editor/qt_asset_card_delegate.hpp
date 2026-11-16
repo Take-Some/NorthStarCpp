@@ -15,6 +15,7 @@ inline constexpr int preview_image=Qt::UserRole+5;
 inline constexpr int title=Qt::UserRole+6;
 inline constexpr int subtitle=Qt::UserRole+7;
 inline constexpr int accent_color=Qt::UserRole+8;
+inline constexpr int git_status=Qt::UserRole+9;
 }
 class AssetCardDelegate final: public QStyledItemDelegate {
 public:

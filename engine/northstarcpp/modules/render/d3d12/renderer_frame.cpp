@@ -14,10 +14,11 @@ void RendererState::draw_translucent_materials(){
         auto base=material_srv_heap->GetGPUDescriptorHandleForHeapStart();
         for(UINT i=0;i<material_draws.size();++i) {
             auto const& draw=material_draws[i];
-            if(draw.blend_mode!=2 || !draw.variant_pipeline)continue;
+            if(draw.blend_mode!=2 || (!draw.variant_pipeline && !hot_pipeline(i)))continue;
             auto handle=base;
             handle.ptr+=UINT64(i*5)*material_descriptor_increment;
-            commands->SetPipelineState(draw.variant_pipeline.Get());
+            commands->SetPipelineState(hot_pipeline(i)?hot_pipeline(i):
+                                       draw.variant_pipeline.Get());
             commands->SetGraphicsRootConstantBufferView(1,
                 material_constant_gpu->GetGPUVirtualAddress()+UINT64(i)*256u);
             commands->SetGraphicsRootDescriptorTable(2,handle);
@@ -62,6 +63,24 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
                 camera_forward.z*camera_forward.z);
             camera_forward=camera_forward*(1.f/std::max(length,1.e-6f));
         }
+        // Camera-cut classification for velocity/TAA and eye exposure.
+        northstarcpp::render::TemporalCamera temporal_camera{};
+        temporal_camera.position={camera_eye.x,camera_eye.y,camera_eye.z};
+        temporal_camera.yaw=frame.camera_yaw;
+        temporal_camera.pitch=frame.camera_pitch;
+        temporal_camera.roll=frame.camera_override?frame.camera_roll:0.f;
+        temporal_camera.fov_y_degrees=fov*57.2957795f;
+        temporal_camera.near_clip=frame.camera_override?
+            frame.camera_near_clip:.1f;
+        temporal_camera.far_clip=frame.camera_override?
+            frame.camera_far_clip:250.f;
+        temporal_camera.width=width;temporal_camera.height=height;
+        temporal_camera.first_person=frame.camera_override||frame.first_person;
+        temporal_frame=temporal_tracker.begin(temporal_camera);
+        if(!temporal_frame.history_valid) {
+            exposure_history_valid=false;
+            exposure_frame_clock_valid=false;
+        }
         if(shadows_enabled) {
             std::array<float,16> vp{};
             std::memcpy(vp.data(),&matrix,sizeof(vp));
@@ -73,6 +92,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
                 frame.camera_override?frame.camera_far_clip:250.f,
                 sun_shadow_resolution);
         }
+        pick_cubes.clear();
         std::vector<Vertex> vertices;
         vertices.reserve(std::min<size_t>(capacity,frame.count*36u+84u+mesh_vertices.size()));
         if(!frame.first_person && !frame.camera_override)
@@ -131,6 +151,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
             }
             if(vertices.size()+36u+mesh_vertices.size()>capacity)
                 throw std::runtime_error("D3D12 transient vertex budget exceeded");
+            pick_cubes.push_back({c,i});
             cube(vertices,c,i==UINT(frame.selected));
         }
         if(vertices.size()+mesh_vertices.size()>capacity)
@@ -155,6 +176,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         // A deliberately conservative single frame in flight, safe for resizing
         // and transient CPU-side uploads; optimize once profiling is available.
         wait();
+        pump_hot_shaders();
         if(!vertices.empty())
             std::memcpy(vertex_data,vertices.data(),vertices.size()*sizeof(Vertex));
         std::memcpy(camera_data,&matrix,sizeof(matrix));
@@ -169,7 +191,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         D3D12ResourceStates states;
         states.seed(backs[index].Get(),D3D12_RESOURCE_STATE_PRESENT);
         states.seed(depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        if(has_deferred_geometry)for(auto& target:gbuffer)
+        if(has_deferred_geometry)for(auto& target:gbuffer)if(target)
             states.seed(target.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if(shadows_enabled)
             states.seed(sun_shadow_map.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -209,7 +231,16 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         // The backend-neutral graph compiles actual pass dependencies.
         // The selected GPU pass records directly into this D3D12 command list.
         // Resource-state transitions are owned by individual pass implementations.
-        static const auto frame_graph_plan=build_frame_graph().compile();
+        static const auto frame_graph_plans=[] {
+            std::array<northstarcpp::render::RenderGraphPlan,16> cache;
+            for(std::size_t flags=0;flags<cache.size();++flags)
+                cache[flags]=build_frame_graph(
+                    (flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0).compile();
+            return cache;
+        }();
+        const auto flags=(gbuffer_v2?1u:0u) | (bloom_enabled?2u:0u) |
+                         (hdr_enabled?4u:0u) | (postfx_enabled()?8u:0u);
+        auto const& frame_graph_plan=frame_graph_plans[flags];
         for(auto const& pass:frame_graph_plan.passes) {
             const auto stage=static_cast<FrameStage>(pass.id);
             apply_graph_resource_states(pass,context);
@@ -236,7 +267,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
             throw std::logic_error("Render Graph did not restore shadow SRV");
         if(has_deferred_geometry)
             for(auto& target:gbuffer)
-                if(states.state(target.Get())!=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+                if(target && states.state(target.Get())!=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
                     throw std::logic_error("Render Graph did not restore G-buffer SRV");
         if(postfx_enabled()) {
             if(states.state(scene_color.Get())!=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)

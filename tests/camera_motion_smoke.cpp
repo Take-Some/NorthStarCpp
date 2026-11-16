@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStar native camera motion, cut, collision and timing regression.
 // Standalone engine-owned implementation inspired by generic camera concepts;
 // no external game or proprietary runtime source is compiled or embedded.
@@ -87,7 +88,7 @@ int main() {
         occlusion.set_mode(CameraMode::third_person,0.f);
         t=player();
         Scene scene;
-        scene.objects.push_back({"Wall",{0.f,1.f,-1.5f},2.f,
+        qa::append(scene,{"Wall",{0.f,1.f,-1.5f},2.f,
                                   0xffffff,false,0.f});
         auto blocked=occlusion.update(1.f/60.f,t,&scene);
         require(blocked.position.z> -2.f && blocked.position.z<=0.f,
@@ -101,7 +102,7 @@ int main() {
             initial_release=occlusion.update(1.f/60.f,t,&scene);
         require(near(initial_release.position.z,-4.f,.002f),
                 "Camera collision hysteresis did not recover full radius");
-        scene.objects.push_back({"Wall",{0.f,1.f,-1.5f},2.f,
+        qa::append(scene,{"Wall",{0.f,1.f,-1.5f},2.f,
                                   0xffffff,false,0.f});
         auto blocked_again=occlusion.update(1.f/60.f,t,&scene);
         require(blocked_again.position.z> -2.f,

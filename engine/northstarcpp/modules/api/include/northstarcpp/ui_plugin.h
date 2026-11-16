@@ -155,6 +155,19 @@ typedef struct NorthStarUIRasterApi {
     int32_t (*pointer)(void* context, float x, float y, uint32_t phase);
 } NorthStarUIRasterApi;
 
+// Optional isolated-raster extension for GPU hover effects.
+// This does not change the established UI raster ABI.
+#define NORTHSTARCPP_UI_RASTER_LAYERS_ABI 4u
+#define NORTHSTARCPP_UI_RASTER_LAYERS_MODULE_ABI 0x55524c04u
+typedef struct NorthStarUIRasterLayersApi {
+    uint32_t size;
+    uint32_t flags;
+    // mode=1: render all except target; mode=2: only target.
+    int32_t (*draw_filtered_rgba)(void* context,uint8_t* pixels,
+        uint32_t stride,uint32_t width,uint32_t height,
+        NorthStarUIHandle target,uint32_t mode);
+} NorthStarUIRasterLayersApi;
+
 // Optional ABI 3: text input, IME composition, wheel and keyboard focus.
 // ABI 1 and raster ABI 2 retain their exact original layouts.
 #define NORTHSTARCPP_UI_INPUT_ABI 3u

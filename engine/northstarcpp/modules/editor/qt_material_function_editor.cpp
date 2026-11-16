@@ -22,7 +22,8 @@
 #include <QSaveFile>
 #include <QJsonParseError>
 #include <QSplitter>
-#include <QTextEdit>
+#include <QPlainTextEdit>
+#include "qt_text_asset_editor.hpp"
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <stdexcept>
@@ -151,11 +152,11 @@ int openMaterialFunctionEditor(
     tabs->setObjectName("materialFunctionEditorTabs");
     auto* graph=new MaterialGraphEditor({},tabs,root);
     graph->setObjectName("materialFunctionVisualGraph");
-    auto* source=new QTextEdit(tabs);
+    auto* source=text_assets::createSourceEditor(tabs,text_assets::Format::Json,false);
     source->setObjectName("materialFunctionSource");
-    source->setAcceptRichText(false);
+
     source->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    source->setLineWrapMode(QTextEdit::NoWrap);
+    source->setLineWrapMode(QPlainTextEdit::NoWrap);
     tabs->addTab(graph,"Visual Graph");
     tabs->addTab(source,"JSON Source");
     splitter->addWidget(tree);
@@ -214,7 +215,7 @@ int openMaterialFunctionEditor(
             item->setEnabled(false);
         setError("Cannot open Material Function: "+QString::fromUtf8(e.what()));
     }
-    QObject::connect(source,&QTextEdit::textChanged,&dialog,markDirty);
+    QObject::connect(source,&QPlainTextEdit::textChanged,&dialog,markDirty);
     QObject::connect(graph,&MaterialGraphEditor::graphChanged,&dialog,[&] {
         if(!synchronizing && loaded) {
             describe(tree,graph->functionDocument());

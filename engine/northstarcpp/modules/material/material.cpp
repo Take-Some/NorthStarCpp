@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
+#include <unordered_map>
 #include <stdexcept>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -159,22 +161,49 @@ MaterialImage decode_image_file(std::vector<std::uint8_t>& bytes) {
     return result;
 }
 #endif
-MaterialImage load_texture(AssetStore const& assets,std::string const& path) {
+struct MaterialLoadCache {
+    std::unordered_map<std::string,std::vector<shared_assets::Texture>> ytd;
+    std::size_t encoded_bytes=0;
+};
+// Optional transaction-local cache; no process-global asset state.
+MaterialImage load_texture(AssetStore const& assets,std::string const& path,
+                           MaterialLoadCache* cache=nullptr) {
     if(!safe(path))throw std::invalid_argument("Unsafe texture reference");
     if(path.find(".ytd")!=std::string::npos) {
         auto const at=path.find('@');
         auto const dict=at==std::string::npos?path:path.substr(0,at);
-        auto list=shared_assets::load_textures(assets,dict);
-        if(list.empty())throw std::runtime_error("Texture dictionary contains no entries");
+        std::vector<shared_assets::Texture> decoded;
+        std::vector<shared_assets::Texture> const* list=nullptr;
+        if(cache) {
+            auto found=cache->ytd.find(dict);
+            if(found!=cache->ytd.end())list=&found->second;
+        }
+        if(!list) {
+            decoded=shared_assets::load_textures(assets,dict);
+            if(cache && cache->ytd.size()<8) {
+                std::size_t bytes=0;
+                for(auto const& tex:decoded)bytes+=tex.data.size();
+                // A large native YTD can expand to hundreds of MiB.
+                // Cache within one material-loading transaction, never
+                // globally; the bounded 384-MiB budget includes BCn payloads.
+                constexpr std::size_t limit=384ull*1024ull*1024ull;
+                if(bytes<=limit && cache->encoded_bytes<=limit-bytes) {
+                    cache->encoded_bytes+=bytes;
+                    list=&cache->ytd.emplace(dict,std::move(decoded)).first->second;
+                }
+            }
+            if(!list)list=&decoded;
+        }
+        if(list->empty())throw std::runtime_error("Texture dictionary contains no entries");
         if(at!=std::string::npos) {
             auto const name=path.substr(at+1);
-            auto it=std::find_if(list.begin(),list.end(),[&](auto const& entry){
+            auto it=std::find_if(list->begin(),list->end(),[&](auto const& entry){
                 return entry.name==name;
             });
-            if(it==list.end())throw std::runtime_error("Texture dictionary entry not found");
+            if(it==list->end())throw std::runtime_error("Texture dictionary entry not found");
             return image_from_native(*it);
         }
-        return image_from_native(list.front());
+        return image_from_native(list->front());
     }
 #ifdef _WIN32
     if(assets.size(path)>32*1024*1024)
@@ -196,7 +225,8 @@ unsigned binding(std::string const& name) {
 }
 namespace {
 MaterialDefinition load_material_recursive(AssetStore const& assets,
-    std::string const& reference,std::unordered_set<std::string>& active,unsigned depth)
+    std::string const& reference,std::unordered_set<std::string>& active,
+    unsigned depth,MaterialLoadCache* cache)
 {
     if(depth>8 || !active.insert(reference).second)
         throw std::invalid_argument("Material instance inheritance cycle or depth exceeded");
@@ -230,7 +260,7 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
             std::string parent=doc.get<std::string>("parent");
             if(!safe(parent)||parent==reference)
                 throw std::invalid_argument("Unsafe Material Instance parent");
-            result=load_material_recursive(assets,parent,active,depth+1);
+            result=load_material_recursive(assets,parent,active,depth+1,cache);
             auto over=doc.get_child_optional("overrides");
             if(over)attributes=&*over;
         }
@@ -293,6 +323,12 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
             native=std::move(list.front());
         }
         result.unlit=native.shader=="unlit";
+        result.fragment_shader_asset=native.fragment_shader_asset;
+        result.vertex_shader_asset=native.vertex_shader_asset;
+        result.gbuffer_shader_asset=native.gbuffer_shader_asset;
+        result.vertex_hlsl_asset=native.vertex_hlsl_asset;
+        result.fragment_hlsl_asset=native.fragment_hlsl_asset;
+        result.gbuffer_hlsl_asset=native.gbuffer_hlsl_asset;
         if(!native.graph_source.empty()) {
             result.graph_shader_defines=compile_material_graph_with_functions(
                 native.graph_source,[&assets](std::string const& function_path) {
@@ -326,14 +362,26 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
     }
     for(unsigned i=0;i<5;++i)
         if(!refs[i].empty())
-            result.textures[i]=load_texture(assets,refs[i]);
+            result.textures[i]=load_texture(assets,refs[i],cache);
     return result;
 }
+}
+struct MaterialLoadSession::State {
+    AssetStore const& assets;
+    MaterialLoadCache cache;
+    explicit State(AssetStore const& source):assets(source){}
+};
+MaterialLoadSession::MaterialLoadSession(AssetStore const& source)
+    :state_(std::make_unique<State>(source)){}
+MaterialLoadSession::~MaterialLoadSession()=default;
+MaterialDefinition MaterialLoadSession::load(std::string const& reference) {
+    std::unordered_set<std::string> active;
+    return load_material_recursive(state_->assets,reference,active,0,&state_->cache);
 }
 MaterialDefinition load_material_definition(AssetStore const& assets,
                                             std::string const& reference)
 {
     std::unordered_set<std::string> active;
-    return load_material_recursive(assets,reference,active,0);
+    return load_material_recursive(assets,reference,active,0,nullptr);
 }
 } // namespace northstarcpp

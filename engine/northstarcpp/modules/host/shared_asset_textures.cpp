@@ -61,7 +61,7 @@ static std::vector<Texture> parse_texture_dictionary(
     using namespace detail;
     require(extension(path) == ".ytd", "Expected a .ytd texture dictionary");
     Bytes const body(file.body);
-    require(file.kind == 1 && body.size() >= 64 && body.magic(0, "NETD") &&
+    require((file.kind == 1 || file.kind == 5) && body.size() >= 64 && body.magic(0, "NETD") &&
         body.integer(4, 4) == 2 && body.integer(8, 4) == 64 &&
         body.integer(12, 4) == file.entries, "Unsupported NETD texture dictionary");
 

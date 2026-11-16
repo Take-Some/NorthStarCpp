@@ -2,6 +2,9 @@
 // highlights in popup QMenu rows and QMenuBar items for both UI themes.
 #include "qt_menu_theme.hpp"
 #include <QApplication>
+#include <QComboBox>
+#include <QAbstractItemView>
+#include <QPalette>
 #include <QColor>
 #include <QCoreApplication>
 #include <QImage>
@@ -12,6 +15,7 @@
 #include <QWidget>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 using namespace northstarcpp::editor;
@@ -41,6 +45,61 @@ static void hover(QWidget* widget,QPoint local) {
     widget->repaint();
     QCoreApplication::processEvents();
 }
+static double luminance(QColor const& color) {
+    auto component=[](double v) {
+        v/=255.0;
+        return v<=.04045?v/12.92:std::pow((v+.055)/1.055,2.4);
+    };
+    return .2126*component(color.red())+.7152*component(color.green())+
+           .0722*component(color.blue());
+}
+static double contrast(QColor const& a,QColor const& b) {
+    auto const x=luminance(a),y=luminance(b);
+    return (std::max(x,y)+.05)/(std::min(x,y)+.05);
+}
+static void checkCombo(QApplication& app,MenuTheme theme) {
+    auto const dark=theme==MenuTheme::Dark;
+    auto const foreground=QColor(dark?"#e1ecf7":"#233749");
+    auto const background=QColor(dark?"#1d2a3a":"#ffffff");
+    auto const selected=QColor(dark?"#386e98":"#1476a3");
+    auto const disabled=QColor(dark?"#a1b2c2":"#667889");
+    QComboBox combo;
+    combo.addItems({"Shaded (Proxy only)","Wireframe (Proxy)",
+                    "Shaded + Materials (Proxy)","Engine GPU + Materials"});
+    combo.setMinimumWidth(220);
+    combo.show();
+    QCoreApplication::processEvents();
+    combo.showPopup();
+    QCoreApplication::processEvents();
+    require(combo.view()->isVisible(),"Combo popup did not open");
+    auto const palette=combo.view()->palette();
+    require(palette.color(QPalette::Active,QPalette::Text)==foreground,
+            "Popup text is not themed (could render black on blue)");
+    require(palette.color(QPalette::Active,QPalette::Base)==background,
+            "Popup background is not themed");
+    require(palette.color(QPalette::Active,QPalette::Highlight)==selected,
+            "Popup selection highlight is not themed");
+    require(contrast(palette.color(QPalette::Disabled,QPalette::Text),background)>=4.5,
+            "Disabled popup text has no readable themed color");
+    require(contrast(foreground,background)>=4.5,
+            "Regular combo popup text contrast is below WCAG AA");
+    require(contrast(QColor("#ffffff"),selected)>=4.5,
+            "Selected combo popup text contrast is below WCAG AA");
+    require(contrast(disabled,background)>=4.5,
+            "Disabled combo popup text contrast is below WCAG AA");
+    // Check actual painted glyphs, not only QPalette/QSS declarations.
+    // The second row stays unselected while the first row is current.
+    auto const second=combo.view()->visualRect(combo.model()->index(1,0));
+    require(second.isValid(),"Combo popup second item has no geometry");
+    auto const rendered=combo.view()->viewport()->grab().toImage();
+    require(colorCount(rendered,second,foreground)>8,
+            "Combo popup did not paint readable themed text pixels");
+    combo.hidePopup();
+    combo.close();
+    std::printf("NorthStar combo popup %s: palette + contrast PASS\n",
+                dark?"dark":"light");
+}
+
 static void checkTheme(QApplication& app,MenuTheme theme) {
     // Project Browser installs a different light QWidget palette first.
     // The common menu theme must remain effective after that stylesheet.
@@ -131,6 +190,7 @@ static void checkTheme(QApplication& app,MenuTheme theme) {
     require(afterTop>10 && afterTop>beforeTop+8,
             "Menu bar hovered item not visibly highlighted");
     window.close();
+    checkCombo(app,theme);
     std::printf("NorthStar menu hover %s: context + menu bar PASS\n",
                 theme==MenuTheme::Dark?"dark":"light");
 }

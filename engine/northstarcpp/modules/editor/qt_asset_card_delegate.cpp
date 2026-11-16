@@ -112,6 +112,29 @@ void AssetCardDelegate::paint(QPainter* painter,
         }
     }
 
+    // Source-control status is already cached in the item model; never run
+    // Git, stat() or filesystem operations inside the paint hot path.
+    QString const git=index.data(asset_card_roles::git_status).toString();
+    if(git.size()>=2 && git!="  ") {
+        bool const untracked=git=="??";
+        bool const staged=!untracked && git.at(0)!=' ';
+        QString const letter=untracked?"?":
+            git.contains('D')?"D":git.contains('R')?"R":
+            git.contains('A')?"A":git.contains('M')?"M":"!";
+        QColor const tone=untracked?QColor("#7f8fa4"):
+                          staged?QColor("#479f80"):QColor("#c4a358");
+        QRect marker(previewBox.right()-26,previewBox.top()+6,22,20);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(tone);
+        painter->drawRoundedRect(marker,4,4);
+        painter->setPen(QColor("#101824"));
+        QFont badgeFont=painter->font();
+        badgeFont.setBold(true);
+        badgeFont.setPixelSize(12);
+        painter->setFont(badgeFont);
+        painter->drawText(marker,Qt::AlignCenter,letter);
+    }
+
     QColor accent=qvariant_cast<QColor>(index.data(asset_card_roles::accent_color));
     if(!accent.isValid())accent=QColor("#718198");
     QRect const stripe(previewBox.left(),previewBox.bottom()+7,

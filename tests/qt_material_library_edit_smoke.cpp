@@ -39,6 +39,7 @@ static bool equivalent(native::Material const& a,native::Material const& b) {
     if(a.name!=b.name||a.shader!=b.shader||a.blend!=b.blend||
        a.two_sided!=b.two_sided||a.alpha_cutoff!=b.alpha_cutoff||
        a.graph_source!=b.graph_source||
+       a.fragment_shader_asset!=b.fragment_shader_asset||
        a.textures.size()!=b.textures.size()||
        a.parameters.size()!=b.parameters.size())return false;
     for(std::size_t i=0;i<a.textures.size();++i)
@@ -156,6 +157,12 @@ int main(int argc,char** argv) {
               "Custom imported YMAT shader was not preserved");
         sky["base_color"]="#aabbcc";
         sky["roughness"]=0.42;
+        sky["fragment_shader"]="assets/shaders/pbr_hot.frag";
+        sky["vertex_shader"]="assets/shaders/pbr_hot.vert";
+        sky["gbuffer_shader"]="assets/shaders/gbuffer_hot.frag";
+        sky["vertex_hlsl"]="assets/shaders/pbr_hot.vs.hlsl";
+        sky["fragment_hlsl"]="assets/shaders/pbr_hot.ps.hlsl";
+        sky["gbuffer_hlsl"]="assets/shaders/pbr_hot.gbuffer.hlsl";
         sky["graph"]=QJsonObject{
             {"nodes",QJsonArray{
                 QJsonObject{{"id","tint"},{"op","color"},
@@ -181,6 +188,14 @@ int main(int argc,char** argv) {
         for(std::size_t i=1;i<beforeXml.size();++i)
             check(equivalent(beforeXml[i],afterXml[i]),
                   "Nonselected world material changed after editing");
+        check(afterXml[0].vertex_shader_asset=="assets/shaders/pbr_hot.vert" &&
+              afterXml[0].gbuffer_shader_asset=="assets/shaders/gbuffer_hot.frag" &&
+              afterXml[0].vertex_hlsl_asset=="assets/shaders/pbr_hot.vs.hlsl" &&
+              afterXml[0].fragment_hlsl_asset=="assets/shaders/pbr_hot.ps.hlsl" &&
+              afterXml[0].gbuffer_hlsl_asset=="assets/shaders/pbr_hot.gbuffer.hlsl",
+              "Shader Reload v2 stage-specific YMAT links did not survive XML roundtrip");
+        check(afterXml[0].fragment_shader_asset=="assets/shaders/pbr_hot.frag",
+              "Linked GLSL fragment asset did not survive native XML YMAT");
         check(afterXml[0].shader==beforeXml[0].shader &&
               afterXml[0].textures.size()==beforeXml[0].textures.size(),
               "Selected world material lost custom shader or textures");
@@ -189,6 +204,9 @@ int main(int argc,char** argv) {
                 .find("NS_GRAPH_BASE")!=std::string::npos,
               "Native kind-4 YMAT Material Graph was not persisted for GPU runtime");
         auto loadedGraph=ma::load_descriptor(root,selected);
+        check(loadedGraph.value("fragment_shader").toString()==
+              "assets/shaders/pbr_hot.frag",
+              "Material Editor did not restore linked GLSL source");
         check(loadedGraph.value("graph").isObject(),
               "XML YMAT graph was not restored in Material Editor");
         auto post=native::read_ymat_library(updatedXml);
@@ -212,6 +230,13 @@ int main(int argc,char** argv) {
         catch(std::exception const&){rejected=true;}
         check(rejected && bytes(xmlTarget)==updatedXml,
               "Invalid YMAT entry identity overwrote source library");
+        auto invalidShader=loadedGraph;
+        invalidShader["fragment_shader"]="../outside.frag";
+        rejected=false;
+        try {ma::save_descriptor(root,selected,invalidShader);}
+        catch(std::exception const&){rejected=true;}
+        check(rejected && bytes(xmlTarget)==updatedXml,
+              "Unsafe GLSL link overwrote native YMAT library");
         std::cout<<"NEF8 kind30/4 material entry edit, sibling preservation, "
                     "custom parameters, textures and rollback: PASS\n";
         return 0;

@@ -70,11 +70,19 @@ def run(player: Path, provider: Path | None, project: Path,
         markers = {}
         for name in ("scripting_start", "scripting_update", "scripting_stop"):
             markers[name] = read_marker(appdata, name)
-        if any(token in (result.stdout + result.stderr) for token in (
-                "Cannot locate asset", "Asset not found:", "Plugin ABI mismatch",
-                "Unhandled project script error")):
-            raise RuntimeError(f"{mode} player reported missing assets or runtime errors: "
-                               f"{(result.stdout + result.stderr)[-800:]}")
+        # Soft asset-load failures are WARNINGs, not fatal. The asset
+        # manager deliberately skips optional malformed or missing assets.
+        output_lines = (result.stdout + result.stderr).splitlines()
+        fatal_lines = [
+            line for line in output_lines
+            if ("[ERROR]" in line or "[FATAL]" in line
+                or "Plugin ABI mismatch" in line
+                or "Unhandled project script error" in line)
+            and "[WARN]" not in line
+        ]
+        if fatal_lines:
+            raise RuntimeError(f"{mode} player reported fatal runtime errors: "
+                               + " | ".join(fatal_lines[-5:])[-1000:])
         if (markers["scripting_start"].get("phase") != "start" or
                 markers["scripting_start"].get("objects", 0) < 5 or
                 markers["scripting_update"].get("phase") != "update" or

@@ -25,9 +25,27 @@ void RendererState::record_bloom_pass(FramePassContext& context) {
             float const bloom_params[4]{.60f,bloom_enabled?1.f:0.f,
                 hdr_enabled?1.0f:.68f,fxaa_enabled?1.f:0.f};
             std::memcpy(fxaa_constant_data+16,bloom_params,sizeof(bloom_params));
+            // Time-based eye adaptation instead of frame-count smoothing.
+            auto const now=std::chrono::steady_clock::now();
+            float frame_dt=1.f/60.f;
+            if(exposure_frame_clock_valid)
+                frame_dt=std::chrono::duration<float>(
+                    now-exposure_frame_clock).count();
+            exposure_frame_clock=now;
+            exposure_frame_clock_valid=true;
             float const exposure_params[4]{exposure_history_valid?1.f:0.f,
-                0.12f,0.f,0.f};
+                std::clamp(frame_dt,0.f,.20f),1.4f,.35f};
             std::memcpy(fxaa_constant_data+32,exposure_params,sizeof(exposure_params));
+            // One 256-byte CBV allocation shared across FXAA and HDR shaders.
+            // Identity look is bitwise neutral; no effects are mandatory.
+            float const film_params[4]{
+                film_look.film_grain,film_look.vignette,
+                film_look.chromatic_pixels,film_look.saturation};
+            float const film_extra[4]{
+                film_look.contrast,film_look.exposure_ev,
+                hdr_enabled?1.f:0.f,float((film_frame++)%4096u)};
+            std::memcpy(fxaa_constant_data+48,film_params,sizeof(film_params));
+            std::memcpy(fxaa_constant_data+64,film_extra,sizeof(film_extra));
             ID3D12DescriptorHeap* heaps[]{scene_srv_heap.Get()};
             commands->SetDescriptorHeaps(1,heaps);
             commands->SetGraphicsRootSignature(fxaa_signature.Get());
@@ -121,7 +139,7 @@ void RendererState::record_composite_pass(FramePassContext& context) {
     auto& states=context.states;
     auto const index=context.index;
     auto const rtv=context.rtv;
-            if(!fxaa_enabled) {
+            if(!fxaa_enabled && !northstarcpp::render::active_postfx(film_look)) {
                 // Exact, unfiltered scene copy. Bloom is added in a later
                 // fullscreen overlay pass; no intermediate shader replaces
                 // Scene Color when anti-aliasing is explicitly disabled.
@@ -136,9 +154,11 @@ void RendererState::record_composite_pass(FramePassContext& context) {
                     D3D12_RESOURCE_STATE_RENDER_TARGET);
             }
             commands->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
-            if(fxaa_enabled || !hdr_enabled) {
+            if(fxaa_enabled || northstarcpp::render::active_postfx(film_look) ||
+               (bloom_enabled && !hdr_enabled)) {
                 commands->SetPipelineState(
-                    fxaa_enabled?fxaa_pipeline.Get():bloom_composite_pipeline.Get());
+                    (fxaa_enabled || northstarcpp::render::active_postfx(film_look))?
+                        fxaa_pipeline.Get():bloom_composite_pipeline.Get());
                 commands->DrawInstanced(3,1,0,0);
             }
     }

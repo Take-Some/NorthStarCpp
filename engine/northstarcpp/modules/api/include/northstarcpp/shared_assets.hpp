@@ -36,6 +36,13 @@ struct Material {
     // Authoring graph is an optional native YMAT kind-30 payload field.
     // This is a C++ DTO member, not a change to the engine plugin C ABI.
     std::string graph_source;
+    // Optional explicit link to an external fragment GLSL asset.
+    std::string fragment_shader_asset;
+    std::string vertex_shader_asset;
+    std::string gbuffer_shader_asset;
+    std::string vertex_hlsl_asset;
+    std::string fragment_hlsl_asset;
+    std::string gbuffer_hlsl_asset;
 };
 
 struct Vertex {

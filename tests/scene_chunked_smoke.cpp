@@ -20,6 +20,14 @@ std::uint32_t c_validator(void*,std::uint32_t version,
     return version==1 && bytes==2 &&
            std::string(static_cast<char const*>(data),bytes)=="OK" ? 1u : 0u;
 }
+std::uint32_t reflected_c_validator(void*,std::uint32_t version,
+                                   void const*,std::size_t bytes) {
+    return version==1 && bytes==8 ? 1u : 0u;
+}
+bool numeric_validator(void*,std::uint32_t version,
+                       void const*,std::size_t bytes) {
+    return version==1 && bytes==8;
+}
 bool validator(void*,std::uint32_t version,void const* data,std::size_t bytes) {
     return version==3 && bytes>=4 &&
         std::string(static_cast<char const*>(data),4)=="rain";
@@ -55,6 +63,87 @@ int main(int argc,char** argv) {
         api->unregister_type("com.kaylas.external");
         check(validate_scene_component_blob({0,"com.kaylas.external",1,"NO"}),
               "Unloaded C plugin must preserve its opaque component data");
+
+        // ABI-1 prefix remains stable while new DLL plugins can register
+        // value-owned fields through the optional size-guarded table tail.
+        check(api->size>=offsetof(NorthStarSceneComponentHostApi,
+                    register_type_reflected)+
+                    sizeof(api->register_type_reflected) &&
+              api->register_type_reflected,
+              "C plugin host metadata extension unavailable");
+        NorthStarSceneComponentFieldC external_fields[]{
+            {"External Count",NORTHSTARCPP_SCENE_COMPONENT_FIELD_U32,0},
+            {"External Scale",NORTHSTARCPP_SCENE_COMPONENT_FIELD_F32,4}};
+        check(api->register_type_reflected("com.kaylas.dll_reflected",1,1,
+                  reflected_c_validator,nullptr,external_fields,2),
+              "C plugin cannot publish typed property descriptors");
+        auto external_schema=scene_component_schema("com.kaylas.dll_reflected");
+        check(external_schema && external_schema->editor_fields.size()==2 &&
+              external_schema->editor_fields[0].label=="External Count" &&
+              external_schema->editor_fields[1].offset==4,
+              "DLL metadata was not copied into the editor registry");
+        SceneComponentBlob external_blob{
+            1,"com.kaylas.dll_reflected",1,std::string(8,'\0')};
+        check(write_scene_component_field(external_blob,
+                  external_schema->editor_fields[0],std::uint32_t(42)) &&
+              write_scene_component_field(external_blob,
+                  external_schema->editor_fields[1],.75f) &&
+              validate_scene_component_blob(external_blob),
+              "Typed DLL component could not be edited and validated");
+        NorthStarSceneComponentFieldC invalid_fields[]{
+            {"Overlap",NORTHSTARCPP_SCENE_COMPONENT_FIELD_U32,0},
+            {"Overlap 2",NORTHSTARCPP_SCENE_COMPONENT_FIELD_F32,0}};
+        check(!api->register_type_reflected("com.kaylas.bad_dll_reflection",
+                1,1,reflected_c_validator,nullptr,invalid_fields,2),
+              "DLL reflected fields accepted an overlapping offset");
+        api->unregister_type("com.kaylas.dll_reflected");
+        check(!scene_component_schema("com.kaylas.dll_reflected") &&
+              validate_scene_component_blob(external_blob),
+              "DLL unload must preserve opaque payload and remove metadata");
+
+        // Typed ECS property metadata is value-only, endian-defined and
+        // validated independently of any provider's executable code.
+        SceneComponentType typed{"com.kaylas.scalar",1,1,
+            numeric_validator,nullptr,
+            {{"Count",SceneComponentFieldKind::UInt32,0},
+             {"Weight",SceneComponentFieldKind::Float32,4}}};
+        check(register_scene_component_type(typed),
+              "Cannot register typed ECS schema");
+        auto schema=scene_component_schema(typed.type);
+        check(schema && schema->editor_fields.size()==2,
+              "Component property descriptors missing from registry");
+        auto listed=list_scene_component_schemas();
+        check(std::any_of(listed.begin(),listed.end(),[](auto const& item) {
+            return item.type=="com.kaylas.scalar" &&
+                   item.editor_fields.size()==2;
+        }),"Component schema listing discarded typed metadata");
+        SceneComponentBlob numeric{1,typed.type,1,std::string(8,'\0')};
+        check(write_scene_component_field(numeric,schema->editor_fields[0],
+                  std::uint32_t(235)) &&
+              write_scene_component_field(numeric,schema->editor_fields[1],
+                  3.25f),"Typed writer rejected valid metadata");
+        auto count=read_scene_component_field(numeric,schema->editor_fields[0]);
+        auto weight=read_scene_component_field(numeric,schema->editor_fields[1]);
+        check(count && std::get<std::uint32_t>(*count)==235 &&
+              weight && std::get<float>(*weight)==3.25f &&
+              validate_scene_component_blob(numeric),
+              "Typed ECS property read/write roundtrip failed");
+        auto unsupported=schema->editor_fields[1];
+        unsupported.offset=12;
+        check(!write_scene_component_field(numeric,unsupported,2.0f) &&
+              !read_scene_component_field(numeric,unsupported),
+              "Out-of-bounds typed ECS property was accepted");
+        check(!write_scene_component_field(numeric,schema->editor_fields[0],2.0f),
+              "Mismatched field scalar type was accepted");
+        auto duplicateFields=typed;
+        duplicateFields.type="com.kaylas.bad_field_layout";
+        duplicateFields.editor_fields[1].offset=0;
+        check(!register_scene_component_type(duplicateFields),
+              "Overlapping component metadata was accepted");
+        unregister_scene_component_type(typed.type);
+        check(numeric.payload.size()==8 &&
+              numeric.payload[0]==static_cast<char>(235),
+              "Unregistering reflected provider mutated scene data");
 
         Scene scene;
         scene.version=3;scene.name="Cell Streaming";

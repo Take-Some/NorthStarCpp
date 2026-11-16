@@ -8,6 +8,7 @@
 #include "../shared/shadow_hlsl.hpp"
 #include "../shared/editor_grid_hlsl.hpp"
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 namespace northstarcpp::render::d3d12::shader_compiler {
 using Microsoft::WRL::ComPtr;
@@ -37,6 +38,9 @@ struct GBufferOut {
     float4 albedo:SV_Target0;
     float4 normal_rough:SV_Target1;
     float4 emissive_metal:SV_Target2;
+#if defined(NS_GBUFFER_V2)
+    float4 auxiliary:SV_Target3;
+#endif
 };
 GBufferOut ps_gbuffer(P p) {
     GBufferOut outp;
@@ -46,12 +50,18 @@ GBufferOut ps_gbuffer(P p) {
     outp.albedo=float4(saturate(p.rgb),1);
     outp.normal_rough=float4(normal,0.7);
     outp.emissive_metal=float4(0,0,0,0);
+#if defined(NS_GBUFFER_V2)
+    outp.auxiliary=float4(1,0,0,0);
+#endif
     return outp;
 }
 )";
     ComPtr<ID3DBlob> binary,errors;
-    auto hr=D3DCompile(code,sizeof(code)-1,"NorthStar D3D12",nullptr,nullptr,
-        entry,entry[0]=='v'?"vs_5_0":"ps_5_0",
+    bool const extended=std::strcmp(entry,"ps_gbuffer_v2")==0;
+    D3D_SHADER_MACRO definitions[2]{{"NS_GBUFFER_V2","1"},{nullptr,nullptr}};
+    auto hr=D3DCompile(code,sizeof(code)-1,"NorthStar D3D12",
+        extended?definitions:nullptr,nullptr,
+        extended?"ps_gbuffer":entry,entry[0]=='v'?"vs_5_0":"ps_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS,0,&binary,&errors);
     if(FAILED(hr)&&errors)
         throw std::runtime_error(static_cast<const char*>(errors->GetBufferPointer()));

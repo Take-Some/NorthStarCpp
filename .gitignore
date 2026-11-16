@@ -9,8 +9,12 @@ __pycache__/
 # Reproducible release artifacts
 dist/
 distributable/
+Projects/
 
 # Locally downloaded V8 SDK/source artifacts (large, unaudited for release).
 # Versions, source URLs and SHA256 hashes are documented in docs/.
 /sdk/vendor/v8/*-windows-x64-msvc/
 /sdk/vendor/sources/v8-15.8.*/
+
+# Local QA build directories (not source assets)
+/_qa_*/

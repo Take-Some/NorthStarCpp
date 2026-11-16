@@ -124,6 +124,12 @@ QJsonObject material_descriptor(shared_assets::Material const& source) {
         if(auto key=texture_field(slot);!key.isEmpty())doc[key]=ref;
     }
     doc["textures"]=allTextures;
+    doc["fragment_shader"]=QString::fromStdString(source.fragment_shader_asset);
+    doc["vertex_shader"]=QString::fromStdString(source.vertex_shader_asset);
+    doc["gbuffer_shader"]=QString::fromStdString(source.gbuffer_shader_asset);
+    doc["vertex_hlsl"]=QString::fromStdString(source.vertex_hlsl_asset);
+    doc["fragment_hlsl"]=QString::fromStdString(source.fragment_hlsl_asset);
+    doc["gbuffer_hlsl"]=QString::fromStdString(source.gbuffer_hlsl_asset);
     if(!source.graph_source.empty()) {
         QJsonParseError error{};
         auto graph=QJsonDocument::fromJson(
@@ -264,7 +270,7 @@ QByteArray patch_xml(QString const& document,QString const& name,
     auto newTextures=index(textures(edited),"slot");
     QSet<QString> visitedParams,visitedTextures;
     bool active=false,found=false,hasSurface=false,hasParams=false;
-    bool hasTextures=false,hasGraph=false;
+    bool hasTextures=false,hasGraph=false,hasShaders=false;
     int depth=0;
     auto attrib=[&](QXmlStreamAttributes attributes,
                     QString const& key,QString const& value) {
@@ -288,6 +294,21 @@ QByteArray patch_xml(QString const& document,QString const& name,
         writer.writeAttribute("slot",t.value("slot").toString());
         writer.writeAttribute("ref",t.value("ref").toString());
     };
+    auto writeShaders=[&] {
+        static constexpr std::pair<const char*,const char*> keys[]{
+            {"vertex_shader","vertex"},{"fragment_shader","fragment"},
+            {"gbuffer_shader","gbuffer"},{"vertex_hlsl","vertex_hlsl"},
+            {"fragment_hlsl","fragment_hlsl"},{"gbuffer_hlsl","gbuffer_hlsl"}};
+        bool any=false;
+        for(auto const& item:keys)
+            any|=!edited.value(item.first).toString().isEmpty();
+        if(!any)return;
+        writer.writeEmptyElement("Shaders");
+        for(auto const& item:keys) {
+            auto path=edited.value(item.first).toString();
+            if(!path.isEmpty())writer.writeAttribute(item.second,path);
+        }
+    };
     auto addUnseenParams=[&] {
         for(auto it=newParameters.begin();it!=newParameters.end();++it)
             if(!visitedParams.contains(it.key()))param(it.value());
@@ -310,7 +331,7 @@ QByteArray patch_xml(QString const& document,QString const& name,
             if(element=="Material" && depth==1 &&
                attributes.value("name")==name) {
                 if(found)throw std::invalid_argument("Duplicate YMAT material entry");
-                found=active=true;hasSurface=hasParams=hasTextures=hasGraph=false;
+                found=active=true;hasSurface=hasParams=hasTextures=hasGraph=hasShaders=false;
                 visitedParams.clear();visitedTextures.clear();
                 attributes=attrib(attributes,"shader",
                     edited.value("shader").toString());
@@ -324,6 +345,12 @@ QByteArray patch_xml(QString const& document,QString const& name,
                     edited.value("two_sided").toBool()?"True":"False");
                 attributes=attrib(attributes,"alpha_cutoff",
                     QString::number(edited.value("alpha_cutoff").toDouble(),'g',9));
+            }
+            if(active && element=="Shaders") {
+                hasShaders=true;
+                reader.skipCurrentElement();
+                writeShaders();
+                continue;
             }
             if(active && element=="Params")hasParams=true;
             if(active && element=="Textures")hasTextures=true;
@@ -391,6 +418,7 @@ QByteArray patch_xml(QString const& document,QString const& name,
                     writer.writeStartElement("Textures");
                     addUnseenTextures();writer.writeEndElement();
                 }
+                if(!hasShaders)writeShaders();
                 if(!hasGraph && edited.value("graph").isObject())
                     writeMaterialGraphXml(writer,
                         edited.value("graph").toObject());

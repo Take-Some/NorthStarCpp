@@ -10,7 +10,7 @@
     "baseUrl": ".",
     "paths": {
       "@northstar/engine": [
-        "../../sharedAssets/scripts/types/northstar-engine.d.ts"
+        "../../engine/northstarcpp/resources/api/types/northstar-engine.d.ts"
       ]
     }
   },

@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 #include <northstarcpp/fps_game.hpp>
 #include <cmath>
 #include <iostream>
@@ -7,11 +8,11 @@ using namespace northstarcpp;
 Scene scene(bool wall)
 {
     Scene result;
-    result.objects.push_back({"Player", {0,0,0},1.5f,0xffffff,true,2.f});
-    result.objects.push_back({"Target Center", {0,1,6},1.3f,0xff4040,false,0.f});
-    result.objects.push_back({"Target Right", {4,1,6},1.3f,0xff4040,false,0.f});
+    qa::append(result,{"Player", {0,0,0},1.5f,0xffffff,true,2.f});
+    qa::append(result,{"Target Center", {0,1,6},1.3f,0xff4040,false,0.f});
+    qa::append(result,{"Target Right", {4,1,6},1.3f,0xff4040,false,0.f});
     if (wall)
-        result.objects.push_back({"Wall", {0,0,3},2.f,0x303030,false,0.f});
+        qa::append(result,{"Wall", {0,0,3},2.f,0x303030,false,0.f});
     return result;
 }
 int main()
@@ -56,7 +57,7 @@ int main()
 
         // Hazards damage health with an immunity interval; restart restores it.
         Scene hostile = scene(false);
-        hostile.objects.push_back({"Hazard Test", {0,0,0},1.f,0xe85832,false,0.f});
+        qa::append(hostile,{"Hazard Test", {0,0,0},1.f,0xe85832,false,0.f});
         FpsArena survivor(hostile);
         for (int i = 0; i < 5; ++i) {
             survivor.advance(0.20f, hostile);
@@ -69,7 +70,7 @@ int main()
 
         // Base blocks must not count as shootable targets.
         Scene with_base = scene(false);
-        with_base.objects.push_back({"Target Base Right", {0,0,5},1.f,0xf5f5f5,false,0.f});
+        qa::append(with_base,{"Target Base Right", {0,0,5},1.f,0xf5f5f5,false,0.f});
         FpsArena base_count(with_base);
         if (base_count.targets() != 2) return 20;
 
@@ -77,7 +78,7 @@ int main()
         if (blocked.fire(scene(true))) return 10;
 
         Scene no_player{};
-        no_player.objects.push_back({"Target 0", {0,1,5},1.f,0xff0000,false,0.f});
+        qa::append(no_player,{"Target 0", {0,1,5},1.f,0xff0000,false,0.f});
         try { FpsArena invalid(no_player); return 11; }
         catch (std::runtime_error const&) {}
         return 0;

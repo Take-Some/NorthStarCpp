@@ -8,8 +8,19 @@ extern "C" {
 #endif
 #define NORTHSTARCPP_RENDER_MATERIALS_ABI 1u
 #define NORTHSTARCPP_RENDER_MATERIALS_MODULE_ABI 0x524d5401u
-#define NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES 128u
-#define NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES 300000u
+// Complex, multi-part vehicle assets may use hundreds of distinct
+// material definitions. All providers allocate bounded descriptor pools.
+// Material batch count is bounded only by 32-bit descriptor indexing.
+// Vulkan/D3D12 allocate their descriptor pools for actual scene demand.
+#define NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES (UINT32_MAX / 5u)
+// 500k covers one high-resolution character and equipped geometry
+// (Abby YDD uses 377655 indexed material vertices); remains a bounded
+// per-frame GPU allocation across all providers.
+// This is the 32-bit D3D12 vertex buffer view addressability boundary,
+ // not a quality preset. The actual residency and allocations are dynamic.
+ // uint32_t vertex_count and 32-byte material vertices constrain one upload
+ // to < 4 GiB; hardware allocation failure remains a recoverable error.
+#define NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES (UINT32_MAX / 32u)
 #define NORTHSTARCPP_RENDER_MATERIAL_TEXTURE_SLOTS 5u
 typedef struct NorthStarMaterialVertex {
     float x,y,z;

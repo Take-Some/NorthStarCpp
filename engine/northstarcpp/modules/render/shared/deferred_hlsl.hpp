@@ -29,6 +29,7 @@ struct DynamicLight {
 StructuredBuffer<DynamicLight> dynamic_lights : register(t4);
 Buffer<uint> tiled_indices : register(t5);
 Texture2DArray<float> sun_shadow_depth : register(t6);
+Texture2D<float4> g_auxiliary : register(t7); // G-buffer v2 only
 struct FSOut { float4 position : SV_Position; };
 FSOut deferred_vs(uint vertex_id : SV_VertexID) {
     FSOut result;
@@ -76,11 +77,28 @@ float4 deferred_ps(FSOut input) : SV_Target {
     int2 pixel = int2(input.position.xy);
     float4 base = g_albedo.Load(int3(pixel, 0));
     // The G-buffer is transparent where the material pass did not rasterize.
+    if(int(hdr_settings.y+.5)==8)return float4(base.a.xxx,1);
     clip(base.a - 0.5);
     float4 normal_rough = g_normal.Load(int3(pixel, 0));
     float4 emission_metal = g_surface.Load(int3(pixel, 0));
+    float4 aux=hdr_settings.w>0.5?
+        g_auxiliary.Load(int3(pixel,0)):float4(1,0,0,0);
     float3 albedo = base.rgb;
     float3 emissive = emission_metal.rgb;
+    int debug_mode=int(hdr_settings.y+.5);
+    if(debug_mode==1)
+        return float4(hdr_settings.x>.5?albedo:encode_srgb(albedo),1);
+    if(debug_mode==2)
+        return float4(normalize(normal_rough.xyz)*.5+.5,1);
+    if(debug_mode==3)
+        return float4(abs(normal_rough.a).xxx,1);
+    if(debug_mode==4)
+        return float4(emission_metal.aaa,1);
+    if(debug_mode==9)return float4(aux.rrr,1);
+    if(debug_mode==10)return float4(aux.ggg,1);
+    if(debug_mode==11)return float4(aux.bbb,1);
+    if(debug_mode==5)
+        return float4(hdr_settings.x>.5?emissive:encode_srgb(emissive),1);
     if (normal_rough.a < 0)
         return float4(hdr_settings.x>0.5 ? albedo+emissive :
                       encode_srgb(albedo+emissive),1);
@@ -93,6 +111,13 @@ float4 deferred_ps(FSOut input) : SV_Target {
     float4 world_h = mul(float4(clipxy, depth, 1), inverse_vp);
     float3 world = world_h.xyz / max(abs(world_h.w), 1.e-6) *
                    (world_h.w < 0 ? -1 : 1);
+    if(debug_mode==6) {
+        float z=dot(world-camera_world.xyz,camera_forward_csm.xyz)/
+                max(1,hdr_settings.z);
+        // Perceptual display curve preserves nearby depth differences.
+        // The underlying depth/position reconstruction stays linear.
+        return float4(pow(saturate(z),.25).xxx,1);
+    }
     float3 light = normalize(float3(0.45, 0.82, 0.30));
     float3 view = normalize(camera_world.xyz - world);
     float3 half_v = normalize(light + view);
@@ -134,7 +159,7 @@ float4 deferred_ps(FSOut input) : SV_Target {
     // only, never to direct light or emissive. A separate denoised SSAO
     // render pass remains a later optimization.
     float ao=1.0;
-    if (ao_info.x > 0.5) {
+    if (ao_info.x > 0.5 || debug_mode==7) {
         static const int2 taps[8]={
             int2(-3,-1),int2(3,1),int2(-1,3),int2(1,-3),
             int2(-5,-4),int2(5,4),int2(-4,5),int2(4,-5)};
@@ -159,8 +184,13 @@ float4 deferred_ps(FSOut input) : SV_Target {
         }
         ao=saturate(1-occlusion*ao_info.z*0.125);
     }
+    if(debug_mode==7) return float4(ao.xxx,1);
     float3 lit = (diffuse + spec) * NoL * (3.0*sun_visibility) +
-        albedo * (.16*ao) + emissive;
+        albedo * (.16*ao*saturate(aux.r)) + emissive;
+    // Independent low-cost clearcoat/sheen terms from optional GBuffer v2;
+    // legacy materials resolve with aux=(1,0,0,0).
+    lit += saturate(aux.g)*0.08*NoL*sun_visibility*pow(1-NoV,5);
+    lit += saturate(aux.b)*albedo*0.06*pow(1-NoV,5);
     // Screen-space tiled forward+ style light list, evaluated in the
     // deferred resolve. Indices were conservatively binned on the CPU.
     // An overflow tile evaluates all sources rather than losing lights.

@@ -19,6 +19,10 @@ public:
     void requestPlayerClose();
 signals:
     void exitRequested();
+    void pauseRequested();
+    void resumeRequested();
+    void stepRequested();
+    void ejectRequested();
     void playerAttachedChanged(bool attached);
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -29,6 +33,7 @@ private:
     void synchronizePlayerWindow();
     QTimer sync_timer_;
     QLabel* placeholder_{};
+    QLabel* playing_from_editor_{};
     quint64 expected_pid_=0;
     quintptr player_window_=0;
 };

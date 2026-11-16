@@ -1,7 +1,10 @@
 #include "qt_editor_viewport.hpp"
 #include "../viewport/editor_grid.hpp"
 #include "editor_tools.hpp"
+#include "editor_visual_prefab.hpp"
 #include <northstarcpp/collision_service.hpp>
+#include <northstarcpp/collision_wireframe.hpp>
+#include <northstarcpp/player_character_components.hpp>
 #include <northstarcpp/geometry_service.hpp>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -13,6 +16,8 @@
 #include <QTimer>
 #include <QResizeEvent>
 #include <QCoreApplication>
+#include <QByteArray>
+#include <QElapsedTimer>
 #include <QPaintEngine>
 #include <QPolygonF>
 #include <QLineF>
@@ -27,6 +32,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <unordered_set>
 #include <stdexcept>
 #ifdef _WIN32
 #include "../viewport/viewport.hpp"
@@ -70,7 +76,9 @@ public:
         setAttribute(Qt::WA_NativeWindow,true);
         setAttribute(Qt::WA_PaintOnScreen,true);
         setAttribute(Qt::WA_NoSystemBackground,true);
-        setAcceptDrops(true);
+        // The parent viewport owns scene/asset drop dispatch. Native GPU
+        // child windows must not swallow OLE/Qt drag-and-drop events.
+        setAcceptDrops(false);
         setFocusPolicy(Qt::NoFocus);
     }
     QPaintEngine* paintEngine() const override {return nullptr;}
@@ -101,6 +109,42 @@ QtEditorViewport::QtEditorViewport(QWidget* parent):QWidget(parent) {
     gpu_timer_->setInterval(16);
     connect(gpu_timer_,&QTimer::timeout,this,[this] {
         if(gpu_dirty_ && isVisible())drawGpu();
+#ifdef _WIN32
+        if(gpuActive()) {
+            auto status=gpu_->renderer->poll_shader_reload();
+            for(auto const& message:status.completed)
+                emit shaderReloadResult(QString::fromStdString(message));
+            if(status.pending)gpu_dirty_=true;
+        }
+#endif
+#ifdef _WIN32
+        if(pending_gpu_pick_ && gpuActive()) {
+            try {
+                auto const response=gpu_->renderer->poll_actor_gpu_pick(
+                    *pending_gpu_pick_);
+                if(!response ||
+                   response->status!=northstarcpp::Viewport::PickStatus::Pending) {
+                    pending_gpu_pick_.reset();
+                    if(response &&
+                       response->status==northstarcpp::Viewport::PickStatus::Ready) {
+                        if(scene_) {
+                            auto const& composed=visual_preview_scene_ ?
+                                *visual_preview_scene_ : *scene_;
+                            selected_=visual_prefab::authoring_index(
+                                *scene_,composed,response->actor);
+                            emit selectionChanged(selected_);
+                        }
+                        update();
+                    }
+                    // STALE is intentionally discarded: do not select an
+                    // entity from an older camera/scene generation.
+                }
+            }catch(std::exception const& error) {
+                pending_gpu_pick_.reset();
+                emit gpuUnavailable(QString::fromUtf8(error.what()));
+            }
+        }
+#endif
     });
     fly_timer_=new QTimer(this);
     fly_timer_->setTimerType(Qt::PreciseTimer);
@@ -131,11 +175,18 @@ QString QtEditorViewport::gpuAssetSummary() const {
 #ifdef _WIN32
     if(gpuActive()) {
         auto const stats=gpu_->renderer->asset_stats();
-        return QString("Native meshes: %1 | Materials: %2 | Textured: %3 | "
+        auto label=QString("Native meshes: %1 | Materials: %2 | Textured: %3 | "
                        "Cube primitives: %4 | Unresolved: %5")
             .arg(stats.native_meshes).arg(stats.material_batches)
             .arg(stats.textured_material_batches).arg(stats.cube_proxies)
             .arg(stats.invalid_meshes);
+        auto const q=host_frame_profile_.summarize();
+        if(q.samples)
+            label+=QString(" | CPU draw p50/p95/p99: %1/%2/%3 ms (n=%4)")
+                .arg(q.p50_ms,0,'f',2).arg(q.p95_ms,0,'f',2)
+                .arg(q.p99_ms,0,'f',2).arg(q.samples);
+        if(!visual_prefab_warning_.isEmpty())label+=" | "+visual_prefab_warning_;
+        return label;
     }
 #endif
     return gpu_error_.isEmpty()?"GPU renderer is not active":gpu_error_;
@@ -148,7 +199,23 @@ void QtEditorViewport::setAssetSources(std::filesystem::path root) {
         catch(std::exception const& e) {emit gpuUnavailable(QString::fromUtf8(e.what()));}
     }
 #endif
+    refreshVisualPrefabPreview();
     gpu_dirty_=true;
+}
+std::size_t QtEditorViewport::queueCompiledShader(
+    QString const& path,QByteArray const& spirv) {
+#ifdef _WIN32
+    if(!gpuActive())throw std::runtime_error("GPU viewport is not active");
+    const auto* first=reinterpret_cast<std::uint8_t const*>(spirv.constData());
+    std::vector<std::uint8_t> bytes(first,first+spirv.size());
+    auto const accepted=gpu_->renderer->queue_fragment_shader_reload(
+        std::filesystem::path(path.toStdWString()),bytes);
+    if(accepted)gpu_dirty_=true;
+    return accepted;
+#else
+    (void)path;(void)spirv;
+    throw std::runtime_error("Shader hot reload requires a native GPU viewport");
+#endif
 }
 void QtEditorViewport::ensureGpu() {
 #ifdef _WIN32
@@ -160,6 +227,7 @@ void QtEditorViewport::ensureGpu() {
         gpu_surface_->show();
     }
     if(!gpu_) {
+        host_frame_profile_.clear();
         auto renderer=std::make_unique<GpuState>(gpu_surface_->winId());
         if(!asset_root_.empty())
             renderer->renderer->set_asset_sources(asset_root_);
@@ -182,6 +250,7 @@ void QtEditorViewport::drawGpu() {
         northstarcpp::ViewportGizmo gizmo;
         gizmo.mode=unsigned(gizmo_);
         gizmo.show_grid=show_grid_;
+        gizmo.show_collisions=show_collisions_;
         gizmo.grid_width=std::max(1,width());
         gizmo.grid_height=std::max(1,height());
         gizmo.active_axis=drag_axis_>=0?drag_axis_:hovered_axis_;
@@ -193,8 +262,12 @@ void QtEditorViewport::drawGpu() {
                 gizmo.axes[axis]=editor_tools::gizmo_axis(selected,
                     static_cast<editor_tools::GizmoAxis>(axis),gizmo_local_);
         }
-        gpu_->renderer->draw(*scene_,selected_,false,nullptr,nullptr,false,
+        QElapsedTimer cpuDrawTimer;
+        cpuDrawTimer.start();
+        auto const& renderScene=visual_preview_scene_?*visual_preview_scene_:*scene_;
+        gpu_->renderer->draw(renderScene,selected_,false,nullptr,nullptr,false,
                              &pose,nullptr,false,false,&gizmo);
+        host_frame_profile_.sample(double(cpuDrawTimer.nsecsElapsed())/1.0e6);
         gpu_dirty_=false;
         gpu_error_.clear();
     } catch(std::exception const& e) {
@@ -247,14 +320,42 @@ bool QtEditorViewport::eventFilter(QObject* object,QEvent* event) {
     return QWidget::eventFilter(object,event);
 }
 void QtEditorViewport::resizeEvent(QResizeEvent* event) {
+    pending_gpu_pick_.reset();
     QWidget::resizeEvent(event);
     if(gpu_surface_)gpu_surface_->setGeometry(rect());
     gpu_dirty_=true;
 }
 void QtEditorViewport::setScene(Scene const* scene) {
+    pending_gpu_pick_.reset();
     scene_=scene;
+    refreshVisualPrefabPreview();
     gpu_dirty_=true;
     update();
+}
+void QtEditorViewport::refreshVisualPrefabPreview() {
+    visual_preview_scene_.reset();
+    visual_prefab_warning_.clear();
+    if(!scene_ || asset_root_.empty() || scene_->version!=3)return;
+    // Rebuild on scene/asset root changes, not once per GPU frame.
+    // The cloned scene is only a render composition: gameplay stable IDs,
+    // physics and serialized project data are unaffected.
+    Scene candidate=*scene_;
+    bool any=false;
+    for(auto const& [entityId,ref]:visual_prefab::links(*scene_)) {
+        try {
+            auto templateScene=visual_prefab::load(asset_root_,ref);
+            visual_prefab::apply(candidate,entityId,templateScene);
+            any=true;
+        }catch(std::exception const& error) {
+            visual_prefab_warning_=QString("Visual prefab %1: %2")
+                .arg(QString::fromStdString(ref),
+                     QString::fromUtf8(error.what()));
+            // A missing visual prefab must not crash the GPU editor.
+            std::fprintf(stderr,"[WARN] [editor.prefab] %s: %s\n",
+                ref.c_str(),error.what());
+        }
+    }
+    if(any)visual_preview_scene_=std::move(candidate);
 }
 void QtEditorViewport::setCameraPose(CameraPose pose) {
     if(!std::isfinite(pose.position.x)||!std::isfinite(pose.position.y)||
@@ -299,6 +400,7 @@ void QtEditorViewport::setOrbitAngles(float yaw,float pitch) {
     if(orbit_mode_)updateOrbitCamera();
 }
 void QtEditorViewport::setSelected(int index) {
+    pending_gpu_pick_.reset();
     selected_=index;hovered_axis_=-1;gpu_dirty_=true;update();
 }
 GizmoScreenGeometry QtEditorViewport::gizmoGeometry() const {
@@ -321,6 +423,7 @@ void QtEditorViewport::setGizmoMode(int index) {
     update();
 }
 void QtEditorViewport::setDrawMode(DrawMode mode) {
+    pending_gpu_pick_.reset();
     if(int(mode)<0 || int(mode)>3)return;
     if(mode==DrawMode::EngineGpu) {
         try {
@@ -345,6 +448,10 @@ void QtEditorViewport::setDrawMode(DrawMode mode) {
 }
 void QtEditorViewport::setShowGrid(bool enabled) {
     show_grid_=enabled;gpu_dirty_=true;update();
+}
+void QtEditorViewport::setShowCollisions(bool enabled) {
+    if(show_collisions_==enabled)return;
+    show_collisions_=enabled;gpu_dirty_=true;update();
 }
 void QtEditorViewport::setFlySpeed(float value) {
     if(!std::isfinite(value))return;
@@ -501,6 +608,10 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
         }
     }
     if(scene_) {
+        std::unordered_set<std::uint64_t> authored_characters;
+        for(auto const& c:scene_->components)
+            if(c.type==player_character::pawn_type && c.entity_id)
+                authored_characters.insert(c.entity_id);
         struct Draw {float distance;std::size_t index;};
         std::vector<Draw> visible;
         visible.reserve(scene_->objects.size());
@@ -563,6 +674,30 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
                 screen[k]=projected(world[k]);
             }
             if(hasBehind)continue; // Never project geometry behind near plane.
+            if(authored_characters.count(object.node.id)) {
+                // A Character is an entity with components, not a colored cube.
+                // In proxy views draw a selection-safe capsule and heading.
+                auto const feet=projected(p);
+                auto const head=projected({p.x,p.y+std::max(1.6f,size),p.z});
+                float const h=std::max(18.f,float(std::abs(feet.y()-head.y())));
+                float const w=std::max(9.f,h*.24f);
+                QRectF shape(head.x()-w*.5f,head.y(),w,h);
+                bool const selected=static_cast<int>(item.index)==selected_;
+                painter.setBrush(QColor(53,144,180,selected?105:65));
+                painter.setPen(QPen(selected?QColor("#ffce68"):
+                    QColor("#64c7e9"),selected?2.4:1.6));
+                painter.drawRoundedRect(shape,w*.5f,w*.5f);
+                painter.drawEllipse(QPointF(head.x(),head.y()+w*.32f),
+                                    w*.22f,w*.22f);
+                painter.drawLine(QPointF(feet.x(),feet.y()),
+                    QPointF(feet.x()+w*.55f,feet.y()-w*.20f));
+                if(selected) {
+                    painter.setPen(QColor("#f5f0d9"));
+                    painter.drawText(head+QPointF(w,-10),
+                        QString::fromUtf8(object.name.c_str()));
+                }
+                continue;
+            }
             bool const chosen=selected_==static_cast<int>(item.index);
             QColor const color=QColor::fromRgb(object.color);
             if(draw_mode_!=DrawMode::Wireframe) {
@@ -621,6 +756,26 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
                                  QString::fromUtf8(object.name.c_str()));
             }
         }
+        if(show_collisions_) {
+            std::size_t shown=0;
+            auto wire=[&](std::size_t i) {
+                if(i>=scene_->objects.size()||shown>=80)return;
+                auto const& actor=scene_->objects[i];
+                if(!actor.node.visible)return;
+                ++shown;
+                painter.setPen(QPen(!actor.node.collision?QColor("#dc7075"):
+                    int(i)==selected_?QColor("#ffce68"):QColor("#62e5bb"),1.5));
+                collision_wireframe::draw(*scene_,actor,[&](Vector3 a,Vector3 b) {
+                    auto const start=camera_.project(a,float(width()),float(height()));
+                    auto const end=camera_.project(b,float(width()),float(height()));
+                    if(start&&end)painter.drawLine(QPointF(start->x,start->y),
+                                                  QPointF(end->x,end->y));
+                },int(i)==selected_,collision_hull_preview_);
+            };
+            if(selected_>=0)wire(static_cast<std::size_t>(selected_));
+            for(std::size_t i=0;i<scene_->objects.size()&&shown<80;++i)
+                if(int(i)!=selected_)wire(i);
+        }
         // Shared screen-space geometry ensures handles, hit targets and
         // GPU world-space overlay use the same camera-relative scale.
         paintGizmo(painter,gizmoGeometry(),gizmo_,drag_axis_,hovered_axis_);
@@ -635,7 +790,7 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     // transient status bar message, which was easy to miss.
     bool has_native_assets=false;
     if(scene_)for(auto const& actor:scene_->objects)
-        if(!actor.node.asset.empty() || actor.player) {
+        if(!actor.node.asset.empty() || (scene_ && player_character::has_pawn(*scene_,actor.node.id))) {
             has_native_assets=true;
             break;
         }
@@ -711,19 +866,85 @@ void QtEditorViewport::mousePressEvent(QMouseEvent* event) {
             return;
         }
     }
-    auto ray=camera_.screen_ray(float(event->position().x()),
-                                float(event->position().y()),
-                                float(width()),float(height()));
     std::optional<std::size_t> index;
-    try {
-        static northstarcpp::CollisionService collision;
-        static northstarcpp::GeometryService geometry;
-        index=editor_tools::pick_actor_geometry(*scene_,ray,collision,geometry);
-    } catch(std::exception const& exception) {
-        // Do not silently select an AABB when exact mesh selection fails:
-        // a disabled or invalid collision plugin must be diagnosed.
-        emit gpuUnavailable(QString::fromUtf8(exception.what()));
-        return;
+    bool used_gpu_id=false;
+#ifdef _WIN32
+    if(gpuActive() && event->position().x()>=0 &&
+       event->position().y()>=0) {
+        if(gpu_dirty_)drawGpu();
+        if(gpuActive()) {
+            try {
+                // Qt pointer events are logical pixels while the native
+                // Vulkan/D3D12 swapchain uses HWND client pixels. Scaling by
+                // the real client rect also handles noninteger DPI factors.
+                auto screen_x=event->position().x();
+                auto screen_y=event->position().y();
+                if(gpu_surface_) {
+                    RECT native{};
+                    if(GetClientRect(reinterpret_cast<HWND>(gpu_surface_->winId()),
+                                     &native) &&
+                       native.right>0 && native.bottom>0 &&
+                       gpu_surface_->width()>0 && gpu_surface_->height()>0) {
+                        screen_x*=double(native.right)/gpu_surface_->width();
+                        screen_y*=double(native.bottom)/gpu_surface_->height();
+                        screen_x=std::clamp(screen_x,0.,double(native.right-1));
+                        screen_y=std::clamp(screen_y,0.,double(native.bottom-1));
+                    }
+                }
+                if(gpu_->renderer->supports_async_gpu_pick()) {
+                    auto const request=gpu_->renderer->enqueue_actor_gpu_pick(
+                        static_cast<std::uint32_t>(screen_x),
+                        static_cast<std::uint32_t>(screen_y));
+                    if(request) {
+                        pending_gpu_pick_=*request;
+                        event->accept();
+                        return; // complete selection on the next GPU fence poll
+                    }
+                    // Bounded ring saturated or unsupported scene: exact CPU
+                    // mesh raycast, never the synchronous GPU readback.
+                } else {
+                    auto const picked=gpu_->renderer->pick_actor_gpu(
+                        static_cast<std::uint32_t>(screen_x),
+                        static_cast<std::uint32_t>(screen_y));
+                    if(picked) {
+                        used_gpu_id=true;
+                        if(scene_) {
+                            auto const& composed=visual_preview_scene_ ?
+                                *visual_preview_scene_ : *scene_;
+                            auto owner=visual_prefab::authoring_index(
+                                *scene_,composed,*picked);
+                            if(owner>=0)index=static_cast<std::size_t>(owner);
+                        }
+                    }
+                }
+            }catch(std::exception const& exception) {
+                emit gpuUnavailable(QString::fromUtf8(exception.what()));
+            }
+        }
+    }
+#endif
+    if(!used_gpu_id) {
+        auto ray=camera_.screen_ray(float(event->position().x()),
+                                    float(event->position().y()),
+                                    float(width()),float(height()));
+        try {
+            static northstarcpp::CollisionService collision;
+            static northstarcpp::GeometryService geometry;
+            auto const& composed=visual_preview_scene_ ?
+                *visual_preview_scene_ : *scene_;
+            auto const picked=editor_tools::pick_actor_geometry(
+                composed,ray,collision,geometry);
+            if(picked) {
+                auto owner=visual_prefab::authoring_index(
+                    *scene_,composed,static_cast<int>(*picked));
+                if(owner>=0)index=static_cast<std::size_t>(owner);
+            }
+        } catch(std::exception const& exception) {
+            // Exact mesh picking remains mandatory when an ID attachment is
+            // absent; do not silently fall back to approximate AABBs.
+            emit gpuUnavailable(QString::fromUtf8(exception.what()));
+            return;
+        }
     }
     selected_=index?static_cast<int>(*index):-1;
     emit selectionChanged(selected_);
@@ -863,22 +1084,32 @@ void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
     QWidget::focusOutEvent(event);
 }
 void QtEditorViewport::dragEnterEvent(QDragEnterEvent* event) {
-    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference"))
+    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference") ||
+       event->mimeData()->hasFormat("application/x-northstar-placeable-id"))
         event->acceptProposedAction();
     else event->ignore();
 }
 void QtEditorViewport::dragMoveEvent(QDragMoveEvent* event) {
-    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference"))
+    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference") ||
+       event->mimeData()->hasFormat("application/x-northstar-placeable-id"))
         event->acceptProposedAction();
     else event->ignore();
 }
 void QtEditorViewport::dropEvent(QDropEvent* event) {
-    if(!event->mimeData()->hasFormat("application/x-northstar-asset-reference")) {
+    auto const placeable=event->mimeData()->hasFormat(
+        "application/x-northstar-placeable-id");
+    if(!placeable &&
+       !event->mimeData()->hasFormat("application/x-northstar-asset-reference")) {
         event->ignore();return;
     }
-    auto const reference=QString::fromUtf8(
-        event->mimeData()->data("application/x-northstar-asset-reference")).trimmed();
-    if(reference.isEmpty()) {event->ignore();return;}
+    auto const reference=QString::fromUtf8(event->mimeData()->data(
+        placeable?"application/x-northstar-placeable-id":
+                  "application/x-northstar-asset-reference")).trimmed();
+    if(reference.isEmpty() || reference.size()>256 ||
+       reference.contains('/') || reference.contains('\\')) {
+        if(placeable) {event->ignore();return;}
+        if(reference.isEmpty()) {event->ignore();return;}
+    }
     auto const ray=camera_.screen_ray(float(event->position().x()),
         float(event->position().y()),float(width()),float(height()));
     auto point=groundAt(event->position().toPoint());
@@ -905,7 +1136,9 @@ void QtEditorViewport::dropEvent(QDropEvent* event) {
             event->ignore();return;
         }
     }
-    emit assetDropped(reference,QVector3D(point.x,point.y,point.z),target);
+    if(placeable)
+        emit placeableDropped(reference,QVector3D(point.x,point.y,point.z));
+    else emit assetDropped(reference,QVector3D(point.x,point.y,point.z),target);
     event->acceptProposedAction();
 }
 } // namespace northstarcpp::editor

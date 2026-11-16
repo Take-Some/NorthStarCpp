@@ -118,7 +118,7 @@
       ],
       "contract": "physics_plugin.h",
       "capability": "physics",
-      "role": "Bullet simulation and static collision residency"
+      "role": "Optional legacy Bullet simulation (disabled in default CMake builds; sources retained)"
     },
     {
       "id": "physics_jolt",

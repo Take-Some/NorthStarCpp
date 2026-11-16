@@ -13,6 +13,8 @@
 #include <QColor>
 #include <QSet>
 #include <memory>
+#include <functional>
+#include <QMap>
 #include <cstdint>
 
 class QComboBox;
@@ -21,14 +23,18 @@ class QLineEdit;
 class QListView;
 class QMenu;
 class QSlider;
+class QPushButton;
 class QSplitter;
 class QStandardItem;
 class QStandardItemModel;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QToolButton;
+class QTimer;
+class QFileSystemWatcher;
 
 namespace northstarcpp::editor {
+class AssetDependencyRegistry;
 class QtContentBrowser final : public QWidget {
     Q_OBJECT
 public:
@@ -46,6 +52,9 @@ public:
     // inside its dock rather than opening a second browser or an arbitrary tree.
     void setEditorDockMode(bool enabled);
     bool editorDockMode() const noexcept {return editor_dock_mode_;}
+    void setMutationPreflight(std::function<bool()> callback) {
+        mutation_preflight_=std::move(callback);
+    }
     QString contentRoot() const {return project_root_;}
     void focusSearch();
     // Browse to and highlight a project asset; deferred until indexing
@@ -55,6 +64,7 @@ public:
     QString selectedAsset() const;
     int recordCount() const;
     int visibleCount() const;
+    void setActiveCollection(QString const& name);
     // Returns an empty image until asynchronous preview generation completes.
     QImage cachedThumbnail(QString const& virtualPath) const;
     void setSearchText(QString const& search);
@@ -66,6 +76,10 @@ public:
 signals:
     void assetActivated(QString virtualPath);
     void assetSelected(QString virtualPath);
+    void textEditorRequested(QString absolutePath,bool sharedAsset);
+    // Keep additional dock instances on the same currently opened project.
+    void contentRootsChanged(QString projectAssets,QString engineAssets);
+    void assetReferencesRemapped(QMap<QString,QString> changes);
     // Double-click always requests the material editor, not a generic read-only card.
     void materialEditorRequested(QString materialReference);
 private:
@@ -80,11 +94,20 @@ private:
     bool editor_dock_mode_=false;
     bool catalog_ready_=false;
     quint64 generation_=0;
+    std::shared_ptr<AssetDependencyRegistry> registry_;
+    std::function<bool()> mutation_preflight_;
+    QFileSystemWatcher* change_watcher_{};
+    QTimer* change_debounce_{};
+    quint64 registry_generation_=0;
+    QHash<QString,QString> git_decorations_;
     QTreeWidget* folders_{};
     QListView* grid_{};
     QStandardItemModel* entries_{};
     QLineEdit* search_{};
     QComboBox* types_{};
+    QComboBox* collections_{};
+    QString active_collection_;
+    QComboBox* sort_{};
     QToolButton* back_{};
     QToolButton* forward_{};
     QToolButton* up_{};
@@ -99,6 +122,7 @@ private:
     QLabel* preview_icon_{};
     QLabel* preview_name_{};
     QLabel* preview_details_{};
+    QPushButton* audio_preview_{};
     QSplitter* splitter_{};
     QHash<QString,QIcon> icons_;
     QHash<QString,QImage> thumbs_;
@@ -108,6 +132,11 @@ private:
     QSet<QString> pending_;
     QThreadPool pool_;
     QStringList back_history_, forward_history_;
+    void scheduleDependencyIndex();
+    void configureFileWatching();
+    void refreshGitDecorations();
+    void renameMoveSelected();
+    void showDependencyGraph();
     void populateTree();
     void populateItems();
     void openFolder(QString const& folder,bool history=true);
@@ -118,11 +147,26 @@ private:
     void showMenu(QPoint pos);
     void createFolder();
     void importFiles();
+    void createNativeModelPrefab();
     void renameSelected();
     void duplicateSelected();
     void removeSelected();
     void revealSelected();
     void copyReference();
+    void toggleFavoriteSelected();
+    void refreshCollections();
+    void createCollection();
+    void createTeamCollection();
+    void publishLocalCollection();
+    void addSelectionToCollection(QString const& name);
+    void removeSelectionFromCollection(QString const& name);
+    void duplicateSelectedBatch();
+    void deleteSelectedBatch();
+    void copySelectedReferences();
+    void showGitStatus();
+    void showGitDiff();
+    void gitStage(bool stage);
+    QStringList selectedPaths() const;
     void updateBreadcrumb();
     QIcon iconFor(AssetKind kind) const;
     QIcon iconForDirectory(AssetRecord const& record) const;

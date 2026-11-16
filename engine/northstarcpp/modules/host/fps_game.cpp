@@ -1,6 +1,8 @@
 // NorthStarCpp FPS gameplay
 // Copyright (c) 2026 Kayla's Systems — Kayla Verner
 #include <northstarcpp/fps_game.hpp>
+#include <northstarcpp/scene_pawn.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include <northstarcpp/collision_queries.hpp>
 #include <algorithm>
 #include <cmath>
@@ -31,7 +33,7 @@ FpsArena::FpsArena(Scene const& scene, FpsTuning tuning, bool allow_empty_target
     bool found = false;
     for (std::size_t i = 0; i < scene.objects.size(); ++i) {
         auto const& o = scene.objects[i];
-        if (o.player) {
+        if (scene_pawn::is_local(scene,o)) {
             if (found) throw std::runtime_error("FPS arena requires exactly one player");
             player_ = i;
             found = true;

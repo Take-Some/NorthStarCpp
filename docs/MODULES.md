@@ -24,7 +24,7 @@ provider changes across all its contexts.
 | `engine.ecs` | `ecs_api.h`, ABI 2 | Flecs (external) |
 | `engine.physics` | `physics_plugin.h`, ABI 4 | Bullet or Jolt (external) |
 | `engine.render` | `render_plugin.h`, ABI 5 | D3D11 (external) |
-| `engine.audio` | `audio_plugin.h`, ABI 1 | WinMM (external) |
+| `engine.audio` | `audio_plugin.h`, ABI 1 + optional voices ABI 2 | WinMM (external; ABI 1) |
 | `engine.input` | `input_plugin.h`, ABI 1 | Win32/XInput (external) |
 | `engine.assets` | `assets_plugin.h`, ABI 1 and optional archive ABI 2 | Directory and PC FAT/DB VFS (external) |
 | `engine.logger` | `logger_plugin.h`, ABI 1 | MultiSink (external) |

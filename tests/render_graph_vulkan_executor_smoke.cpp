@@ -64,6 +64,35 @@ int main() {
                t.before==VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
                t.after==VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }));
+    recorded.clear();
+    images[output].discard_on_first_use=true;
+    record_vulkan_graph(cmd,mock_barrier,plan,images,[](PassId,VkCommandBuffer) {});
+    REQUIRE(recorded[1].image==images[output].image &&
+            recorded[1].before==VK_IMAGE_LAYOUT_UNDEFINED &&
+            recorded.back().after==VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    REQUIRE(plan.passes[0].transitions[1].before==ResourceAccess::Present);
+
+    RenderGraph wide;
+    Pass bulk{"bulk"};
+    std::vector<VulkanGraphImage> wide_images;
+    for(unsigned i=0;i<10;++i) {
+        auto id=wide.add_resource("image"+std::to_string(i));
+        bulk.writes.push_back(id);
+        bulk.usages.push_back({id,ResourceAccess::ColorAttachment});
+        wide_images.push_back({images[0].image,range});
+    }
+    auto const bulk_pass=wide.add_pass(bulk);
+    bulk.name="download";
+    bulk.after={bulk_pass};
+    for(auto& usage:bulk.usages)usage.access=ResourceAccess::CopyDestination;
+    wide.add_pass(bulk);
+    NorthStarFrameMemoryCounters counters{};
+    {
+        northstarcpp::diagnostics::frame_memory::Scope scope(&counters);
+        record_vulkan_graph(cmd,mock_barrier,wide.compile(),wide_images,[](PassId,VkCommandBuffer) {});
+    }
+    REQUIRE(counters.allocations==1);
+
     bool rejected=false;
     images[scene].image=VK_NULL_HANDLE;
     try {

@@ -7,6 +7,8 @@ cbuffer PostFx : register(b0) {
     float4 viewport_size;
     float4 bloom_params; // strength, bloom enabled, threshold, FXAA enabled
     float4 exposure_params; // history valid, temporal response, reserved
+    float4 film_params;     // same constant buffer layout as FXAA
+    float4 film_extra;      // contrast, exposure EV, HDR, frame
 };
 Texture2D<float4> hdr_scene : register(t0);
 Texture2D<float4> hdr_bloom : register(t1);
@@ -36,7 +38,10 @@ float4 exposure_ps(FSOut input):SV_Target {
     float exposure=target_exposure;
     if(exposure_params.x>0.5) {
         float history=exposure_map.Load(int3(0,0,0)).r;
-        exposure=lerp(history,target_exposure,saturate(exposure_params.y));
+        float tau=target_exposure>history ?
+            max(exposure_params.z,.05) : max(exposure_params.w,.05);
+        float response=1.0-exp(-max(exposure_params.y,0)/tau);
+        exposure=lerp(history,target_exposure,saturate(response));
     }
     return float4(exposure,avg_lum,0,1);
 }
@@ -54,7 +59,9 @@ float4 hdr_tonemap_ps(FSOut input):SV_Target {
         hdr_bloom.SampleLevel(scene_sampler,input.uv,0).rgb * bloom_params.x :
         float3(0,0,0);
     float exposure=exposure_map.Load(int3(0,0,0)).r;
-    return float4(linear_to_srgb(aces_fitted((scene+bloom)*exposure)),1);
+    // Exposure compensation is performed in HDR exactly once, before ACES.
+    return float4(linear_to_srgb(aces_fitted((scene+bloom)*exposure*
+                                              exp2(film_extra.y))),1);
 }
 )";
 }

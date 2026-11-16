@@ -8,6 +8,7 @@
 #include <northstarcpp/material.hpp>
 #include <cstddef>
 #include <functional>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,12 @@ using MaterialLoader=std::function<MaterialDefinition(std::string const&)>;
 // asset and visibility are applied exactly once.
 Composition compose(Scene const& prefab,DrawableLoader const& models,
                     MaterialLoader const& materials);
+
+// Mount the current asset root and the nearest sharedAssets directory once.
+// If the browser is already displaying sharedAssets, do not mount it twice.
+// Shared by prefab modal preview and asynchronous Content Browser thumbnails.
+void mount_preview_assets(AssetStore& assets,
+                          std::filesystem::path const& content_root);
 
 // Assets are loaded only through the currently active engine.assets contract.
 // No direct YDD/YDR parser, OBJ conversion, or physical file bypass.

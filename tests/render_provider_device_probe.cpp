@@ -6,18 +6,23 @@
 #include <northstarcpp/render_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_materials_api.h>
+#include <northstarcpp/render_shader_reload_api.h>
+#include <northstarcpp/render_postfx_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_skinning_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_timing_api.h>
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_device_api.h>
+#include <northstarcpp/render_pick_api.h>
 #include <northstarcpp/provider_identity.hpp>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <array>
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -72,9 +77,19 @@ struct Results {
     bool lights_supported=false,light_gpu_verified=false;
     bool skin_supported=false,skin_gpu_verified=false;
     bool surfaces_supported=false,surfaces_gpu_verified=false;
+    bool pick_supported=false,pick_verified=false;
+    bool pick_async_supported=false,pick_async_verified=false;
+    unsigned pick_async_samples=0;
+    bool shader_reload_v2=false,invalid_dxil_rejected=false;
+    bool postfx_api=false,postfx_gpu=false,postfx_invalid_rejected=false;
+    bool postfx_stress=false;
     bool full=false;
     double gpu_ms=0;
     std::uint64_t advertised=0;
+    unsigned stress_frames=0;
+    unsigned stress_gpu_samples=0;
+    double cpu_p50=0,cpu_p95=0,cpu_p99=0;
+    double gpu_p50=0,gpu_p95=0,gpu_p99=0;
 };
 void print(Results const& data) {
     auto b=[](bool v){return v?"true":"false";};
@@ -104,17 +119,56 @@ void print(Results const& data) {
         <<",\"surfaces_gpu_readback\":"<<b(data.surfaces_gpu_verified)
         <<",\"timing_api_available\":"<<b(data.timing_supported)
         <<",\"gpu_timestamp_valid\":"<<b(data.timing)
+        <<",\"gpu_pick_supported\":"<<b(data.pick_supported)
+        <<",\"gpu_pick_verified\":"<<b(data.pick_verified)
+        <<",\"gpu_pick_async_supported\":"<<b(data.pick_async_supported)
+        <<",\"gpu_pick_async_verified\":"<<b(data.pick_async_verified)
+        <<",\"gpu_pick_async_samples\":"<<data.pick_async_samples
         <<",\"gpu_frame_ms\":"<<data.gpu_ms
+        <<",\"shader_reload_v2\":"<<b(data.shader_reload_v2)
+        <<",\"invalid_dxil_rejected\":"<<b(data.invalid_dxil_rejected)
+        <<",\"postfx_api\":"<<b(data.postfx_api)
+        <<",\"postfx_gpu\":"<<b(data.postfx_gpu)
+        <<",\"postfx_invalid_rejected\":"<<b(data.postfx_invalid_rejected)
+        <<",\"postfx_stress\":"<<b(data.postfx_stress)
         <<",\"full_test\":"<<b(data.full)
+        <<",\"stress_frames\":"<<data.stress_frames
+        <<",\"stress_gpu_samples\":"<<data.stress_gpu_samples
+        <<",\"cpu_p50_ms\":"<<data.cpu_p50
+        <<",\"cpu_p95_ms\":"<<data.cpu_p95
+        <<",\"cpu_p99_ms\":"<<data.cpu_p99
+        <<",\"gpu_p50_ms\":"<<data.gpu_p50
+        <<",\"gpu_p95_ms\":"<<data.gpu_p95
+        <<",\"gpu_p99_ms\":"<<data.gpu_p99
         <<",\"declared_feature_mask\":"<<data.advertised<<"}\n";
     std::cout.flush();
 }
 }
 int main(int argc,char** argv) {
     Results result;
-    result.full=argc==3 && std::strcmp(argv[2],"--full")==0;
-    if(argc!=2 && !(argc==3&&result.full)) {
-        result.error="Usage: render_provider_gpu_probe <exact-dll-path> [--full]";
+    if(argc<2 || argc>5) {
+        result.error="Usage: render_provider_gpu_probe <DLL> [--full] [--stress=1000]";
+        print(result);return 2;
+    }
+    for(int i=2;i<argc;++i) {
+        if(std::strcmp(argv[i],"--postfx")==0){result.postfx_stress=true;continue;}
+        if(std::strcmp(argv[i],"--full")==0) {
+            result.full=true;continue;
+        }
+        if(std::strncmp(argv[i],"--stress=",9)==0) {
+            auto const* first=argv[i]+9;
+            auto const* last=first+std::strlen(first);
+            unsigned count=0;
+            auto parsed=std::from_chars(first,last,count);
+            if(first==last || parsed.ptr!=last || parsed.ec!=std::errc{} ||
+               count<100 || count>10000 || result.stress_frames) {
+                result.error="--stress expects 100..10000 frames";
+                print(result);return 2;
+            }
+            result.stress_frames=count;
+            continue;
+        }
+        result.error="Unknown GPU probe argument";
         print(result);return 2;
     }
     HMODULE dll=nullptr;
@@ -172,6 +226,19 @@ int main(int argc,char** argv) {
         auto const* graph_api=extension<NorthStarRenderMaterialsApiV2>(query,
             NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI,
             NORTHSTARCPP_RENDER_MATERIALS_V2_ABI);
+        auto const* hot_v2=extension<NorthStarRenderShaderReloadApiV2>(query,
+            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI,
+            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_ABI);
+        result.shader_reload_v2=hot_v2 &&
+            hot_v2->struct_size>=sizeof(NorthStarRenderShaderReloadApiV2) &&
+            hot_v2->set_material_references &&
+            hot_v2->queue_shader_binary && hot_v2->poll;
+        auto const* postfx=extension<NorthStarRenderPostFxApi>(query,
+            NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI,
+            NORTHSTARCPP_RENDER_POSTFX_ABI);
+        result.postfx_api=postfx &&
+            postfx->struct_size>=sizeof(NorthStarRenderPostFxApi) &&
+            postfx->set_settings && postfx->get_settings;
         auto const* timing_api=extension<NorthStarRenderTimingApi>(query,
             NORTHSTARCPP_RENDER_TIMING_MODULE_ABI,NORTHSTARCPP_RENDER_TIMING_ABI);
         auto const* lights_api=extension<NorthStarRenderLightsApi>(query,
@@ -187,6 +254,18 @@ int main(int argc,char** argv) {
         result.textures_supported=materials&&materials->set_batches;
         result.graph_supported=graph_api&&graph_api->set_batches_v2;
         result.timing_supported=timing_api&&timing_api->read;
+        auto const* pick_api=extension<NorthStarRenderPickApi>(query,
+            NORTHSTARCPP_RENDER_PICK_MODULE_ABI,NORTHSTARCPP_RENDER_PICK_ABI);
+        result.pick_supported=pick_api && pick_api->read_cube_id;
+        auto const* pick_async=extension<NorthStarRenderPickAsyncApi>(query,
+            NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI,
+            NORTHSTARCPP_RENDER_PICK_ASYNC_ABI);
+        result.pick_async_supported=pick_async &&
+            pick_async->enqueue && pick_async->poll &&
+            pick_async->invalidate_before;
+        auto const* pick_v2=extension<NorthStarRenderPickApiV2>(query,
+            NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI,
+            NORTHSTARCPP_RENDER_PICK_V2_ABI);
         result.lights_supported=lights_api&&lights_api->set_lights;
         result.skin_supported=skin_api&&skin_api->set_batches;
         result.surfaces_supported=surface_api&&surface_api->set_texture&&
@@ -205,6 +284,24 @@ int main(int argc,char** argv) {
         require(renderer!=nullptr,std::string("Hardware GPU initialization failed: ")+
              (base->last_error()?base->last_error():"unknown error"));
         result.created=true;
+        if(result.provider=="d3d12") {
+            require(result.shader_reload_v2,
+                    "D3D12 provider lacks Shader Reload ABI v2");
+            require(hot_v2->set_material_references(renderer,nullptr,0)!=0,
+                    "D3D12 cannot clear shader material references");
+            std::array<std::uint8_t,44> invalid{};
+            result.invalid_dxil_rejected=hot_v2->queue_shader_binary(
+                renderer,"not-bound.ymat@Dummy",NS_SHADER_PROGRAM_VERTEX,
+                NS_SHADER_BINARY_DXIL,invalid.data(),
+                static_cast<std::uint32_t>(invalid.size()))==0;
+            require(result.invalid_dxil_rejected,
+                    "D3D12 accepted invalid DXIL container");
+            NorthStarShaderReloadStatus reload{};
+            reload.struct_size=sizeof(reload);
+            require(hot_v2->poll(renderer,"not-bound.ymat@Dummy",&reload) &&
+                    reload.state==NS_SHADER_RELOAD_UNKNOWN,
+                    "D3D12 invalid DXIL rejection corrupted hot shader state");
+        }
         // Identity comes from the active renderer instance, NOT an unrelated
         // adapter enumeration that might choose a different physical GPU.
         if(device_api&&device_api->read) {
@@ -245,9 +342,53 @@ int main(int argc,char** argv) {
             require(triangles->set_triangles(renderer,verts,3),
                     "Uploading GPU triangle geometry failed");
         }
-        require(api->draw(renderer,&frame),std::string("GPU frame/readback failed: ")+
+        bool const initial_frame_ok=api->draw(renderer,&frame);
+        require(initial_frame_ok,std::string("GPU frame/readback failed: ")+
                 (base->last_error()?base->last_error():"unknown"));
         result.geometry=true;
+        if(result.provider=="d3d12" ||
+           (result.provider=="vulkan" && result.postfx_stress)) {
+            require(result.postfx_api,"D3D12 Filmic PostFX ABI missing");
+            NorthStarRenderPostFxSettings saved{};
+            saved.struct_size=sizeof(saved);
+            require(postfx->get_settings(renderer,&saved),
+                    "Unable to read Filmic PostFX settings");
+            require(saved.exposure_ev==0.f && saved.contrast==1.f &&
+                    saved.saturation==1.f && saved.vignette==0.f &&
+                    saved.chromatic_pixels==0.f && saved.film_grain==0.f,
+                    "Filmic PostFX must be neutral on startup");
+            auto active=saved;
+            active.exposure_ev=0.3f;
+            active.contrast=1.05f;
+            active.saturation=0.95f;
+            active.vignette=0.18f;
+            active.chromatic_pixels=result.provider=="d3d12"?1.f:0.f;
+            active.film_grain=0.025f;
+            require(postfx->set_settings(renderer,&active),
+                    "D3D12 rejected a valid filmic grading preset");
+            auto invalid=active;
+            invalid.chromatic_pixels=-1.f;
+            result.postfx_invalid_rejected=!postfx->set_settings(renderer,&invalid);
+            if(result.provider=="vulkan") {
+                auto unsupported=active;
+                unsupported.chromatic_pixels=1.f;
+                require(!postfx->set_settings(renderer,&unsupported),
+                    "Vulkan accepted chromatic aberration without a scene-color pass");
+            }
+            require(result.postfx_invalid_rejected,"Negative chromatic aberration accepted");
+            NorthStarRenderPostFxSettings readback{};
+            readback.struct_size=sizeof(readback);
+            require(postfx->get_settings(renderer,&readback) &&
+                    readback.chromatic_pixels==active.chromatic_pixels,
+                    "Invalid Filmic PostFX update changed the working preset");
+            require(api->draw(renderer,&frame),
+                    std::string("Filmic PostFX GPU readback failed: ")+
+                    (base->last_error()?base->last_error():"unknown"));
+            result.postfx_gpu=true;
+            if(!result.postfx_stress)
+                require(postfx->set_settings(renderer,&saved),
+                    "Could not restore default Filmic PostFX");
+        }
         if(result.timing_supported) {
             NorthStarRenderTimingStats gpu{};
             if(timing_api->read(renderer,&gpu) && gpu.valid &&
@@ -294,6 +435,27 @@ int main(int argc,char** argv) {
                 "Textured GPU UV readback failed: ")+
                 (base->last_error()?base->last_error():"unknown"));
             result.texture=true;
+            if(result.provider=="d3d12") {
+                // Reject a later batch after preparing a new texture. The
+                // previous draw stays live and the unfinished copy stays out
+                // of the cache, even when exactly those bytes are retried.
+                fill_texels();
+                pixels[0]^=1;
+                std::array<NorthStarMaterialBatch,2> invalid_submit{batch,batch};
+                invalid_submit[1].textures[0].data_bytes-=4;
+                require(!materials->set_batches(renderer,invalid_submit.data(),
+                    static_cast<std::uint32_t>(invalid_submit.size())),
+                    "D3D12 accepted an invalid later material texture");
+                require(api->draw(renderer,&frame),
+                    "D3D12 invalid material submission damaged the committed frame");
+                require(materials->set_batches(renderer,&batch,1),
+                    "D3D12 failed to retry the uncommitted texture");
+                require(materials->set_batches(renderer,&batch,1),
+                    "D3D12 rejected an identical material submission");
+                pixels.fill(0);
+                require(api->draw(renderer,&frame),
+                    "D3D12 texture retry or identical submission produced invalid pixels");
+            }
             if(result.lights_supported &&
                (result.provider=="vulkan"||result.provider=="d3d11")) {
                 NorthStarRenderLight invalid{};
@@ -526,6 +688,229 @@ int main(int argc,char** argv) {
             result.surfaces_gpu_verified=true;
             require(surface_api->set_cube_surfaces(renderer,nullptr,0),
                 "Vulkan world surface selectors clear failed");
+        }
+        if(result.stress_frames) {
+            // Real sequential driver submissions. A periodic readback verifies
+            // the rendered pixels; per-frame samples use provider GPU timestamps.
+            frame=NorthStarRenderFrame{};
+            frame.cubes=&cube;
+            frame.count=1;
+            frame.selected=-1;
+            frame.camera_fov_y_degrees=70.f;
+            frame.camera_near_clip=.1f;
+            frame.camera_far_clip=250.f;
+            std::vector<double> cpu_ms,gpu_ms;
+            cpu_ms.reserve(result.stress_frames);
+            gpu_ms.reserve(result.stress_frames);
+            for(unsigned i=0;i<result.stress_frames;++i) {
+                frame.verify_pixels=(i%128u)==0u?1u:0u;
+                auto const started=std::chrono::steady_clock::now();
+                require(api->draw(renderer,&frame),
+                    std::string("GPU endurance frame failed: ")+
+                    (base->last_error()?base->last_error():"unknown"));
+                auto const finished=std::chrono::steady_clock::now();
+                cpu_ms.push_back(
+                    std::chrono::duration<double,std::milli>(finished-started).count());
+                if(result.timing_supported) {
+                    NorthStarRenderTimingStats timing{};
+                    if(timing_api->read(renderer,&timing) && timing.valid &&
+                       std::isfinite(timing.total_gpu_ms) &&
+                       timing.total_gpu_ms>0)
+                        gpu_ms.push_back(timing.total_gpu_ms);
+                }
+            }
+            auto quantile=[](std::vector<double> values,double fraction) {
+                if(values.empty())return 0.0;
+                std::sort(values.begin(),values.end());
+                auto const position=fraction*(values.size()-1);
+                auto const low=static_cast<std::size_t>(position);
+                auto const high=std::min(low+1,values.size()-1);
+                return values[low]+(values[high]-values[low])*
+                    (position-double(low));
+            };
+            result.cpu_p50=quantile(cpu_ms,.50);
+            result.cpu_p95=quantile(cpu_ms,.95);
+            result.cpu_p99=quantile(cpu_ms,.99);
+            result.stress_gpu_samples=static_cast<unsigned>(gpu_ms.size());
+            result.gpu_p50=quantile(gpu_ms,.50);
+            result.gpu_p95=quantile(gpu_ms,.95);
+            result.gpu_p99=quantile(gpu_ms,.99);
+            if(result.timing_supported)
+                require(gpu_ms.size()>=result.stress_frames/2u,
+                    "GPU timestamp collection lost more than half of frames");
+        }
+        if(result.pick_supported) {
+            // Previous material/mesh/skin smoke stages intentionally retain
+            // provider state. Clear them before verifying cube-only object
+            // IDs; otherwise the Vulkan backend correctly refuses to
+            // produce a cube ID through an untagged imported mesh.
+            if(triangles)require(triangles->set_triangles(renderer,nullptr,0),
+                "Could not clear triangles before GPU pick");
+            if(materials)require(materials->set_batches(renderer,nullptr,0),
+                "Could not clear materials before GPU pick");
+            if(graph_api)require(graph_api->set_batches_v2(renderer,nullptr,0),
+                "Could not clear graph batches before GPU pick");
+            if(skin_api)require(skin_api->set_batches(renderer,nullptr,0),
+                "Could not clear skin batches before GPU pick");
+            // A dedicated GPU ID pass must report the submitted cube index
+            // and zero/none for background; never inspect lit RGB pixels.
+            NorthStarRenderCube target_cube{};
+            target_cube.x=0.f;
+            target_cube.y=-0.5f; // intersects center under both cube-origin conventions
+            target_cube.z=7.f;
+            target_cube.size=2.f;
+            target_cube.rgb=0x909090u;
+            target_cube.rotation[0]=target_cube.rotation[4]=
+                target_cube.rotation[8]=1.f;
+            NorthStarRenderFrame pick_frame{};
+            pick_frame.cubes=&target_cube;
+            pick_frame.count=1;
+            pick_frame.selected=-1;
+            pick_frame.camera_override=1;
+            pick_frame.camera_fov_y_degrees=70.f;
+            pick_frame.camera_near_clip=.1f;
+            pick_frame.camera_far_clip=100.f;
+            require(api->draw(renderer,&pick_frame),
+                "Could not render GPU ID picking test cube");
+            RECT area{};
+            require(GetClientRect(window,&area)!=0 &&
+                    area.right>4 && area.bottom>4,
+                    "GPU ID picking HWND dimensions are unavailable");
+            std::int32_t hit=-2;
+            auto const center_ok=pick_api->read_cube_id(renderer,
+                        static_cast<std::uint32_t>(area.right/2),
+                        static_cast<std::uint32_t>(area.bottom/2),&hit);
+            require(center_ok && hit==0,
+                    std::string("GPU ID attachment did not identify centered cube: hit=")+
+                        std::to_string(hit)+" error="+
+                        (base->last_error()?base->last_error():"unknown"));
+            hit=-2;
+            require(pick_api->read_cube_id(renderer,0,0,&hit) && hit==-1,
+                    "GPU ID attachment selected object on empty background");
+            // Verify nearest visible object wins, not CPU iteration order:
+            // cube 0 is behind cube 1 and both cover screen center.
+            NorthStarRenderCube overlapping[2]{target_cube,target_cube};
+            overlapping[1].z=5.f;
+            overlapping[1].rgb=0xccccccu;
+            pick_frame.cubes=overlapping;
+            pick_frame.count=2;
+            require(api->draw(renderer,&pick_frame),
+                "Could not render overlapping GPU ID cubes");
+            hit=-2;
+            auto const read_ok=pick_api->read_cube_id(renderer,
+                static_cast<std::uint32_t>(area.right/2),
+                static_cast<std::uint32_t>(area.bottom/2),&hit);
+            require(read_ok && hit==1,
+                    std::string("GPU ID depth test did not select nearer cube: ok=")+
+                    std::to_string(read_ok)+" hit="+std::to_string(hit)+
+                    " provider_error="+
+                    (base->last_error()?base->last_error():"unknown"));
+            result.pick_verified=true;
+            if(pick_v2) {
+                // Per-entity 64-bit IDs must survive two overlapping cubes
+                // and an independent, depth-tested UV/native mesh stream.
+                const std::uint64_t cube_ids[2]{0x100000004ull,0x100000005ull};
+                require(pick_v2->set_cube_entities(renderer,cube_ids,2),
+                    "Cannot submit 64-bit cube entity IDs");
+                require(api->draw(renderer,&pick_frame),
+                    "Could not draw ECS entity-ID frame");
+                std::uint64_t entity=0;
+                require(pick_v2->read_entity_id(renderer,
+                    static_cast<std::uint32_t>(area.right/2),
+                    static_cast<std::uint32_t>(area.bottom/2),&entity) &&
+                    entity==cube_ids[1],
+                    std::string("GPU ECS cube entity mismatch: ")+
+                        std::to_string(entity)+" error="+
+                        (base->last_error()?base->last_error():"unknown"));
+
+                NorthStarRenderPickVertex face[6]{
+                    {-1.6f,-1.5f,4.f,0,0x100001234ull},
+                    { 1.6f,-1.5f,4.f,0,0x100001234ull},
+                    { 0.f, 1.5f,4.f,0,0x100001234ull},
+                    {-1.6f,-1.5f,3.f,0,0x100004321ull},
+                    { 1.6f,-1.5f,3.f,0,0x100004321ull},
+                    { 0.f, 1.5f,3.f,0,0x100004321ull}
+                };
+                require(pick_v2->set_world_triangles(renderer,face,6),
+                    "Cannot submit mesh entity IDs");
+                entity=0;
+                require(pick_v2->read_entity_id(renderer,
+                    static_cast<std::uint32_t>(area.right/2),
+                    static_cast<std::uint32_t>(area.bottom/2),&entity) &&
+                    entity==0x100004321ull,
+                    std::string("GPU depth failed for mesh over cube: ")+
+                        std::to_string(entity)+" error="+
+                        (base->last_error()?base->last_error():"unknown"));
+                entity=~std::uint64_t(0);
+                require(pick_v2->read_entity_id(renderer,0,0,&entity) &&
+                        entity==0,"GPU picked mesh on background");
+                // Simulate a pose update: mesh moves away from center and
+                // GPU depth must reveal original nearest cube again.
+                for(auto& v:face)v.x+=8.f;
+                require(pick_v2->set_world_triangles(renderer,face,6),
+                    "Cannot submit updated animated mesh pose");
+                entity=0;
+                require(pick_v2->read_entity_id(renderer,
+                    static_cast<std::uint32_t>(area.right/2),
+                    static_cast<std::uint32_t>(area.bottom/2),&entity) &&
+                    entity==cube_ids[1],
+                    "GPU entity ID did not follow updated mesh pose");
+                if(result.pick_async_supported) {
+                    auto const center_x=static_cast<std::uint32_t>(area.right/2);
+                    auto const center_y=static_cast<std::uint32_t>(area.bottom/2);
+                    auto await_pick=[&](std::uint64_t request,
+                                        std::uint32_t expectedStatus,
+                                        std::uint64_t expectedId) {
+                        NorthStarRenderPickAsyncResult received{};
+                        for(unsigned iteration=0;iteration<2000;++iteration) {
+                            require(pick_async->poll(renderer,request,&received),
+                                "Nonblocking D3D12 GPU fence poll failed");
+                            if(received.status!=NORTHSTARCPP_PICK_PENDING)break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                        require(received.status==expectedStatus &&
+                                (expectedStatus!=NORTHSTARCPP_PICK_READY ||
+                                 received.entity_id==expectedId),
+                            std::string("GPU async picking result mismatch: status=")+
+                                std::to_string(received.status)+
+                                " entity="+std::to_string(received.entity_id)+
+                                " error="+(base->last_error()?
+                                    base->last_error():"unknown"));
+                        ++result.pick_async_samples;
+                    };
+                    auto submit=[&](std::uint64_t id,std::uint64_t generation) {
+                        NorthStarRenderPickAsyncRequest request{
+                            id,generation,center_x,center_y,0};
+                        require(pick_async->enqueue(renderer,&request),
+                            std::string("GPU async enqueue failed: ")+
+                            (base->last_error()?base->last_error():"unknown"));
+                    };
+                    submit(7001,10);
+                    await_pick(7001,NORTHSTARCPP_PICK_READY,cube_ids[1]);
+                    // Capture a newer material/animated pose in the next
+                    // submitted request; invalidate the earlier generation.
+                    for(auto& v:face)v.x-=8.f;
+                    require(pick_v2->set_world_triangles(renderer,face,6),
+                        "Could not update async GPU pick world vertices");
+                    submit(7002,11);
+                    require(pick_async->invalidate_before(renderer,12),
+                        "GPU pick invalidation failed");
+                    await_pick(7002,NORTHSTARCPP_PICK_STALE,0);
+                    submit(7003,12);
+                    await_pick(7003,NORTHSTARCPP_PICK_READY,0x100004321ull);
+                    // Repeated requests must recycle the same bounded
+                    // staging/attachment slots without blocking on the UI.
+                    for(std::uint64_t id=7004;id<7070;++id) {
+                        submit(id,12);
+                        await_pick(id,NORTHSTARCPP_PICK_READY,0x100004321ull);
+                    }
+                    result.pick_async_verified=true;
+                }
+                require(pick_v2->set_world_triangles(renderer,nullptr,0),
+                    "Cannot clear GPU mesh ID stream");
+                require(pick_v2->set_cube_entities(renderer,nullptr,0),
+                    "Cannot clear GPU cube ID stream");
+            }
         }
         close();
         print(result);return 0;

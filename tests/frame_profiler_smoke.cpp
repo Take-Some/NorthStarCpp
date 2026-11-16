@@ -47,6 +47,20 @@ int main()
             FrameProfileScope frame(&scoped, 0.016);
             frame.measure(FrameStage::scripting, [] { volatile int n = 10; (void)n; });
             frame.measure(FrameStage::animation, [] {});
+            frame.measure(FrameStage::rendering, [] {
+                std::vector<int> buffer;
+                const int input[]{1,2,3};
+                frame_memory::assign(buffer,input,input+3,
+                    &NorthStarFrameMemoryCounters::geometry_copy_bytes);
+                FrameProfileScope::measure_current(FrameStage::animation,[] {
+                    std::vector<float> palette;
+                    frame_memory::resize(palette,16);
+                });
+                frame_memory::assign(buffer,input,input+3,
+                    &NorthStarFrameMemoryCounters::geometry_copy_bytes);
+                frame_memory::device_allocated(8192);
+            });
+            require(frame_memory::counters==nullptr, "Frame stage leaked its thread counters");
             bool thrown = false;
             try {
                 frame.measure(FrameStage::rendering, [] {
@@ -60,6 +74,14 @@ int main()
             "Unclamped 16ms frame interval was not recorded");
         require(scoped.statistics_stage(FrameStage::rendering).maximum >= 0,
             "Renderer stage was lost on exception");
+        const auto render=scoped.memory_stage(FrameStage::rendering);
+        const auto animation=scoped.memory_stage(FrameStage::animation);
+        require(render.allocations==1 && render.allocation_bytes>=3*sizeof(int) &&
+                render.geometry_copy_bytes==6*sizeof(int) &&
+                render.device_allocations==1 && render.device_allocation_bytes==8192,
+            "Rendering memory accounting mismatch");
+        require(animation.allocations==1 && animation.allocation_bytes>=16*sizeof(float),
+            "Nested animation memory accounting mismatch");
         std::puts("frame profiler: PASS");
         return 0;
     } catch (std::exception const& error) {

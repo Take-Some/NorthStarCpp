@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp editor authoring regression
 #include "editor_tools.hpp"
 #include <northstarcpp/ecs.hpp>
@@ -23,7 +24,7 @@ int main()
 
     auto child=duplicate(scene,0,true);
     if (scene.objects[child].node.parent != scene.objects[0].node.id ||
-        scene.objects[child].player)
+        scene_pawn::is_pawn(scene,scene.objects[child]))
         return 2;
     auto sibling=duplicate(scene,0);
     if (scene.objects[sibling].node.parent!=0 ||

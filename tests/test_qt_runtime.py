@@ -39,9 +39,14 @@ class QtRuntimeValidationTests(unittest.TestCase):
     def test_qt_isolation_preserves_private_runtime_and_manifest(self):
         tools = ("northstarcpp_project_manager.exe",
                  "northstarcpp_asset_browser.exe",
-                 "northstarcpp_editor_qt.exe")
+                 "northstarcpp_editor_qt.exe",
+                 "northstarcpp_camera_timeline_editor.exe")
+        launcher_dir = self.root / "tools" / "qt_launchers"
+        launcher_dir.mkdir(parents=True)
         for name in tools:
             (self.root / "bin" / name).write_bytes(b"qt-tool-" + name.encode())
+            launcher = launcher_dir / (Path(name).stem + "_launcher.exe")
+            launcher.write_bytes(b"native-launcher-" + name.encode())
         concurrent = b"qt-concurrent"
         (self.root / "bin/Qt6Concurrent.dll").write_bytes(concurrent)
         self.files["bin/Qt6Concurrent.dll"] = {
@@ -58,8 +63,31 @@ class QtRuntimeValidationTests(unittest.TestCase):
         self.assertFalse((self.root / "bin/Qt6Core.dll").exists())
         for name in tools:
             self.assertTrue((self.root / "bin/qt_tools" / name).exists())
-            self.assertFalse((self.root / "bin" / name).exists())
+            self.assertTrue((self.root / "bin" / name).exists())
+            self.assertEqual((self.root / "bin" / name).read_bytes(),
+                             b"native-launcher-" + name.encode())
+        self.assertEqual(len(record["launchers"]), 4)
         self.assertTrue((self.root / "bin/qt_tools/platforms/qwindows.dll").is_file())
+
+    def test_qt_isolation_refuses_missing_launcher_without_mutation(self):
+        name = "northstarcpp_project_manager.exe"
+        (self.root / "bin" / name).write_bytes(b"real-qt")
+        with self.assertRaisesRegex(QtDeploymentError, "launcher"):
+            isolate_qt_runtime(self.root)
+        self.assertFalse((self.root / "bin/qt_tools").exists())
+        self.assertTrue((self.root / "bin" / name).is_file())
+
+    def test_isolated_launcher_tampering_is_detected(self):
+        name = "northstarcpp_project_manager.exe"
+        (self.root / "bin" / name).write_bytes(b"real-qt")
+        launcher_dir = self.root / "tools" / "qt_launchers"
+        launcher_dir.mkdir(parents=True)
+        (launcher_dir / "northstarcpp_project_manager_launcher.exe").write_bytes(
+            b"windows-launcher")
+        isolate_qt_runtime(self.root)
+        (self.root / "bin" / name).write_bytes(b"modified")
+        with self.assertRaises(QtDeploymentError):
+            verified_extras(self.root)
 
     def test_qt_isolation_refuses_tampered_input_without_mutation(self):
         (self.root / "bin/northstarcpp_project_manager.exe").write_bytes(b"fixture")

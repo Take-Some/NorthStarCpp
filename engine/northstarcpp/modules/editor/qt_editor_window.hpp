@@ -12,7 +12,9 @@
 #include <QImage>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <optional>
+#include <unordered_set>
 #include <cstddef>
 class QDockWidget;
 class QTreeWidget;
@@ -21,6 +23,7 @@ class QLineEdit;
 class QComboBox;
 class QPushButton;
 class QDoubleSpinBox;
+class QSpinBox;
 class QCheckBox;
 class QPlainTextEdit;
 class QAction;
@@ -30,6 +33,8 @@ namespace northstarcpp::editor {
 class QtContentBrowser;
 class QtEditorViewport;
 class QtPlaySurface;
+class QtPlaceActorsPanel;
+class QtTextAssetWorkspace;
 class QtEditorWindow final : public QMainWindow {
     Q_OBJECT
 public:
@@ -37,12 +42,21 @@ public:
     bool openScene(QString const& file);
     bool saveScene(QString file={});
     bool runSmoke(QString const& root);
+    bool runPlaceActorsSmoke();
     bool runGpuSmoke(QString const& root);
+    bool runVisualPrefabGpuSmoke(); // real native mesh, mouse ID picking, DPI
     bool runPlayerCheckSmoke(QString const& root);
     QString playerExecutable() const;
     void playGame();
     void playGameStandalone();
     void stopGame();
+    void pauseGame();
+    void resumeGame();
+    void stepGame();
+    void ejectGame();
+    void possessGame();
+    void updatePieControls();
+    bool sendPieCommand(wchar_t const* command);
     bool runEmbeddedPlaySmoke(QString const& playerExecutable);
     bool runEmbeddedRenderSmoke(QString const& playerExecutable,
                                 QString const& scene);
@@ -59,6 +73,11 @@ private:
     editor_tools::History history_;
     editor_tools::GizmoOptions gizmoOptions_;
     int selection_=-1;
+    std::unordered_set<std::uint64_t> selectedActorIds_;
+    // Explicit per-property user edits; never infer batch dirtiness from
+    // the primary actor when selected objects contain mixed values.
+    std::unordered_set<QDoubleSpinBox*> inspectorDirtyScalars_;
+    std::unordered_set<QCheckBox*> inspectorDirtyChecks_;
     bool dirty_=false, uiSync_=false;
     std::optional<Scene> gizmoBefore_;
     bool gizmoChanged_=false;
@@ -66,6 +85,8 @@ private:
     QElapsedTimer gizmoInspectorTimer_;
     QtEditorViewport* viewport_{};
     QtContentBrowser* browser_{};
+    QtTextAssetWorkspace* textWorkspace_{};
+    class QtContentDrawer* contentDrawer_{};
     QTreeWidget* outliner_{};
     QTreeWidget* dependencies_{};
     QTreeWidget* providers_{};
@@ -73,6 +94,8 @@ private:
     QLineEdit* outlinerSearch_{};
     QLineEdit* objectName_{};
     QLineEdit* assetPath_{};
+    QLineEdit* visualPrefabPath_{};
+    QPushButton* visualPrefabApply_{};
     QComboBox* materialPicker_{};
     QPushButton* materialEditButton_{};
     QStringList cachedMaterials_;
@@ -84,22 +107,43 @@ private:
     QDoubleSpinBox *px_{},*py_{},*pz_{},*size_{},*mass_{};
     QDoubleSpinBox *rx_{},*ry_{},*rz_{},*sx_{},*sy_{},*sz_{};
     QCheckBox *visible_{},*collision_{};
+    QComboBox* colliderShape_{};
+    QComboBox* colliderObjectType_{};
+    QSpinBox* colliderSplits_{};
+    QComboBox* colliderHullPreview_{};
+    bool collisionHullPreviewForcedProxy_=false;
+    std::array<QComboBox*,16> colliderResponses_{};
+    QComboBox* colliderPreset_{};
+    QPushButton* colliderSavePreset_{};
+    QPushButton* colliderEditChannels_{};
+    QPushButton* colliderGenerate_{};
+    QDoubleSpinBox *colliderX_{},*colliderY_{},*colliderZ_{};
+    QDoubleSpinBox *colliderOffsetX_{},*colliderOffsetY_{},*colliderOffsetZ_{};
     QPlainTextEdit* messages_{};
-    QDockWidget *outlinerDock_{},*detailsDock_{},*contentDock_{},*dependencyDock_{},*providerDock_{};
+    QDockWidget *outlinerDock_{},*detailsDock_{},*contentDock_{},*dependencyDock_{},*providerDock_{},*placeActorsDock_{};
+    QtPlaceActorsPanel* placeActors_{};
     QAction *undoAction_{},*redoAction_{},*saveAction_{};
     QAction *playAction_{},*stopAction_{};
+    QAction *pauseAction_{},*resumeAction_{},*stepAction_{},*ejectAction_{};
     QProcess* playerProcess_{};
     QtPlaySurface* playSurface_{};
     QByteArray playWorkspaceBefore_{};
     bool playMenuWasVisible_=false;
     bool playStatusWasVisible_=false;
     bool embeddedPlay_=false;
+    bool piePaused_=false;
+    bool pieEjected_=false;
     QString configuredPlayerPath_;
     QAction* exploreModeAction_{};
     QAction* fpsModeAction_{};
 
+    void wireAssetMutation(QtContentBrowser* browser);
+    QtContentBrowser* createContentBrowserTab(QString const& dockId,
+                                               bool activate=true);
     void choosePlayerExecutable();
     void launchGame(bool embedded);
+    void hideEditorChromeForPlay();
+    void restoreEditorChromeAfterPlay(bool clearSnapshot);
     QtPlaySurface* beginPlayOverlay();
     void endPlayOverlay();
     void setupUi();
@@ -111,12 +155,13 @@ private:
     void deleteComponent();
     void updateDependencies();
     void refreshProviderInspector();
-    void chooseObject(int index);
+    void chooseObject(int index,bool preserveMulti=false);
     void renameSelected();
     void duplicateSelected();
     void deleteSelected();
     void editScene(std::function<void(Scene&)> change,int selectedAfter=-2);
     void createActor(QString const& asset,QVector3D position);
+    void placeActorById(QString const& id,QVector3D position);
     void instantiatePrefab(QString const& reference,QVector3D position);
     void createProceduralActor(QString const& title,
                                NorthStarGeometryRequest request,
@@ -126,6 +171,7 @@ private:
     void queueMaterialPreviews(int nearIndex=1);
     void assignMaterial(int actor,QString const& reference);
     void openMaterialEditor(QString const& reference);
+    void openTextAsset(QString const& physical,bool sharedAsset);
     void handleAssetDrop(QString const& reference,QVector3D position,int hitActor);
     void undo();
     void redo();

@@ -43,6 +43,9 @@ void RendererState::apply_graph_resource_states(
         case FrameResource::GBufferMaterial:
             if(ctx.has_deferred_geometry)target=gbuffer[2].Get();
             break;
+        case FrameResource::GBufferAuxiliary:
+            if(gbuffer_v2 && ctx.has_deferred_geometry)target=gbuffer[3].Get();
+            break;
         case FrameResource::Depth:target=depth.Get();break;
         case FrameResource::Scene:
             // Without PostFX there is no scene SRV; scene color is the

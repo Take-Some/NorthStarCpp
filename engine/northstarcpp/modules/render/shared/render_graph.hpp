@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -93,74 +92,56 @@ public:
     }
 
     RenderGraphPlan compile() const {
-        const auto count = passes_.size();
-        std::vector<std::unordered_set<PassId>> dependencies(count);
-        std::vector<int> last_writer(resources_.size(), -1);
-        std::vector<std::vector<PassId>> readers(resources_.size());
-        for (PassId i = 0; i < count; ++i) {
-            auto const& pass = passes_[i];
-            for (PassId dep : pass.after) dependencies[i].insert(dep);
-            for (ResourceId r : pass.reads) {
-                if (last_writer[r] < 0 && !resources_[r].imported)
-                    throw std::logic_error("Read before first write: " + resources_[r].name);
-                if (last_writer[r] >= 0) dependencies[i].insert(static_cast<PassId>(last_writer[r]));
-                readers[r].push_back(i);
-            }
-            for (ResourceId r : pass.writes) {
-                if (last_writer[r] >= 0) dependencies[i].insert(static_cast<PassId>(last_writer[r]));
-                for (PassId reader : readers[r])
-                    if (reader != i) dependencies[i].insert(reader);
-                readers[r].clear();
-                last_writer[r] = static_cast<int>(i);
-            }
-            dependencies[i].erase(i);
-        }
-
+        struct ResourceState {
+            ResourceAccess access;
+            bool written = false;
+            bool previous_write = false;
+        };
         RenderGraphPlan plan;
+        plan.passes.reserve(passes_.size());
         plan.lifetimes.resize(resources_.size(), {-1,-1});
-        std::vector<ResourceAccess> access_state(resources_.size(), ResourceAccess::Undefined);
-        for(std::size_t i=0;i<resources_.size();++i)
-            access_state[i]=resources_[i].initial_access;
-        std::vector<bool> visited(count, false);
-        for (std::size_t scheduled = 0; scheduled < count; ++scheduled) {
-            PassId next = static_cast<PassId>(count);
-            for (PassId i = 0; i < count; ++i) {
-                if (visited[i]) continue;
-                bool ready = true;
-                for (auto dep : dependencies[i])
-                    if (!visited[dep]) { ready = false; break; }
-                if (ready) { next = i; break; }
+        std::vector<ResourceState> states;
+        states.reserve(resources_.size());
+        for (auto const& resource : resources_)
+            states.push_back({resource.initial_access});
+
+        // add_pass only accepts earlier explicit dependencies, and resource
+        // hazards also point to earlier passes. Smallest-ready-first therefore
+        // always produced declaration order, even for independent passes.
+        for (PassId id = 0; id < passes_.size(); ++id) {
+            auto const& pass = passes_[id];
+            // Validate reads against preceding passes, including resources
+            // that this pass also writes.
+            for (auto resource : pass.reads) {
+                if (!states[resource].written && !resources_[resource].imported)
+                    throw std::logic_error("Read before first write: " + resources_[resource].name);
             }
-            if (next == count) throw std::logic_error("Render graph dependency cycle");
-            visited[next] = true;
-            ScheduledPass compiled{next, {}};
-            auto const& pass = passes_[next];
-            std::unordered_set<ResourceId> touched;
-            for (auto r : pass.reads) touched.insert(r);
-            for (auto r : pass.writes) touched.insert(r);
-            for (auto r : touched) {
-                auto& life = plan.lifetimes[r];
-                if (life.first == -1) life.first = static_cast<int>(scheduled);
-                life.second = static_cast<int>(scheduled);
-                // Backend maps these hazards into D3D12 transitions or Vulkan barriers.
-                if (scheduled > 0) {
-                    for (auto const& previous : plan.passes) {
-                        auto const& prior = passes_[previous.id];
-                        const bool prior_write = std::find(prior.writes.begin(), prior.writes.end(), r) != prior.writes.end();
-                        const bool current_write = std::find(pass.writes.begin(), pass.writes.end(), r) != pass.writes.end();
-                        const bool prior_read = std::find(prior.reads.begin(), prior.reads.end(), r) != prior.reads.end();
-                        if (prior_write || (prior_read && current_write)) {
-                            compiled.barriers.push_back(r); break;
-                        }
-                    }
-                }
-            }
+
+            ScheduledPass compiled{id, {}, {}};
+            const auto scheduled = static_cast<int>(id);
+            auto record_use = [&](ResourceId resource, bool write) {
+                auto& life = plan.lifetimes[resource];
+                if (life.second == scheduled)
+                    return;
+                auto& state = states[resource];
+                if (life.first == -1)
+                    life.first = scheduled;
+                else if (state.previous_write || write)
+                    compiled.barriers.push_back(resource);
+                life.second = scheduled;
+                state.previous_write = write;
+                state.written |= write;
+            };
+            // A read/write resource has a single lifetime update and one
+            // barrier. Process writes first so the next pass sees a write.
+            for (auto resource : pass.writes) record_use(resource, true);
+            for (auto resource : pass.reads) record_use(resource, false);
             std::sort(compiled.barriers.begin(), compiled.barriers.end());
             for (auto const& usage : pass.usages) {
-                auto& state=access_state[usage.resource];
-                if (state!=usage.access) {
-                    compiled.transitions.push_back({usage.resource,state,usage.access});
-                    state=usage.access;
+                auto& state = states[usage.resource].access;
+                if (state != usage.access) {
+                    compiled.transitions.push_back({usage.resource, state, usage.access});
+                    state = usage.access;
                 }
             }
             plan.passes.push_back(std::move(compiled));

@@ -66,6 +66,7 @@ void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
                 "Vulkan world surface was requested before all 9 BCn textures became resident");
     }
     frame_vertices_.clear();
+    pick_cube_ranges_.assign(frame.count,{});
     frame_vertices_.reserve(scene_.size()+static_cast<std::size_t>(frame.count)*36);
     const float near_clip=frame.camera_near_clip>0.f?frame.camera_near_clip:.1f;
     const float far_clip=frame.camera_far_clip>near_clip?frame.camera_far_clip:250.f;
@@ -114,6 +115,7 @@ void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
     for(std::uint32_t i=0;i<frame.count;++i) {
         const auto& cube=frame.cubes[i];
         if(!std::isfinite(cube.size)||cube.size<=0.f)continue;
+        auto const cube_first=static_cast<std::uint32_t>(frame_vertices_.size());
         for(unsigned k=0;k<36;k+=3) {
             ColoredVertex vertices[3];
             bool visible=true;
@@ -130,6 +132,8 @@ void Renderer::collect_vertices(const NorthStarRenderFrame& frame) {
             }
             if(visible)frame_vertices_.insert(frame_vertices_.end(),vertices,vertices+3);
         }
+        pick_cube_ranges_[i]={cube_first,
+            static_cast<std::uint32_t>(frame_vertices_.size())-cube_first};
     }
     if(frame_vertices_.size()*sizeof(ColoredVertex)>max_vertex_bytes_)
         throw std::runtime_error("Vulkan vertex staging capacity exceeded");
@@ -194,7 +198,7 @@ void Renderer::record_opaque(VkCommandBuffer cmd,std::uint32_t image,
         // Draw opaque/masked before translucent irrespective of host order.
         for(unsigned pass=0;pass<2;++pass) {
             if(pass==0 && !skin_draws_.empty()) {
-                vkCmdBindVertexBuffers(cmd,0,1,&skin_output_,&offset);
+                vkCmdBindVertexBuffers(cmd,0,1,&skin_output_.handle,&offset);
                 for(const auto& skin:skin_draws_) {
                     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,
                                       skin.pipeline);
@@ -341,6 +345,11 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     if(!device_||!swapchain_)throw std::runtime_error("Vulkan renderer not initialized");
     check(vkWaitForFences(device_,1,&completed_,VK_TRUE,10'000'000'000ull),
           "vkWaitForFences");
+    if(timing_pending_) {
+        collect_completed_gpu_timing();
+        timing_pending_=false;
+    }
+    pump_shader_reload();
     RECT client{};
     if(!GetClientRect(hwnd_,&client))throw std::runtime_error("Vulkan GetClientRect failed");
     const auto width=static_cast<std::uint32_t>(std::max<LONG>(1,client.right-client.left));
@@ -348,7 +357,24 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     if(extent_.width!=width||extent_.height!=height) {
         check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(resize)");
         destroy_swapchain();create_swapchain();
+        temporal_tracker_.invalidate();
     }
+    northstarcpp::render::TemporalCamera camera{};
+    camera.position={frame.camera_x,frame.camera_y,frame.camera_z};
+    camera.yaw=frame.camera_yaw;camera.pitch=frame.camera_pitch;
+    camera.roll=frame.camera_roll;
+    camera.fov_y_degrees=frame.camera_fov_y_degrees>1.f?
+        frame.camera_fov_y_degrees:70.f;
+    camera.near_clip=frame.camera_near_clip>0.f?
+        frame.camera_near_clip:.1f;
+    camera.far_clip=frame.camera_far_clip>camera.near_clip?
+        frame.camera_far_clip:250.f;
+    camera.width=extent_.width;camera.height=extent_.height;
+    camera.first_person=frame.first_person||frame.camera_override;
+    temporal_frame_=temporal_tracker_.begin(camera);
+    // The previous compute and vertex reads are complete. Grow before
+    // acquiring a swapchain image so allocation failure leaves it untouched.
+    ensure_skin_buffers();
     std::uint32_t image=0;
     auto acquired=vkAcquireNextImageKHR(device_,swapchain_,UINT64_MAX,available_,
                                         VK_NULL_HANDLE,&image);
@@ -360,8 +386,10 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     }
     if(acquired!=VK_SUCCESS&&acquired!=VK_SUBOPTIMAL_KHR)
         check(acquired,"vkAcquireNextImageKHR");
+    pick_camera_=frame; // Copy camera scalars for the ID pass; no pointers dereferenced.
     collect_vertices(frame);
     upload_light_buffer();
+    if(deferred_enabled_)update_deferred_tiles(frame);
     upload_material_textures();
     collect_material_vertices(frame);
     upload_skin_geometry();
@@ -376,46 +404,95 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
                             timing_queries_,0);
     }
     record_skin_compute(command_,frame);
-    northstarcpp::render::RenderGraphPlan execution=graph_plan_;
-    if(!swapchain_seen_.at(image))
-        for(auto& transition:execution.passes.at(0).transitions)
-            transition.before=northstarcpp::render::ResourceAccess::Undefined;
+    // World BCn surfaces retain the proven forward path until their
+    // texture/material attributes have dedicated MRT emitters.
+    bool const textured_world=std::any_of(world_surface_ids_.begin(),
+        world_surface_ids_.end(),[](std::uint32_t id){return id!=0;});
+    bool const deferred=deferred_enabled_&&!textured_world;
+    auto const& execution=deferred?deferred_graph_plan_:graph_plan_;
     VkImageSubresourceRange subresource{};
     subresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
     subresource.levelCount=1;subresource.layerCount=1;
-    std::vector<northstarcpp::render::VulkanGraphImage> bindings(2);
+    std::array<northstarcpp::render::VulkanGraphImage,6> bindings{};
+    const std::size_t binding_count=deferred?6u:2u;
     bindings[0]={images_[image],subresource,VK_QUEUE_FAMILY_IGNORED,
-                 VK_QUEUE_FAMILY_IGNORED};
+                 VK_QUEUE_FAMILY_IGNORED,!swapchain_seen_.at(image)};
     auto depth_range=subresource;
     depth_range.aspectMask=VK_IMAGE_ASPECT_DEPTH_BIT;
     bindings[1]={depth_image_,depth_range,VK_QUEUE_FAMILY_IGNORED,
                  VK_QUEUE_FAMILY_IGNORED};
+    if(deferred)
+        for(unsigned i=0;i<(gbuffer_v2_?4u:3u);++i)
+            bindings[2+i]={gbuffer_images_[i],subresource,
+                VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED};
+    // Contract diagnostics are attached to the renderer, not hidden behind
+    // the generic RenderGraph executor exception. The planner's resource IDs
+    // and the binding table must describe exactly the same image set.
+    if(command_==VK_NULL_HANDLE || !vkCmdPipelineBarrier2 ||
+       binding_count!=execution.lifetimes.size())
+        throw std::runtime_error(
+            "Vulkan graph command/bindings mismatch: command="+
+            std::to_string(command_!=VK_NULL_HANDLE)+
+            " sync2="+std::to_string(vkCmdPipelineBarrier2!=nullptr)+
+            " bindings="+std::to_string(binding_count)+
+            " lifetimes="+std::to_string(execution.lifetimes.size())+
+            " deferred="+std::to_string(deferred)+
+            " gbuffer_v2="+std::to_string(gbuffer_v2_));
     northstarcpp::render::record_vulkan_graph(
-        command_,vkCmdPipelineBarrier2,execution,bindings,
+        command_,vkCmdPipelineBarrier2,execution,bindings.data(),binding_count,
         [&](northstarcpp::render::PassId pass,VkCommandBuffer cmd) {
-            switch(pass) {
-            case 0:
-                record_opaque(cmd,image,frame);
-                if(timing_queries_)vkCmdWriteTimestamp2(cmd,
-                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,1);
-                break;
-            case 1:
-                record_ui_overlay(cmd,image);
-                if(timing_queries_) {
-                    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                         timing_queries_,2);
-                    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                         timing_queries_,3);
+            if(deferred) {
+                switch(pass) {
+                case 0:
+                    record_gbuffer(cmd,frame);
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,1);
+                    break;
+                case 1:
+                    record_deferred_resolve(cmd,image);
+                    break;
+                case 2:
+                    record_deferred_forward(cmd,image);
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,2);
+                    break;
+                case 3:
+                    record_ui_overlay(cmd,image);
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,3);
+                    break;
+                case 4:
+                    record_readback(cmd,image,frame);
+                    break;
+                case 5:
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,4);
+                    break;
+                default:throw std::logic_error("Unknown Vulkan deferred pass");
                 }
-                break;
-            case 2:
-                record_readback(cmd,image,frame);
-                break;
-            case 3:
-                if(timing_queries_)vkCmdWriteTimestamp2(cmd,
-                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,4);
-                break;
-            default:throw std::logic_error("Unknown Vulkan Render Graph pass");
+            } else {
+                switch(pass) {
+                case 0:
+                    record_opaque(cmd,image,frame);
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,1);
+                    break;
+                case 1:
+                    record_ui_overlay(cmd,image);
+                    if(timing_queries_) {
+                        vkCmdWriteTimestamp2(cmd,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,2);
+                        vkCmdWriteTimestamp2(cmd,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,3);
+                    }
+                    break;
+                case 2:record_readback(cmd,image,frame);break;
+                case 3:
+                    if(timing_queries_)vkCmdWriteTimestamp2(cmd,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,timing_queries_,4);
+                    break;
+                default:throw std::logic_error("Unknown Vulkan forward pass");
+                }
             }
         });
     check(vkEndCommandBuffer(command_),"vkEndCommandBuffer");
@@ -425,24 +502,44 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
     submit.waitSemaphoreCount=1;submit.pWaitSemaphores=&available_;
     submit.pWaitDstStageMask=&stage;
     submit.commandBufferCount=1;submit.pCommandBuffers=&command_;
-    submit.signalSemaphoreCount=1;submit.pSignalSemaphores=&ready_;
+    submit.signalSemaphoreCount=1;
+    VkSemaphore const presented_signal=present_ready_.at(image);
+    submit.pSignalSemaphores=&presented_signal;
     check(vkQueueSubmit(queue_,1,&submit,completed_),"vkQueueSubmit");
+    timing_pending_=timing_queries_!=VK_NULL_HANDLE;
     swapchain_seen_[image]=true;
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    present.waitSemaphoreCount=1;present.pWaitSemaphores=&ready_;
+    present.waitSemaphoreCount=1;
+    present.pWaitSemaphores=&presented_signal;
     present.swapchainCount=1;present.pSwapchains=&swapchain_;
     present.pImageIndices=&image;
     const auto result=vkQueuePresentKHR(queue_,&present);
     if(result!=VK_SUCCESS&&result!=VK_SUBOPTIMAL_KHR&&result!=VK_ERROR_OUT_OF_DATE_KHR)
         check(result,"vkQueuePresentKHR");
-    // Conservative single-frame synchronization until per-image present
-    // completion and independent in-flight semaphores are implemented.
-    check(vkQueueWaitIdle(queue_),"vkQueueWaitIdle(present)");
+    // Swapchain-image-indexed present semaphores avoid a forced queue idle on
+    // every frame. A GPU readback explicitly waits for its own submission.
+    if(frame.verify_pixels) {
+        check(vkWaitForFences(device_,1,&completed_,VK_TRUE,10'000'000'000ull),
+              "vkWaitForFences(pixel verification)");
+        if(timing_pending_) {
+            collect_completed_gpu_timing();
+            timing_pending_=false;
+        }
+        validate_readback(frame);
+    }
+    if(validation_errors_.load()>0)
+        throw std::runtime_error("Vulkan validation reported GPU errors");
+    if(result==VK_ERROR_OUT_OF_DATE_KHR) {
+        check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(out-of-date present)");
+        destroy_swapchain();create_swapchain();
+    }
+}
+void Renderer::collect_completed_gpu_timing() {
     if(timing_queries_) {
         std::uint64_t ticks[5]{};
         auto result=vkGetQueryPoolResults(device_,timing_queries_,0,5,
             sizeof(ticks),ticks,sizeof(std::uint64_t),
-            VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WAIT_BIT);
+            VK_QUERY_RESULT_64_BIT);
         if(result==VK_SUCCESS) {
             const auto mask=timestamp_valid_bits_>=64?
                 UINT64_MAX:((std::uint64_t{1}<<timestamp_valid_bits_)-1);
@@ -462,12 +559,6 @@ void Renderer::draw(const NorthStarRenderFrame& frame) {
                 last_timing_.valid=1;
             }else last_timing_={};
         }else last_timing_={};
-    }
-    if(validation_errors_.load()>0)
-        throw std::runtime_error("Vulkan validation reported GPU errors");
-    validate_readback(frame);
-    if(result==VK_ERROR_OUT_OF_DATE_KHR) {
-        destroy_swapchain();create_swapchain();
     }
 }
 }

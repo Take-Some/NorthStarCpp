@@ -4,6 +4,7 @@
 
 #include <northstarcpp/ecs.hpp>
 #include <northstarcpp/scene_world.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include "module_loader.hpp"
 
 #include <algorithm>
@@ -45,14 +46,14 @@ void register_builtins(NsEcsApi const* api, void* world)
         "Register Script",api);
 }
 
-void apply_record(NsEcsApi const* api, void* world, NsEntity id, SceneObject const& object)
+void apply_record(NsEcsApi const* api, void* world, NsEntity id, SceneObject const& object,bool controlled)
 {
     NsName name{};
     std::memcpy(name.text,object.name.c_str(),object.name.size());
     NsPosition position{object.position.x,object.position.y,object.position.z};
     NsVisual visual{object.size,object.color};
     NsBody body{object.mass};
-    NsController controller{static_cast<uint8_t>(object.player)};
+    NsController controller{static_cast<uint8_t>(controlled)};
     NsMotion motion{0.f,0.f};
     auto write = [&](char const* key, void const* data, size_t bytes) {
         require(api->set(world,id,key,data,bytes),"Set ECS component",api);
@@ -91,6 +92,7 @@ SceneObject read_record(NsEcsApi const* api, void* world, NsEntity id)
     read(NS_COMPONENT_VISUAL,&visual,sizeof(visual));
     read(NS_COMPONENT_BODY,&body,sizeof(body));
     read(NS_COMPONENT_CONTROLLER,&controller,sizeof(controller));
+    (void)controller; // runtime input is controlled by PlayerController
     if (!std::memchr(name.text,'\0',sizeof(name.text)))
         throw std::runtime_error("ECS Name is not terminated");
     SceneObject object;
@@ -99,7 +101,6 @@ SceneObject read_record(NsEcsApi const* api, void* world, NsEntity id)
     object.size = visual.size;
     object.color = visual.color;
     object.mass = body.mass;
-    object.player = controller.enabled != 0;
     return object;
 }
 } // namespace
@@ -163,7 +164,7 @@ void EcsWorld::load(Scene const& scene)
         for (auto const& object : scene.objects) {
             auto id = api->create_entity(replacement);
             require(id != 0,"Create entity",api);
-            apply_record(api,replacement,id,object);
+            apply_record(api,replacement,id,object,scene_pawn::is_local(scene,object));
             nodes.emplace(id, object.node);
             handles.push_back(id);
             stable_ids.push_back(object.node.id);
@@ -201,7 +202,7 @@ NsEntity EcsWorld::create(SceneObject const& object)
     auto id=api->create_entity(impl_->world);
     require(id != 0,"Create entity",api);
     try {
-        apply_record(api,impl_->world,id,created);
+        apply_record(api,impl_->world,id,created,scene_pawn::is_local(updated,created));
         impl_->scene_nodes.emplace(id, created.node);
     } catch (...) {
         api->destroy_entity(impl_->world,id);
@@ -212,7 +213,7 @@ NsEntity EcsWorld::create(SceneObject const& object)
 
 NsEntity EcsWorld::create_runtime(SceneObject const& object)
 {
-    if (!object.node.id || object.player ||
+    if (!object.node.id ||
         object.name.empty() || object.name.size()>=NORTHSTARCPP_ECS_NAME_BYTES ||
         !std::isfinite(object.position.x) || !std::isfinite(object.position.y) ||
         !std::isfinite(object.position.z) || !std::isfinite(object.size) ||
@@ -222,7 +223,7 @@ NsEntity EcsWorld::create_runtime(SceneObject const& object)
     auto id=api->create_entity(impl_->world);
     require(id!=0,"Create runtime ECS entity",api);
     try {
-        apply_record(api,impl_->world,id,object);
+        apply_record(api,impl_->world,id,object,false);
         impl_->scene_nodes.emplace(id,object.node);
     } catch (...) {
         api->destroy_entity(impl_->world,id);
@@ -244,7 +245,7 @@ void EcsWorld::update(NsEntity id, SceneObject const& object)
         changed.node = current.objects[static_cast<size_t>(it-entities_list.begin())].node;
     current.objects[static_cast<size_t>(it-entities_list.begin())] = changed;
     validate_scene(current);
-    apply_record(impl_->api,impl_->world,id,changed);
+    apply_record(impl_->api,impl_->world,id,changed,scene_pawn::is_local(current,changed));
     impl_->scene_nodes[id] = changed.node;
 }
 
@@ -315,14 +316,14 @@ std::size_t EcsWorld::reconcile_scene_residency(
         if(obj.node.id!=ids[i] ||
            scene_world.source().objects[i].node.id!=obj.node.id)
             throw std::runtime_error("ECS streaming stable scene ID mismatch");
-        bool const wanted=obj.player || obj.mass>0.f || obj.node.cell.empty() ||
+        bool const wanted=scene_pawn::is_pawn(source,obj) || obj.mass>0.f || obj.node.cell.empty() ||
                           scene_world.object_resident(i);
         auto& handle=handles[i];
         if(wanted && !handle) {
             auto id=impl_->api->create_entity(impl_->world);
             require(id!=0,"Stream ECS entity",impl_->api);
             try {
-                apply_record(impl_->api,impl_->world,id,obj);
+                apply_record(impl_->api,impl_->world,id,obj,scene_pawn::is_local(source,obj));
                 impl_->scene_nodes.emplace(id,obj.node);
             } catch(...) {
                 impl_->api->destroy_entity(impl_->world,id);

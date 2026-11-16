@@ -60,6 +60,7 @@ struct SceneStreamingDiagnostics {
     std::size_t resident_entities = 0;
     std::size_t visible_entities = 0;
     std::size_t generation = 0;
+    std::size_t cell_selection_passes = 0;
 };
 
 // Runtime HLOD proxy for static scene groups; collision always remains in
@@ -122,6 +123,18 @@ public:
     SceneStreamingDiagnostics const& streaming_diagnostics() const { return diagnostics_; }
 
 private:
+    struct CellCandidate {
+        std::size_t index;
+        float priority;
+        bool forced;
+    };
+    void update_cell_selection(Vector3 position,Vector3 predicted);
+    std::vector<CellCandidate> cell_loads_,cell_unloads_;
+    std::size_t next_load_=0,next_unload_=0;
+    Vector3 selection_position_{0.f,0.f,0.f},selection_prediction_{0.f,0.f,0.f};
+    bool selection_valid_=false;
+    std::vector<std::uint8_t> hierarchy_state_;
+
     Scene scene_;
     SceneSpatialIndex spatial_;
     std::unordered_map<std::string, std::size_t> cell_lookup_;

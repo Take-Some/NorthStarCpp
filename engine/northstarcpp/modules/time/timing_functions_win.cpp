@@ -5,7 +5,7 @@
 // NorthStarCpp project: 2026 Kayla's Systems — Kayla Verner
 ////////////////////////////////////////////////////////////////////////////
 
-#include "pch.h"
+#include "../core/pch.h"
 
 #ifdef NORTHSTARCPP_STANDALONE_MATH
 // Native 2026 runtime retains the original QueryPerformanceCounter timer ABI.
@@ -33,7 +33,7 @@ u64 query_performance_counter() {
 }
 } // namespace northstarcpp::timing
 #else // Original 2009 platform initialization, retained for source reference.
-#include "pch.h"
+#include "../core/pch.h"
 #include "timing.h"
 #include "platform_extensions_win.h"
 #include <northstarcpp/os_include.h>

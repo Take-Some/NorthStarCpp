@@ -97,8 +97,7 @@ endforeach()
 foreach(_required IN ITEMS
     "add_library(northstarcpp_core STATIC"
     "target_link_libraries(northstarcpp_core PUBLIC northstarcpp_math)"
-    "DESTINATION sdk/include/northstarcpp"
-    "DESTINATION sdk/src/northstarcpp")
+    "install(DIRECTORY \"\${NORTHSTARCPP_PUBLIC_INCLUDE_DIR}/northstarcpp\"")
     string(FIND "${_foundation_cmake}" "${_required}" _required_offset)
     if(_required_offset EQUAL -1)
         message(FATAL_ERROR "Original foundation integration missing: ${_required}")

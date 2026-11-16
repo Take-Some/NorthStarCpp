@@ -56,7 +56,7 @@ dynamic V8 import libraries; use the separate build for those.
 ## Shared engine scripts and project VFS
 
 The engine loads the shared JavaScript bootstrap from
-`sharedAssets/scripts/northstar/bootstrap.js` before each project's
+`engine/northstarcpp/resources/api/northstar/bootstrap.js` before each project's
 `scripts/main.js`. Projects use `NorthStar.camera.createViewController(...)`
 for script-owned view selection and the native `engine.camera.setMode(...)` API
 for camera operations. The root helper uses V to toggle views with a smooth
@@ -69,12 +69,12 @@ root `0`, and project `assets/+100`. See
 
 ### Input enumeration classes and IDE declarations
 
-The source classes in sharedAssets/scripts/input/Keys.js and
-sharedAssets/scripts/input/GamepadButtons.js own the actual values.
+The source classes in engine/northstarcpp/resources/api/input/Keys.js and
+engine/northstarcpp/resources/api/input/GamepadButtons.js own the actual values.
 Keyboard codes follow the engine.input Virtual-Key convention;
 gamepad buttons are XInput-compatible bitmasks.
 
-The IDE declarations in sharedAssets/scripts/types/northstar-engine.d.ts
+The IDE declarations in engine/northstarcpp/resources/api/types/northstar-engine.d.ts
 are GENERATED, not separately maintained. After editing either runtime class:
 
     python tools/dev/generate_input_typings.py

@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 // Camera collision integration: same physics API under Bullet and Jolt.
 #include <northstarcpp/camera.hpp>
 #include <northstarcpp/physics.hpp>
@@ -14,7 +15,7 @@ int main()
     using namespace northstarcpp;
     try {
         Scene scene;
-        scene.objects.push_back({"Player",{0.f,0.f,0.f},1.5f,0xffffff,true,2.f});
+        qa::append(scene,{"Player",{0.f,0.f,0.f},1.5f,0xffffff,true,2.f});
         PhysicsScene physics(scene);
         // Two triangles covering an independently registered static wall at Z=-3.
         // No SceneObject represents it: the collision must come from the provider

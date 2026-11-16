@@ -27,6 +27,7 @@
 #define NORTHSTARCPP_CAPABILITY_COLLISION "engine.collision"
 #define NORTHSTARCPP_CAPABILITY_TIME "engine.time"
 #define NORTHSTARCPP_CAPABILITY_SCRIPTING "engine.scripting"
+#define NORTHSTARCPP_CAPABILITY_VEHICLE "engine.vehicle"
 
 #ifdef __cplusplus
 extern "C" {

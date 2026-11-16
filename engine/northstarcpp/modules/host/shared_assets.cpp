@@ -219,7 +219,11 @@ namespace northstarcpp {
 
 void AssetStore::mount_shared_assets(std::filesystem::path const& root)
 {
-    mount_directory("", root, -100);
+    if (root.extension()==".nsp" && std::filesystem::is_regular_file(root)) {
+        mount_archive("",root,root,-100);
+    } else {
+        mount_directory("",root,-100);
+    }
 }
 
 shared_assets::Material AssetStore::load_material(std::string const& reference) const

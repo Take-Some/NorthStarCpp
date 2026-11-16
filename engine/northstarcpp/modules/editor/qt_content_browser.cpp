@@ -1,15 +1,24 @@
 // Native Qt 6 Content Browser for NorthStar Editor.
 // No dependency on HWND, Windows Common Controls, or shell icons.
 #include "qt_content_browser.hpp"
+#include "qt_nsp_icons.hpp"
 #include "qt_content_browser_internal.hpp"
 #include "qt_content_browser_thumbnails.hpp"
 #include <northstarcpp/assets.hpp>
+#include <northstarcpp/embedded_script_api.hpp>
 #include "editor_asset_thumbnails.hpp"
 #include "qt_asset_preview_dialog.hpp"
+#include "qt_text_asset_editor.hpp"
+#include "qt_audio_preview_dialog.hpp"
 #include "qt_prefab_preview.hpp"
 #include "editor_prefab_composition.hpp"
 #include "editor_asset_material_source.hpp"
 #include "qt_asset_card_delegate.hpp"
+#include "qt_content_browser_favorites.hpp"
+#include "asset_browser_query.hpp"
+#include "asset_browser_collections.hpp"
+#include "asset_team_collections.hpp"
+#include "asset_dependency_registry.hpp"
 
 #include <QtConcurrent/QtConcurrent>
 #include <QAction>
@@ -17,6 +26,9 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QPlainTextEdit>
+#include <QFontDatabase>
 #include <QFile>
 #include <QDir>
 #include <QCursor>
@@ -39,6 +51,13 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QScrollArea>
+#include <QSettings>
+#include <QFileSystemWatcher>
+#include <QTimer>
+#include <QShortcut>
+#include <QCryptographicHash>
+#include <QCollator>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSplitter>
@@ -61,12 +80,6 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
-
-// The Qt RCC entry point has global linkage. This initializer must be
-// declared in the global namespace (not even an anonymous namespace).
-static void ensureFolderArtResource() {
-    Q_INIT_RESOURCE(northstar_folder_icons);
-}
 
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
@@ -98,6 +111,7 @@ Palette asset_palette(AssetKind kind) {
     switch(kind) {
     case AssetKind::folder:return {QColor("#C99A52"),"DIR"};
     case AssetKind::mesh:return {QColor("#58A7DB"),"3D"};
+    case AssetKind::collision:return {QColor("#B58C59"),"COL"};
     case AssetKind::material:return {QColor("#A66AD6"),"MAT"};
     case AssetKind::texture:return {QColor("#4DBA87"),"TEX"};
     case AssetKind::audio:return {QColor("#D8A24E"),"WAV"};
@@ -124,11 +138,22 @@ public:
     QMimeData* mimeData(QModelIndexList const& indexes) const override {
         auto* data=new QMimeData;
         if(indexes.empty())return data;
+        QStringList selected;
+        for(auto const& candidate:indexes) {
+            auto value=candidate.data(role_reference).toString();
+            if(!value.isEmpty() && !selected.contains(value))
+                selected.append(value);
+        }
+        if(selected.size()>1)
+            data->setData("application/x-northstar-asset-references",
+                          selected.join('\n').toUtf8());
+        if(!selected.isEmpty())
+            data->setText(selected.join('\n'));
         auto index=indexes.first();
         auto path=index.data(role_reference).toString();
         if(!path.isEmpty()) {
             data->setData("application/x-northstar-asset-reference",path.toUtf8());
-            data->setText(path);
+            if(selected.size()<=1)data->setText(path);
         }
         return data;
     }
@@ -136,9 +161,21 @@ public:
 };
 }
 QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
-    ensureFolderArtResource();
+    ensure_northstar_qt_icons();
     setObjectName("northstarContentBrowser");
     pool_.setMaxThreadCount(2);
+    change_watcher_=new QFileSystemWatcher(this);
+    change_debounce_=new QTimer(this);
+    change_debounce_->setSingleShot(true);
+    change_debounce_->setInterval(750);
+    connect(change_debounce_,&QTimer::timeout,this,[this] {
+        if(!project_root_.isEmpty())refresh();
+    });
+    auto changed=[this](QString const&) {
+        if(!project_root_.isEmpty())change_debounce_->start();
+    };
+    connect(change_watcher_,&QFileSystemWatcher::directoryChanged,this,changed);
+    connect(change_watcher_,&QFileSystemWatcher::fileChanged,this,changed);
     auto* root=new QVBoxLayout(this);
     root->setContentsMargins(8,8,8,8);
     root->setSpacing(6);
@@ -165,6 +202,18 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     reload_=tool("⟳","Rescan project content");
     crumb_=new QLabel("Content /",this);
     crumb_->setObjectName("breadcrumb");
+    crumb_->setTextFormat(Qt::RichText);
+    crumb_->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+    crumb_->setOpenExternalLinks(false);
+    connect(crumb_,&QLabel::linkActivated,this,[this](QString const& href) {
+        if(!href.startsWith("crumb:"))return;
+        bool okay=false;
+        int count=href.mid(6).toInt(&okay);
+        if(!okay || count<0)return;
+        auto path=folder_.split('/',Qt::SkipEmptyParts);
+        if(count>path.size())return;
+        openFolder(path.mid(0,count).join('/'));
+    });
     crumb_->setMinimumWidth(120);
     crumb_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
     toolbar->addWidget(crumb_,1);
@@ -175,11 +224,19 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     toolbar->addWidget(search_);
     types_=new QComboBox(this);
     for(auto const& item:{"All Assets","Meshes","Materials","Textures","Audio",
-                          "Scenes","Scripts","Animations","Shaders","Other","Prefabs","Characters","Material Functions"})
+                          "Scenes","Scripts","Animations","Shaders","Other","Prefabs","Characters","Material Functions","Collisions"})
         types_->addItem(item);
     types_->setMinimumWidth(130);
     toolbar->addWidget(types_);
+    collections_=new QComboBox(this);
+    collections_->setObjectName("assetCollections");
+    collections_->setToolTip("Named asset collections. Select a collection to browse it.");
+    collections_->setMinimumWidth(128);
+    collections_->addItem("All Content",QString{});
+    toolbar->addWidget(collections_);
     list_mode_=tool("▦","Toggle grid/list view");
+    auto* viewOptions=tool("View","Show/hide Content Browser panels");
+    viewOptions->setObjectName("assetViewOptions");
     root->addLayout(toolbar);
 
     splitter_=new QSplitter(Qt::Horizontal,this);
@@ -200,7 +257,7 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     grid_->setResizeMode(QListView::Adjust);
     grid_->setMovement(QListView::Static);
     grid_->setWrapping(true);
-    grid_->setSelectionMode(QAbstractItemView::SingleSelection);
+    grid_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     grid_->setContextMenuPolicy(Qt::CustomContextMenu);
     grid_->setDragDropMode(QAbstractItemView::DragOnly);
     grid_->setDragEnabled(true);
@@ -215,7 +272,15 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     grid_->setSpacing(10);
     grid_->setMinimumWidth(260);
 
-    auto* details=new QWidget(splitter_);
+    // Inspector content may be longer than the dock itself. Keep its
+    // scrolling internal so selection never changes the editor dock size.
+    auto* detailsScroll=new QScrollArea(splitter_);
+    detailsScroll->setObjectName("assetDetailsScroll");
+    detailsScroll->setWidgetResizable(true);
+    detailsScroll->setFrameShape(QFrame::NoFrame);
+    detailsScroll->setMinimumSize(160,0);
+    detailsScroll->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Ignored);
+    auto* details=new QWidget;
     details->setObjectName("assetDetails");
     details->setMinimumWidth(160);
     auto* dl=new QVBoxLayout(details);
@@ -227,11 +292,12 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     preview_icon_=new QLabel(details);
     preview_icon_->setObjectName("assetPreviewIcon");
     preview_icon_->setAlignment(Qt::AlignCenter);
-    preview_icon_->setMinimumHeight(150);
+    preview_icon_->setFixedHeight(192);
     preview_icon_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
     dl->addWidget(preview_icon_);
     preview_name_=new QLabel("Select an asset",details);
     preview_name_->setWordWrap(true);
+    preview_name_->setMaximumHeight(50);
     preview_name_->setObjectName("previewName");
     dl->addWidget(preview_name_);
     preview_details_=new QLabel(details);
@@ -239,23 +305,76 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     preview_details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     preview_details_->setObjectName("previewMetadata");
     dl->addWidget(preview_details_);
+    audio_preview_=new QPushButton("Audio Preview / Play",details);
+    audio_preview_->setObjectName("audioPreviewButton");
+    audio_preview_->hide();
+    connect(audio_preview_,&QPushButton::clicked,this,[this]{
+        if(!selectedPath().isEmpty())openAssetPreview(selectedPath());
+    });
+    dl->addWidget(audio_preview_);
     auto* copy=new QPushButton("Copy Asset Reference",details);
     connect(copy,&QPushButton::clicked,this,[this]{copyReference();});
     dl->addWidget(copy);
     dl->addStretch(1);
     splitter_->addWidget(folders_);
     splitter_->addWidget(grid_);
-    splitter_->addWidget(details);
+    detailsScroll->setWidget(details);
+    splitter_->addWidget(detailsScroll);
     splitter_->setStretchFactor(0,0);
     splitter_->setStretchFactor(1,1);
     splitter_->setStretchFactor(2,0);
     splitter_->setSizes({235,790,250});
     root->addWidget(splitter_,1);
+    // UE-style view options keep source, inspector and card list independent.
+    // They change visibility only, never force a new dock height.
+    auto* viewMenu=new QMenu(viewOptions);
+    QSettings viewState(QStringLiteral("Kayla's Systems"),
+                        QStringLiteral("NorthStarCpp"));
+    auto* sourcesAction=viewMenu->addAction("Show Sources Panel");
+    sourcesAction->setCheckable(true);
+    sourcesAction->setChecked(viewState.value(
+        "ContentBrowser/View/Sources",true).toBool());
+    folders_->setVisible(sourcesAction->isChecked());
+    connect(sourcesAction,&QAction::toggled,this,[this](bool visible) {
+        folders_->setVisible(visible);
+        QSettings settings(QStringLiteral("Kayla's Systems"),
+                           QStringLiteral("NorthStarCpp"));
+        settings.setValue("ContentBrowser/View/Sources",visible);
+    });
+    auto* inspectorAction=viewMenu->addAction("Show Asset Details");
+    inspectorAction->setCheckable(true);
+    inspectorAction->setChecked(viewState.value(
+        "ContentBrowser/View/Details",true).toBool());
+    detailsScroll->setVisible(inspectorAction->isChecked());
+    connect(inspectorAction,&QAction::toggled,this,[detailsScroll](bool visible) {
+        detailsScroll->setVisible(visible);
+        QSettings settings(QStringLiteral("Kayla's Systems"),
+                           QStringLiteral("NorthStarCpp"));
+        settings.setValue("ContentBrowser/View/Details",visible);
+    });
+    viewMenu->addSeparator();
+    viewMenu->addAction("Reset Pane Widths",[this] {
+        splitter_->setSizes({235,790,250});
+    });
+    viewOptions->setMenu(viewMenu);
+    viewOptions->setPopupMode(QToolButton::InstantPopup);
 
     auto* bottom=new QHBoxLayout;
     status_=new QLabel("No project loaded",this);
     status_->setObjectName("assetStatus");
     bottom->addWidget(status_,1);
+    sort_=new QComboBox(this);
+    sort_->setObjectName("assetSortOrder");
+    sort_->setToolTip("Sort assets; folders always appear first");
+    sort_->addItems({"Name (A-Z)","Name (Z-A)","Type","Size (largest)","Size (smallest)"});
+    sort_->setMaximumWidth(142);
+    bottom->addWidget(sort_);
+    {
+        QSettings settings(QStringLiteral("Kayla's Systems"),
+                           QStringLiteral("NorthStarCpp"));
+        sort_->setCurrentIndex(std::clamp(
+            settings.value("ContentBrowser/Sort",0).toInt(),0,4));
+    }
     bottom->addWidget(new QLabel("Thumbnail Size",this));
     zoom_=new QSlider(Qt::Horizontal,this);
     zoom_->setRange(80,240);
@@ -293,6 +412,26 @@ QScrollBar:vertical {background:#17202a;width:10px;}
 QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
 )QSS");
 
+    // Editor-focused shortcuts, without changing global editor commands.
+    auto bindShortcut=[this](char const* keys,auto callback) {
+        auto* shortcut=new QShortcut(QKeySequence(QString::fromLatin1(keys)),this);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut,&QShortcut::activated,this,callback);
+    };
+    bindShortcut("Ctrl+F",[this]{focusSearch();});
+    bindShortcut("F5",[this]{refresh();});
+    bindShortcut("F2",[this]{renameSelected();});
+    bindShortcut("Ctrl+D",[this]{toggleFavoriteSelected();});
+    auto* copyReferences=new QShortcut(QKeySequence::Copy,grid_);
+    copyReferences->setContext(Qt::WidgetShortcut);
+    connect(copyReferences,&QShortcut::activated,this,
+            &QtContentBrowser::copySelectedReferences);
+    bindShortcut("Alt+Left",[this]{
+        if(back_->isEnabled())back_->click();
+    });
+    bindShortcut("Alt+Right",[this]{
+        if(forward_->isEnabled())forward_->click();
+    });
     connect(reload_,&QToolButton::clicked,this,&QtContentBrowser::refresh);
     connect(up_,&QToolButton::clicked,this,[this]{openFolder(parentVirtual(folder_));});
     connect(back_,&QToolButton::clicked,this,[this] {
@@ -318,11 +457,26 @@ QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
     auto* addMenu=new QMenu(add_);
     addMenu->addAction("New Folder",this,&QtContentBrowser::createFolder);
     addMenu->addAction("Import Files...",this,&QtContentBrowser::importFiles);
+    addMenu->addSeparator();
+    addMenu->addAction("New Collection...",this,&QtContentBrowser::createCollection);
+    addMenu->addAction("New Team Collection...",this,&QtContentBrowser::createTeamCollection);
     add_->setMenu(addMenu);
     add_->setPopupMode(QToolButton::InstantPopup);
     connect(search_,&QLineEdit::textChanged,this,&QtContentBrowser::populateItems);
     connect(types_,QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,[this](int){populateItems();});
+    connect(collections_,QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,[this](int index){
+        active_collection_=collections_->itemData(index).toString();
+        populateItems();
+    });
+    connect(sort_,QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this,[this](int order) {
+                QSettings settings(QStringLiteral("Kayla's Systems"),
+                                   QStringLiteral("NorthStarCpp"));
+                settings.setValue("ContentBrowser/Sort",order);
+                populateItems();
+            });
     connect(zoom_,&QSlider::valueChanged,this,[this,cards](int size) {
         cards->setPreviewSize(size);
         if(grid_->viewMode()==QListView::IconMode) {
@@ -343,6 +497,7 @@ QScrollBar::handle:vertical {background:#475568;border-radius:4px;}
         scheduleThumbnails();
     });
     auto activateTreeFolder=[this](QTreeWidgetItem* item) {
+        if(item && item->data(0,role_source).toInt()<0)return;
         if(!item)return;
         auto const folder=item->data(0,role_path).toString();
         auto const shared=item->data(0,role_source).toInt()==1;
@@ -401,17 +556,25 @@ void QtContentBrowser::setSharedContentRoot(QString const& path) {
     if(normalized==engine_root_)return;
     engine_root_=normalized;
     if(engine_selected_) {
+        active_collection_.clear();
+        refreshCollections();
+    }
+    if(engine_selected_) {
         root_=engine_root_;
         folder_.clear();
         back_history_.clear();
         forward_history_.clear();
     }
     refresh();
+    emit contentRootsChanged(project_root_,engine_root_);
 }
+// The shared root can change independently of the active project.
 void QtContentBrowser::selectAssetSource(bool shared) {
     if(shared==engine_selected_)return;
     engine_selected_=shared;
+    active_collection_.clear();
     root_=engine_selected_?engine_root_:project_root_;
+    refreshCollections();
     folder_.clear();
     back_history_.clear();
     forward_history_.clear();
@@ -447,8 +610,11 @@ void QtContentBrowser::setContentRoot(QString const& path) {
         QDir::cleanPath(QFileInfo(path).absoluteFilePath());
     if(absolute==project_root_)return;
     project_root_=absolute;
+    active_collection_.clear();
+    refreshCollections();
     engine_selected_=false;
     root_=project_root_;
+    refreshCollections();
     folder_.clear();
     pending_reveal_.clear();
     back_history_.clear();forward_history_.clear();
@@ -456,6 +622,7 @@ void QtContentBrowser::setContentRoot(QString const& path) {
     project_catalog_=AssetCatalog{};
     catalog_ready_=false;
     refresh();
+    emit contentRootsChanged(project_root_,engine_root_);
 }
 void QtContentBrowser::revealAsset(QString const& virtualReference) {
     if((project_root_.isEmpty() && engine_root_.isEmpty()) ||
@@ -508,6 +675,9 @@ void QtContentBrowser::completeReveal() {
 }
 void QtContentBrowser::refresh() {
     auto const version=++generation_;
+    ++registry_generation_;
+    registry_.reset();
+    git_decorations_.clear();
     ++thumbnail_generation_;
     catalog_ready_=false;
     project_catalog_=AssetCatalog{};
@@ -542,6 +712,10 @@ void QtContentBrowser::refresh() {
                 project_catalog_=std::move(result.first);
                 engine_catalog_=std::move(result.second);
                 catalog_ready_=true;
+                configureFileWatching();
+                scheduleDependencyIndex();
+                refreshGitDecorations();
+                refreshCollections();
                 populateTree();
                 populateItems();
                 completeReveal();
@@ -557,7 +731,7 @@ void QtContentBrowser::refresh() {
         if(!project.isEmpty())
             result.first.scan(native(project),100000);
         if(!engine.isEmpty())
-            result.second.scan(native(engine),100000);
+            result.second.scan(native(engine),100000,true);
         return result;
     }));
 }
@@ -629,6 +803,26 @@ void QtContentBrowser::populateTree() {
             selected=lookup.value(folder_,root);
         }
     }
+    // Favorite links preserve the original source/read-only contract.
+    auto* favorites=new QTreeWidgetItem(folders_,{"Favorites"});
+    favorites->setData(0,role_source,-1);
+    favorites->setIcon(0,iconFor(AssetKind::folder));
+    for(int source=0;source<2;++source) {
+        bool const shared=source==1;
+        auto const& catalog=shared?engine_catalog_:project_catalog_;
+        QString const home=shared?engine_root_:project_root_;
+        for(QString const& path:browser_favorites::load(home)) {
+            auto const* rec=catalog.find(path.toUtf8().toStdString());
+            if(!rec || !rec->directory)continue;
+            auto* item=new QTreeWidgetItem(favorites,{
+                (shared?"Engine: ":"Project: ")+path.section('/',-1)});
+            item->setData(0,role_path,path);
+            item->setData(0,role_source,source);
+            item->setIcon(0,iconForDirectory(*rec));
+            item->setToolTip(0,path);
+        }
+    }
+    folders_->expandItem(favorites);
     folders_->setCurrentItem(selected);
     folders_->blockSignals(false);
     back_->setEnabled(!back_history_.isEmpty());
@@ -636,10 +830,20 @@ void QtContentBrowser::populateTree() {
     updateBreadcrumb();
 }
 void QtContentBrowser::openFolder(QString const& folder,bool history) {
+    if(!active_collection_.isEmpty()) {
+        active_collection_.clear();
+        QSignalBlocker blocker(collections_);
+        collections_->setCurrentIndex(0);
+    }
     if(folder==folder_)return;
     if(!folder.isEmpty()) {
         auto const* record=activeCatalog().find(folder.toUtf8().toStdString());
         if(!record || !record->directory)return;
+        if(record->embedded_engine_api) {
+            if(history){back_history_.push_back(folder_);forward_history_.clear();}
+            changeFolder(folder);
+            return;
+        }
         try {
             auto const backing=activeCatalog().backing_file(record->virtual_path);
             if(record->is_list_file()?
@@ -661,6 +865,35 @@ void QtContentBrowser::openAssetPreview(QString const& virtualPath) {
         openFolder(virtualPath);
         return;
     }
+    if(record->embedded_engine_api) {
+        auto const* embedded=embedded_api::find(record->virtual_path);
+        if(!embedded)return;
+        QDialog dialog(this);
+        dialog.setWindowTitle(QString::fromUtf8(record->filename.c_str())+
+                              " — Engine API (read-only)");
+        dialog.resize(920,620);
+        QVBoxLayout layout(&dialog);
+        auto* source=text_assets::createSourceEditor(&dialog,
+            text_assets::formatFor(QString::fromUtf8(record->filename.c_str())),true);
+        source->setObjectName("northstarEmbeddedApiSource");
+        source->setReadOnly(true);
+        source->setLineWrapMode(QPlainTextEdit::NoWrap);
+        source->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        source->setPlainText(QString::fromUtf8(embedded->source.data(),
+            static_cast<qsizetype>(embedded->source.size())));
+        layout.addWidget(source);
+        dialog.exec();
+        return;
+    }
+    if(record->kind==AssetKind::audio) {
+        try {
+            openAudioPreviewModal(this,activeCatalog().backing_file(record->virtual_path),
+                                  record->asset_reference());
+        } catch(std::exception const& e) {
+            QMessageBox::warning(this,"Audio Preview",QString::fromUtf8(e.what()));
+        }
+        return;
+    }
     // Shared materials remain read-only in the Content Browser.
     // Project materials may open their authoring editor.
     if(record->kind==AssetKind::material && !engine_selected_) {
@@ -669,6 +902,22 @@ void QtContentBrowser::openAssetPreview(QString const& virtualPath) {
             emit materialEditorRequested(reference);
             return;
         }
+    }
+    // Text assets are first-class authoring documents, not binary preview tiles.
+    // Shared engine resources remain inspectable but never writable here.
+    if(!record->is_virtual_entry() &&
+       text_assets::formatFor(from8(record->virtual_path))!=
+           text_assets::Format::Unsupported) {
+        try {
+            auto const physical=activeCatalog().backing_file(record->virtual_path);
+            auto const absolute=from8(physical.u8string());
+            if(editor_dock_mode_ && receivers(SIGNAL(textEditorRequested(QString,bool)))>0)
+                emit textEditorRequested(absolute,engine_selected_);
+            else text_assets::open(this,absolute,engine_selected_);
+        } catch(std::exception const& e) {
+            QMessageBox::warning(this,"Text Asset",QString::fromUtf8(e.what()));
+        }
+        return;
     }
     openAssetPreviewModal(this,native(root_),record->asset_reference(),record->kind);
 }
@@ -700,7 +949,14 @@ void QtContentBrowser::changeFolder(QString const& folder) {
 void QtContentBrowser::updateBreadcrumb() {
     QString const source=engine_selected_?
         "Engine Shared Assets":"Project Assets";
-    crumb_->setText(folder_.isEmpty()?source+" /":source+" / "+folder_);
+    QString html="<a href='crumb:0' style='color:#a7bdd3;text-decoration:none'>"+
+        source.toHtmlEscaped()+"</a>";
+    auto const parts=folder_.split('/',Qt::SkipEmptyParts);
+    for(int i=0;i<parts.size();++i)
+        html+=" / <a href='crumb:"+QString::number(i+1)+
+              "' style='color:#c4dded;text-decoration:none'>"+
+              parts[i].toHtmlEscaped()+"</a>";
+    crumb_->setText(html);
     crumb_->setToolTip(root_+"/"+folder_);
 }
 QIcon QtContentBrowser::iconFor(AssetKind k) const {
@@ -713,6 +969,16 @@ QIcon QtContentBrowser::iconFor(AssetKind k) const {
     }
     // Dedicated NorthStar file art, embedded in RCC for both the editor
     // dock and standalone Asset Browser. Avoid FILE/FUNC placeholder tiles.
+    if(k==AssetKind::collision) {
+        static QIcon const collisionFileArt(
+            QStringLiteral(":/northstar/icons/assetBrowser/collisionFile.png"));
+        if(!collisionFileArt.isNull())return collisionFileArt;
+    }
+    if(k==AssetKind::audio) {
+        static QIcon const soundFileArt(
+            QStringLiteral(":/northstar/icons/assetBrowser/soundFile.png"));
+        if(!soundFileArt.isNull())return soundFileArt;
+    }
     if(k==AssetKind::material_function) {
         static QIcon const functionArt(
             QStringLiteral(":/northstar/icons/assetBrowser/materialFunc.png"));
@@ -742,6 +1008,18 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
     // Only NEF8 ListFile dictionaries use the specialized folder artwork.
     // Physical directories always use the original folder.png, regardless
     // of their display names (e.g. a physical folder called "textures").
+    // Native collision folders use their dedicated artwork. For future
+    // NEF8/YBN virtual dictionaries the same icon identifies the container.
+    if(record.directory) {
+        auto const path=fs::path(record.virtual_path);
+        auto const basename=path.filename().u8string();
+        auto const extension=path.extension().u8string();
+        if(extension==".ybn" || basename=="collisions" || basename=="collision") {
+            static QIcon const collisionFolder(
+                QStringLiteral(":/northstar/icons/assetBrowser/collisionDir.png"));
+            if(!collisionFolder.isNull())return collisionFolder;
+        }
+    }
     if(record.directory && record.is_list_file()) {
         auto const extension=fs::path(record.virtual_path).extension().u8string();
         if(extension==".ytd") {
@@ -760,6 +1038,10 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
             static QIcon const skeletonFolder(
                 QStringLiteral(":/northstar/icons/assetBrowser/skeletalFolder.png"));
             if(!skeletonFolder.isNull())return skeletonFolder;
+        } else if(extension==".nac") {
+            static QIcon const soundFolder(
+                QStringLiteral(":/northstar/icons/assetBrowser/soundsFolder.png"));
+            if(!soundFolder.isNull())return soundFolder;
         } else if(extension==".ycd") {
             static QIcon const animationFolder(
                 QStringLiteral(":/northstar/icons/assetBrowser/animFolder.png"));
@@ -770,6 +1052,23 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
 }
 QIcon QtContentBrowser::iconForRecord(AssetRecord const& record) const {
     if(record.directory)return iconForDirectory(record);
+    if(!record.is_virtual_entry()) {
+        auto const extension=QFileInfo(from8(record.virtual_path)).suffix().toLower();
+        // Cache the decoded resource icon across all cards and refreshes.
+        if(extension=="md" || extension=="markdown") {
+            static QIcon const md(QStringLiteral(":/northstar/icons/assetBrowser/fileMd.png"));
+            if(!md.isNull())return md;
+        } else if(extension=="js") {
+            static QIcon const js(QStringLiteral(":/northstar/icons/assetBrowser/fileJs.png"));
+            if(!js.isNull())return js;
+        } else if(extension=="vert") {
+            static QIcon const vert(QStringLiteral(":/northstar/icons/assetBrowser/vertShader.png"));
+            if(!vert.isNull())return vert;
+        } else if(extension=="frag") {
+            static QIcon const frag(QStringLiteral(":/northstar/icons/assetBrowser/fragShader.png"));
+            if(!frag.isNull())return frag;
+        }
+    }
     if(record.is_virtual_entry()) {
         // The virtual child is an individual skeleton or animation record:
         // container_path is the physical NEF8 dictionary; entry_name is
@@ -791,6 +1090,13 @@ QIcon QtContentBrowser::iconForRecord(AssetRecord const& record) const {
     return iconFor(record.kind);
 }
 QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
+    if(!rec.directory && !rec.is_virtual_entry()) {
+        auto const suffix=QFileInfo(from8(rec.virtual_path)).suffix().toLower();
+        if(suffix=="md" || suffix=="markdown")return "Markdown Document";
+        if(suffix=="js")return "JavaScript Source";
+        if(suffix=="vert")return "GLSL Vertex Shader";
+        if(suffix=="frag")return "GLSL Fragment Shader";
+    }
     QString const type=QString::fromLatin1(kind_name(rec.kind));
     if(rec.kind==AssetKind::prefab && !rec.directory) {
         if(!rec.prefab_valid)return "Prefab - Invalid Scene V3";
@@ -806,7 +1112,8 @@ QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
                             (extension==".ydd" || extension==".ydr")?"model":
                             extension==".ymat"?"material":
                             extension==".ymt"?"joint":
-                            extension==".ycd"?"animation clip":"item";
+                            extension==".ycd"?"animation clip":
+                            extension==".nac"?"audio track":"item";
         return QString::number(number)+" "+singular+
                (number==1?"":"s");
     }
@@ -824,19 +1131,40 @@ QColor QtContentBrowser::accentColor(AssetRecord const& rec) const {
         if(ext==".ymat")return asset_palette(AssetKind::material).fill;
         if(ext==".ymt")return asset_palette(AssetKind::skeleton).fill;
         if(ext==".ycd")return asset_palette(AssetKind::animation).fill;
+        if(ext==".nac")return asset_palette(AssetKind::audio).fill;
     }
     return asset_palette(rec.directory?AssetKind::folder:rec.kind).fill;
 }
 void QtContentBrowser::populateItems() {
     visible_items_.clear();
     entries_->clear();
-    QString text=search_->text().trimmed();
+    QString const text=search_->text().trimmed();
+    AssetQuery const query(text);
+    search_->setToolTip(query.valid()?
+        "AND / OR / NOT, parentheses, quoted terms, name:, path:, type:, ext:, is:, size>10MB":
+        query.error());
+    QStringList collectionList;
+    if(active_collection_.startsWith("@team/")) {
+        asset_collections::Items team;
+        QString issue;
+        if(asset_team_collections::load(root_,team,issue))
+            collectionList=team.value(active_collection_.mid(6));
+    }else if(!active_collection_.isEmpty())
+        collectionList=asset_collections::load(root_).value(active_collection_);
+    QSet<QString> collectionSet;
+    for(QString const& path:collectionList)collectionSet.insert(path);
     auto choice=types_->currentIndex();
+    std::vector<AssetRecord const*> matches;
+    matches.reserve(activeCatalog().entries().size());
     for(auto const& rec:activeCatalog().entries()) {
         auto path=from8(rec.virtual_path);
+        if(!active_collection_.isEmpty() &&
+           !collectionSet.contains(path))continue;
         if(!text.isEmpty()) {
-            if(!path.contains(text,Qt::CaseInsensitive))continue;
-        } else if(parentVirtual(path)!=folder_)continue;
+            bool const matchesQuery=query.matches(rec);
+            if(!matchesQuery)continue;
+        } else if(active_collection_.isEmpty() &&
+                  parentVirtual(path)!=folder_)continue;
         if(choice>0 && !rec.directory) {
             AssetKind desired=AssetKind::other;
             switch(choice) {
@@ -852,10 +1180,41 @@ void QtContentBrowser::populateItems() {
             case 10:desired=AssetKind::prefab;break;
             case 11:desired=AssetKind::character;break;
             case 12:desired=AssetKind::material_function;break;
+            case 13:desired=AssetKind::collision;break;
             default:break;
             }
             if(rec.kind!=desired)continue;
         }
+        matches.push_back(&rec);
+    }
+    // Sort only visible entries; catalog indices and asset references remain stable.
+    QCollator natural;
+    natural.setCaseSensitivity(Qt::CaseInsensitive);
+    natural.setNumericMode(true);
+    std::stable_sort(matches.begin(),matches.end(),
+        [this,&natural](AssetRecord const* a,AssetRecord const* b) {
+            if(a->directory!=b->directory)return a->directory;
+            auto compare=[&](AssetRecord const* x,AssetRecord const* y) {
+                int result=natural.compare(from8(x->filename),from8(y->filename));
+                if(result!=0)return result<0;
+                return x->virtual_path<y->virtual_path;
+            };
+            switch(sort_->currentIndex()) {
+                case 1:return compare(b,a);
+                case 2:
+                    if(a->kind!=b->kind)
+                        return QString::compare(kind_name(a->kind),kind_name(b->kind),
+                                                Qt::CaseInsensitive)<0;
+                    break;
+                case 3:if(a->size!=b->size)return a->size>b->size;break;
+                case 4:if(a->size!=b->size)return a->size<b->size;break;
+                default:break;
+            }
+            return compare(a,b);
+        });
+    for(auto const* match:matches) {
+        auto const& rec=*match;
+        auto path=from8(rec.virtual_path);
         auto const icon=iconForRecord(rec);
         auto* item=new QStandardItem(icon,from8(rec.filename));
         item->setEditable(false);
@@ -867,6 +1226,8 @@ void QtContentBrowser::populateItems() {
         const auto subtitle=subtitleText(rec);
         item->setData(subtitle,asset_card_roles::subtitle);
         item->setData(accentColor(rec),asset_card_roles::accent_color);
+        if(!engine_selected_)
+            item->setData(git_decorations_.value(path),asset_card_roles::git_status);
         if(thumbs_.contains(path))
             item->setData(thumbs_.value(path),asset_card_roles::preview_image);
         item->setToolTip(path+"\n"+subtitle+
@@ -964,12 +1325,19 @@ void QtContentBrowser::updateDetails() {
     if(selected.isEmpty()) {
         preview_name_->setText("Select an asset");
         preview_icon_->clear();preview_details_->setText({});
+        audio_preview_->hide();
         return;
     }
     auto index=grid_->currentIndex();
     auto kind=static_cast<AssetKind>(index.data(role_kind).toInt());
+    audio_preview_->setVisible(kind==AssetKind::audio);
     auto filename=selected.section('/',-1);
+    if(auto const* selectedRecord=activeCatalog().find(
+            selected.toUtf8().toStdString());
+       selectedRecord && selectedRecord->is_virtual_entry())
+        filename=from8(selectedRecord->filename);
     preview_name_->setText(filename);
+    preview_name_->setToolTip(filename);
     if(thumbs_.contains(selected)) {
         preview_icon_->setPixmap(QPixmap::fromImage(thumbs_[selected]).scaled(
             190,190,Qt::KeepAspectRatio,Qt::SmoothTransformation));
@@ -1055,14 +1423,40 @@ void QtContentBrowser::updateDetails() {
         }
     }
     if(rec && rec->is_list_file()) {
-        info+="\nNEF8 ListFile (virtual directory)";
+        if(fs::path(rec->virtual_path).extension()==".nac")
+            info+="\nNorthStar Audio Container (NAC)";
+        else
+            info+="\nNEF8 ListFile (virtual directory)";
         info+="\nEntries: "+QString::number(rec->virtual_child_count);
     } else if(rec) {
-        auto file=QFileInfo(qt(activeCatalog().backing_file(rec->virtual_path)));
+
         info+="\nSize: "+bytesText(rec->size);
-        info+="\nModified: "+file.lastModified().toString(Qt::ISODate);
+        if(rec->modified_epoch_ms)
+            info+="\nModified: "+QDateTime::fromMSecsSinceEpoch(
+                rec->modified_epoch_ms).toString(Qt::ISODate);
+        info+="\nSource: "+QString(engine_selected_?
+            "Engine Shared Assets (read-only)":"Project Assets");
+        info+="\nAsset ID: "+from8(rec->virtual_path);
         if(rec->is_virtual_entry())
-            info+="\nNEF8 entry: "+from8(rec->asset_reference());
+            info+=(fs::path(rec->container_path).extension()==".nac"?
+                QString("\nNAC track: ")+from8(rec->filename)+
+                "\nTrack ID: "+QString::number(rec->audio_track_id)+
+                "\nSample rate: "+QString::number(rec->audio_sample_rate)+" Hz"+
+                "\nChannels: "+QString::number(rec->audio_channels)+
+                "\nDuration: "+QString::number(
+                    rec->audio_sample_rate?double(rec->audio_frames)/
+                    rec->audio_sample_rate:0.0,'f',2)+" s"+
+                "\nReference: "+from8(rec->asset_reference()):
+                QString("\nNEF8 entry: ")+from8(rec->asset_reference()));
+    }
+    if(rec && registry_ && !engine_selected_) {
+        auto const references=registry_->dependenciesOf(selected);
+        auto const referencers=registry_->referencersOf(selected);
+        info+="\nDependencies: "+QString::number(references.size())+
+              "\nReferenced by: "+QString::number(referencers.size());
+        for(auto const& path:referencers.mid(0,8))
+            info+="\n  <- "+path;
+        if(referencers.size()>8)info+="\n  ...";
     }
     preview_details_->setText(info);
 }

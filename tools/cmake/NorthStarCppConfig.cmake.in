@@ -1,4 +1,22 @@
 @PACKAGE_INIT@
+
+# Static engine runtime requires its font-shaping libraries when enabled at
+# build time. Reconstruct exactly the imported targets referenced by the
+# exported NorthStarCppTargets.cmake (not the build-tree imported objects).
+if("@NORTHSTARCPP_SDK_HAS_FONT_SHAPING@" STREQUAL "ON")
+    include(CMakeFindDependencyMacro)
+    find_dependency(PkgConfig)
+    pkg_check_modules(NORTHSTAR_UI_FT QUIET IMPORTED_TARGET freetype2)
+    pkg_check_modules(NORTHSTAR_UI_HB QUIET IMPORTED_TARGET harfbuzz)
+    if(NOT TARGET PkgConfig::NORTHSTAR_UI_FT OR
+       NOT TARGET PkgConfig::NORTHSTAR_UI_HB)
+        set(NorthStarCpp_FOUND FALSE)
+        set(NorthStarCpp_NOT_FOUND_MESSAGE
+            "NorthStarCpp SDK requires FreeType and HarfBuzz development packages (pkg-config).")
+        return()
+    endif()
+endif()
+
 if(NOT TARGET NorthStarCpp::zlib)
     add_library(NorthStarCpp::zlib STATIC IMPORTED)
     set_target_properties(NorthStarCpp::zlib PROPERTIES

@@ -62,7 +62,10 @@ void RendererState::record_deferred_pass(FramePassContext& context) {
                 csm.cascades[0].far_distance,csm.cascades[1].far_distance,
                 csm.cascades[2].far_distance,0.08f};
             std::memcpy(deferred_constant_data+352,shadow_splits,sizeof(shadow_splits));
-            float const hdr_settings[4]{hdr_enabled?1.f:0.f,0.f,0.f,0.f};
+            float const hdr_settings[4]{hdr_enabled?1.f:0.f,
+                float(gbuffer_debug_mode),
+                frame.camera_override && frame.camera_far_clip>0.f?
+                    frame.camera_far_clip:250.f,gbuffer_v2?1.f:0.f};
             std::memcpy(deferred_constant_data+368,hdr_settings,sizeof(hdr_settings));
             float normalized_shadow_bias[4]{};
             for(UINT cascade=0;cascade<cascade_count;++cascade) {
@@ -80,15 +83,18 @@ void RendererState::record_deferred_pass(FramePassContext& context) {
             if(!dynamic_lights.empty()) {
                 if(!dynamic_light_bytes||!tile_index_bytes)
                     throw std::runtime_error("Tiled lighting upload not initialized");
-                std::memcpy(dynamic_light_bytes,dynamic_lights.data(),
-                    dynamic_lights.size()*sizeof(NorthStarRenderLight));
-                auto grid=northstarcpp::render::build_tile_lights(width,height,inverse,
+                bool const dirty=tile_light_cache.update(width,height,inverse,
                     {eye.x,eye.y,eye.z},dynamic_lights.data(),
                     static_cast<std::uint32_t>(dynamic_lights.size()));
-                if(grid.indices.size()!=tile_buffer_entries)
-                    throw std::runtime_error("Tiled lighting SRV size mismatch");
-                std::memcpy(tile_index_bytes,grid.indices.data(),
-                    grid.indices.size()*sizeof(std::uint32_t));
+                if(dirty) {
+                    auto const& grid=tile_light_cache.grid();
+                    if(grid.indices.size()!=tile_buffer_entries)
+                        throw std::runtime_error("Tiled lighting SRV size mismatch");
+                    std::memcpy(dynamic_light_bytes,dynamic_lights.data(),
+                        dynamic_lights.size()*sizeof(NorthStarRenderLight));
+                    std::memcpy(tile_index_bytes,grid.indices.data(),
+                        grid.indices.size()*sizeof(std::uint32_t));
+                }
             }
             ID3D12DescriptorHeap* lighting_heaps[]{deferred_srvs.Get()};
             commands->SetDescriptorHeaps(1,lighting_heaps);

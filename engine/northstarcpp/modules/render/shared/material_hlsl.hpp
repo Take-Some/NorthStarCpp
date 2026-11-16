@@ -39,6 +39,15 @@ cbuffer DynamicLights : register(b3) {
 #ifndef NS_GRAPH_EMISSIVE
 #define NS_GRAPH_EMISSIVE(p) float4(0,0,0,0)
 #endif
+#ifndef NS_GRAPH_AO
+#define NS_GRAPH_AO(p) float4(1,1,1,1)
+#endif
+#ifndef NS_GRAPH_CLEARCOAT
+#define NS_GRAPH_CLEARCOAT(p) float4(0,0,0,0)
+#endif
+#ifndef NS_GRAPH_SHEEN
+#define NS_GRAPH_SHEEN(p) float4(0,0,0,0)
+#endif
 #ifndef NS_GRAPH_OPACITY
 #define NS_GRAPH_OPACITY(p) float4(1,1,1,1)
 #endif
@@ -191,6 +200,9 @@ struct GBufferOut {
     float4 albedo_coverage : SV_Target0;
     float4 normal_roughness : SV_Target1;
     float4 emissive_metallic : SV_Target2;
+#if defined(NS_GBUFFER_V2)
+    float4 auxiliary : SV_Target3;
+#endif
 };
 GBufferOut material_gbuffer_ps(P p) {
     GBufferOut result;
@@ -226,6 +238,12 @@ GBufferOut material_gbuffer_ps(P p) {
     result.albedo_coverage=float4(saturate(albedo),opacity);
     result.normal_roughness=float4(n,factors.z>0.5?-rough:rough);
     result.emissive_metallic=float4(emissive,saturate(metal));
+#if defined(NS_GBUFFER_V2)
+    result.auxiliary=float4(
+        saturate(NS_GRAPH_AO(p).x),
+        saturate(NS_GRAPH_CLEARCOAT(p).x),
+        saturate(NS_GRAPH_SHEEN(p).x),0);
+#endif
     return result;
 }
 )";

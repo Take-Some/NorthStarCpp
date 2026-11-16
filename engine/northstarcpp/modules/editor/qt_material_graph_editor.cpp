@@ -8,6 +8,17 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QColorDialog>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QScrollArea>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QSplitter>
+#include <QTimer>
+#include <QFrame>
+#include <QToolButton>
+#include <QSignalBlocker>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QGraphicsEllipseItem>
@@ -20,6 +31,7 @@
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonValue>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QLabel>
@@ -239,6 +251,21 @@ protected:
         }
         QGraphicsView::mouseDoubleClickEvent(event);
     }
+    void drawBackground(QPainter* painter,QRectF const& visible) override {
+        painter->fillRect(visible,QColor("#131820"));
+        auto drawGrid=[&](int step,QColor tint) {
+            painter->setPen(QPen(tint,0));
+            const auto startX=qreal(std::floor(visible.left()/step))*step;
+            const auto startY=qreal(std::floor(visible.top()/step))*step;
+            for(qreal x=startX;x<=visible.right();x+=step)
+                painter->drawLine(QPointF(x,visible.top()),QPointF(x,visible.bottom()));
+            for(qreal y=startY;y<=visible.bottom();y+=step)
+                painter->drawLine(QPointF(visible.left(),y),QPointF(visible.right(),y));
+        };
+        if(transform().m11()>=.52)
+            drawGrid(16,QColor(39,47,58));
+        drawGrid(128,QColor(59,69,82));
+    }
     void wheelEvent(QWheelEvent* event) override {
         double next=transform().m11()*(event->angleDelta().y()>0?1.12:1./1.12);
         if(next>=0.3 && next<=3.2)
@@ -330,18 +357,122 @@ MaterialGraphEditor::MaterialGraphEditor(QJsonObject const& graph,QWidget* paren
     auto* reset=new QPushButton("Reset",this);
     auto* enable=new QPushButton("Enable Graph",this);
     auto* verify=new QPushButton("Validate",this);
+    auto* frameAll=new QPushButton("Fit Graph",this);
+    auto* frameSelected=new QPushButton("Focus",this);
+    auto* snap=new QCheckBox("Snap 16",this);
+    snap->setObjectName("materialGraphSnapToGrid");
+    snap->setChecked(true);
     for(QWidget* control:std::initializer_list<QWidget*>{search_,palette_,add,remove,
-                           groupButton,back,forward,reset,enable,verify})toolbar->addWidget(control);
+                           groupButton,back,forward,reset,enable,verify,
+                           frameAll,frameSelected,snap})toolbar->addWidget(control);
     layout->addLayout(toolbar);
     scene_=new QGraphicsScene(this);
     scene_->setSceneRect(-650,-450,2050,1300);
     view_=new GraphCanvas(this,scene_);
     view_->setObjectName("materialGraphCanvas");
-    layout->addWidget(view_,1);
+    auto* workspace=new QSplitter(Qt::Horizontal,this);
+    workspace->setObjectName("materialGraphWorkspace");
+    workspace->addWidget(view_);
+    auto* sidebar=new QWidget(workspace);
+    sidebar->setObjectName("materialGraphRightSidebar");
+    auto* sidebarLayout=new QVBoxLayout(sidebar);
+    sidebarLayout->setContentsMargins(4,4,4,4);
+    sidebarLayout->setSpacing(5);
+    auto* libraryTitle=new QLabel("MATERIAL EXPRESSIONS",sidebar);
+    libraryTitle->setStyleSheet("color:#e9c76a;font-weight:600;padding:5px");
+    sidebarLayout->addWidget(libraryTitle);
+    auto* librarySearch=new QLineEdit(sidebar);
+    librarySearch->setObjectName("materialGraphLibrarySearch");
+    librarySearch->setPlaceholderText("Search expressions (Space)...");
+    librarySearch->setClearButtonEnabled(true);
+    sidebarLayout->addWidget(librarySearch);
+    auto* library=new QTreeWidget(sidebar);
+    library->setObjectName("materialGraphNodeLibrary");
+    library->setHeaderHidden(true);
+    library->setRootIsDecorated(true);
+    library->setIndentation(14);
+    library->setMinimumHeight(130);
+    sidebarLayout->addWidget(library,1);
+    auto* detailsTitle=new QLabel("DETAILS",sidebar);
+    detailsTitle->setStyleSheet("color:#e9c76a;font-weight:600;padding:5px");
+    sidebarLayout->addWidget(detailsTitle);
+    auto* detailsScroll=new QScrollArea(sidebar);
+    detailsScroll->setObjectName("materialGraphDetailsPanel");
+    detailsScroll->setWidgetResizable(true);
+    detailsScroll->setMinimumWidth(225);
+    detailsScroll->setMaximumWidth(420);
+    detailsScroll->setFrameShape(QFrame::StyledPanel);
+    detailsContent_=new QWidget(detailsScroll);
+    detailsForm_=new QFormLayout(detailsContent_);
+    detailsForm_->setContentsMargins(12,12,12,12);
+    detailsForm_->setSpacing(8);
+    detailsHint_=new QLabel(detailsContent_);
+    detailsHint_->setWordWrap(true);
+    detailsScroll->setWidget(detailsContent_);
+    auto addLibraryCategory=[library](QString const& title,
+        std::initializer_list<char const*> entries) {
+        auto* group=new QTreeWidgetItem(library,QStringList{title});
+        group->setFlags(Qt::ItemIsEnabled);
+        for(auto const* entry:entries) {
+            QString const op=QString::fromLatin1(entry);
+            auto* item=new QTreeWidgetItem(group,QStringList{
+                nodeTitle(QJsonObject{{"op",op}})});
+            item->setData(0,Qt::UserRole,op);
+            item->setToolTip(0,"Double-click to add this expression to the graph");
+        }
+        group->setExpanded(true);
+    };
+    addLibraryCategory("Input / Constants",
+        {"parameter","texture","scalar","vector2","vector3","color"});
+    addLibraryCategory("Mathematics",
+        {"add","multiply","lerp","dot","one_minus","saturate","normalize"});
+    addLibraryCategory("Conversions",{"component","cast"});
+    addLibraryCategory("Functions",{"function"});
+    connect(librarySearch,&QLineEdit::textChanged,this,
+        [library](QString const& query) {
+        for(int i=0;i<library->topLevelItemCount();++i) {
+            auto* category=library->topLevelItem(i);
+            bool any=query.trimmed().isEmpty();
+            for(int j=0;j<category->childCount();++j) {
+                auto* item=category->child(j);
+                bool match=query.trimmed().isEmpty() ||
+                    item->text(0).contains(query,Qt::CaseInsensitive) ||
+                    item->data(0,Qt::UserRole).toString().contains(
+                        query,Qt::CaseInsensitive);
+                item->setHidden(!match);
+                any=any||match;
+            }
+            category->setHidden(!any);
+            if(!query.isEmpty())category->setExpanded(true);
+        }
+    });
+    connect(library,&QTreeWidget::itemDoubleClicked,this,
+        [this](QTreeWidgetItem* item,int) {
+        auto op=item->data(0,Qt::UserRole).toString();
+        if(!op.isEmpty())
+            addNode(op,view_->mapToScene(view_->viewport()->rect().center()));
+    });
+    sidebarLayout->addWidget(detailsScroll,2);
+    workspace->addWidget(sidebar);
+    workspace->setStretchFactor(0,1);
+    workspace->setStretchFactor(1,0);
+    workspace->setSizes({920,280});
+    layout->addWidget(workspace,1);
     message_=new QLabel(this);
     message_->setObjectName("materialGraphStatus");
     message_->setWordWrap(true);
     layout->addWidget(message_);
+    stats_=new QLabel(this);
+    stats_->setObjectName("materialGraphCompileStats");
+    stats_->setStyleSheet("color:#91a9bc;font-size:11px");
+    layout->addWidget(stats_);
+    connect(scene_,&QGraphicsScene::selectionChanged,
+            this,&MaterialGraphEditor::updateNodeDetails);
+    connect(frameAll,&QPushButton::clicked,this,&MaterialGraphEditor::focusAll);
+    connect(frameSelected,&QPushButton::clicked,
+            this,&MaterialGraphEditor::focusSelection);
+    connect(snap,&QCheckBox::toggled,this,
+            [this](bool checked){snapEnabled_=checked;});
     connect(search_,&QLineEdit::textChanged,this,
             [this](QString const& text){highlightSearch(text);});
     connect(search_,&QLineEdit::returnPressed,this,[this] {
@@ -374,14 +505,25 @@ MaterialGraphEditor::MaterialGraphEditor(QJsonObject const& graph,QWidget* paren
     connect(verify,&QPushButton::clicked,this,[this] {
         QString error;
         if(validate(&error))
-            setMessage(enabled_?"Graph compiled successfully.":"Graph inactive; click Enable Graph to use it.");
+            setMessage(enabled_?
+                "Graph validated by CPU compiler. GPU preview updates on save.":
+                "Graph inactive; click Enable Graph to use it.");
         else setMessage(error,true);
     });
     auto* copyKey=new QShortcut(QKeySequence::Copy,this);
     auto* pasteKey=new QShortcut(QKeySequence::Paste,this);
     auto* deleteKey=new QShortcut(QKeySequence::Delete,view_);
     auto* findKey=new QShortcut(QKeySequence::Find,this);
+    auto* spaceKey=new QShortcut(QKeySequence(Qt::Key_Space),view_);
+    connect(spaceKey,&QShortcut::activated,librarySearch,
+        [librarySearch]{librarySearch->setFocus();librarySearch->selectAll();});
     auto* groupKey=new QShortcut(QKeySequence(Qt::CTRL|Qt::Key_G),this);
+    auto* frameKey=new QShortcut(QKeySequence(Qt::Key_F),view_);
+    auto* allKey=new QShortcut(QKeySequence(Qt::Key_Home),view_);
+    connect(frameKey,&QShortcut::activated,this,
+            &MaterialGraphEditor::focusSelection);
+    connect(allKey,&QShortcut::activated,this,
+            &MaterialGraphEditor::focusAll);
     connect(groupKey,&QShortcut::activated,this,[this]{createCommentGroup();});
     connect(copyKey,&QShortcut::activated,this,[this]{copySelection();});
     connect(pasteKey,&QShortcut::activated,this,[this]{pasteSelection();});
@@ -396,6 +538,215 @@ MaterialGraphEditor::MaterialGraphEditor(QJsonObject const& graph,QWidget* paren
     setMessage(enabled_?"Drag a pin to another pin. Double-click nodes to edit values."
                        :"Default graph preview. Click Enable Graph to save it.");
 }
+
+MaterialGraphEditor::~MaterialGraphEditor() {
+    // QGraphicsScene::clear()/destruction emits selectionChanged while
+    // QObject children outlive this class's C++ members. Disconnect before
+    // graphics_ and detailsForm_ are destroyed to avoid UAF on shutdown.
+    if(scene_) {
+        QObject::disconnect(scene_,nullptr,this,nullptr);
+        QSignalBlocker guard(scene_);
+        scene_->clear();
+    }
+    pins_.clear();graphics_.clear();groupGraphics_.clear();wires_.clear();
+}
+void MaterialGraphEditor::applyNodeDetail(QString const& id,QString const& field,
+                                          QJsonValue const& value) {
+    auto next=withPositions();
+    auto nodes=next.value("nodes").toArray();
+    bool changed=false;
+    for(int i=0;i<nodes.size();++i) {
+        auto node=nodes[i].toObject();
+        if(node.value("id").toString()!=id)continue;
+        if(node.value(field)==value)return;
+        // Do not create unknown attributes in the serialized graph.
+        if(field!="value" && field!="parameter" && field!="slot" &&
+           field!="component" && field!="to" && field!="output")return;
+        node[field]=value;
+        nodes.replace(i,node);
+        changed=true;
+        break;
+    }
+    if(!changed)return;
+    next["nodes"]=nodes;
+    commit(next);
+    // Preserve the edited selection during the graph's visual rebuild.
+    if(auto* item=graphics_.value(id,nullptr)) {
+        QSignalBlocker block(scene_);
+        item->setSelected(true);
+    }
+    updateNodeDetails();
+}
+void MaterialGraphEditor::focusSelection() {
+    QRectF bounds;
+    bool found=false;
+    for(auto const* item:scene_->selectedItems()) {
+        if(!found){bounds=item->sceneBoundingRect();found=true;}
+        else bounds=bounds.united(item->sceneBoundingRect());
+    }
+    if(!found) {focusAll();return;}
+    view_->fitInView(bounds.adjusted(-75,-75,75,75),Qt::KeepAspectRatio);
+}
+void MaterialGraphEditor::focusAll() {
+    QRectF bounds=scene_->itemsBoundingRect();
+    if(!bounds.isValid()||bounds.isEmpty())return;
+    view_->fitInView(bounds.adjusted(-110,-100,110,100),Qt::KeepAspectRatio);
+}
+void MaterialGraphEditor::updateNodeDetails() {
+    if(!detailsForm_ || !detailsContent_)return;
+    while(detailsForm_->rowCount()>0)detailsForm_->removeRow(0);
+    QString id;
+    for(auto it=graphics_.constBegin();it!=graphics_.constEnd();++it) {
+        if(it.value()->isSelected()) {id=it.key();break;}
+    }
+    if(id.isEmpty()) {
+        auto* help=new QLabel(
+            "Select a graph node to edit its parameters here.\n"
+            "Drag pins to connect, middle-drag to pan, F to frame "
+            "selection and Home to frame all nodes.",detailsContent_);
+        help->setObjectName("materialGraphDetailsHelp");
+        help->setWordWrap(true);
+        detailsForm_->addRow(help);
+        return;
+    }
+    QJsonObject node;
+    for(auto const& raw:document_.value("nodes").toArray()) {
+        auto candidate=raw.toObject();
+        if(candidate.value("id").toString()==id) {
+            node=candidate;break;
+        }
+    }
+    if(node.isEmpty())return;
+    auto const op=node.value("op").toString();
+    auto* heading=new QLabel(nodeTitle(node),detailsContent_);
+    heading->setObjectName("materialGraphSelectedNode");
+    heading->setWordWrap(true);
+    heading->setStyleSheet("font-size:13px;font-weight:600;color:#e4d0a2");
+    detailsForm_->addRow(heading);
+    auto* identifier=new QLabel("Entity: "+id+"  |  "+sourceTypeLabel(node),
+                                detailsContent_);
+    identifier->setWordWrap(true);
+    identifier->setStyleSheet("color:#a4b4c5");
+    detailsForm_->addRow(identifier);
+    // Queue edits because an immediate commit rebuilds the QGraphicsScene
+    // and details panel, deleting the widget that emitted editingFinished.
+    auto deferred=[this,id](QString key,QJsonValue value) {
+        QTimer::singleShot(0,this,[this,id,key=std::move(key),
+                                   value=std::move(value)] {
+            applyNodeDetail(id,key,value);
+        });
+    };
+    auto choice=[&](QString field,QStringList const& values,QString label) {
+        auto* combo=new QComboBox(detailsContent_);
+        combo->setObjectName("materialGraphDetail_"+field);
+        combo->addItems(values);
+        auto idx=combo->findText(node.value(field).toString());
+        combo->setCurrentIndex(idx>=0?idx:0);
+        detailsForm_->addRow(label,combo);
+        connect(combo,&QComboBox::currentTextChanged,this,
+                [deferred,field](QString const& value) {
+                    deferred(field,value);
+                });
+    };
+    if(op=="parameter")choice("parameter",parameters,"Parameter");
+    if(op=="texture")choice("slot",textureSlots,"Texture slot");
+    if(op=="component")
+        choice("component",{"x","y","z","w"},"Component");
+    if(op=="cast")
+        choice("to",{"scalar","vector2","vector3","vector4"},"Output type");
+    if(op=="function") {
+        auto const source=functionDescriptor(node.value("path").toString());
+        QStringList outputs;
+        for(auto const& raw:source.value("outputs").toArray())
+            outputs.append(raw.toObject().value("name").toString());
+        if(!outputs.isEmpty())choice("output",outputs,"Function output");
+        auto* file=new QLabel(node.value("path").toString(),detailsContent_);
+        file->setWordWrap(true);
+        detailsForm_->addRow("Function",file);
+    }
+    if(op=="scalar") {
+        auto* control=new QDoubleSpinBox(detailsContent_);
+        control->setObjectName("materialGraphDetailScalar");
+        control->setRange(-64.,64.);
+        control->setDecimals(5);
+        control->setSingleStep(.05);
+        control->setValue(node.value("value").toDouble(.5));
+        detailsForm_->addRow("Value",control);
+        connect(control,&QDoubleSpinBox::editingFinished,this,
+                [control,deferred] {deferred("value",control->value());});
+    }
+    if(op=="vector2"||op=="vector3"||op=="color") {
+        int const size=op=="vector2"?2:op=="vector3"?3:4;
+        auto const initial=node.value("value").toArray();
+        auto* row=new QWidget(detailsContent_);
+        auto* line=new QHBoxLayout(row);
+        line->setContentsMargins(0,0,0,0);
+        line->setSpacing(3);
+        for(int i=0;i<size;++i) {
+            auto* control=new QDoubleSpinBox(row);
+            control->setObjectName("materialGraphDetailChannel"+QString::number(i));
+            control->setDecimals(4);
+            control->setRange(op=="color"?0.:-64.,op=="color"?1.:64.);
+            control->setSingleStep(op=="color"?.02:.1);
+            control->setValue(i<initial.size()?initial[i].toDouble():0.);
+            control->setPrefix(QString("RGBA").mid(i,1)+":");
+            line->addWidget(control,1);
+            connect(control,&QDoubleSpinBox::editingFinished,this,
+                    [this,id,i,control] {
+                double const updated=control->value();
+                QTimer::singleShot(0,this,[this,id,i,updated] {
+                    for(auto const& raw:document_.value("nodes").toArray()) {
+                        auto n=raw.toObject();
+                        if(n.value("id").toString()!=id)continue;
+                        auto components=n.value("value").toArray();
+                        if(components.size()>i) {
+                            components[i]=updated;
+                            applyNodeDetail(id,"value",components);
+                        }
+                        break;
+                    }
+                });
+            });
+        }
+        detailsForm_->addRow("Channels",row);
+        if(op=="color") {
+            auto* swatch=new QPushButton("Choose Color...",detailsContent_);
+            swatch->setObjectName("materialGraphChooseColor");
+            detailsForm_->addRow(swatch);
+            connect(swatch,&QPushButton::clicked,this,[this,id] {
+                for(auto const& raw:document_.value("nodes").toArray()) {
+                    auto n=raw.toObject();
+                    if(n.value("id").toString()!=id)continue;
+                    auto components=n.value("value").toArray();
+                    QColor previous(Qt::white);
+                    if(components.size()==4)
+                        previous.setRgbF(components[0].toDouble(),
+                            components[1].toDouble(),
+                            components[2].toDouble(),
+                            components[3].toDouble());
+                    auto selected=QColorDialog::getColor(
+                        previous,this,"Material Color",QColorDialog::ShowAlphaChannel);
+                    if(selected.isValid()) {
+                        QJsonArray next{selected.redF(),selected.greenF(),
+                                        selected.blueF(),selected.alphaF()};
+                        QTimer::singleShot(0,this,[this,id,next] {
+                            applyNodeDetail(id,"value",next);
+                        });
+                    }
+                    break;
+                }
+            });
+        }
+    }
+    if(auto inputs=nodeInputs(node);!inputs.isEmpty()) {
+        auto* hint=new QLabel("Inputs: "+inputs.join(", ")+
+            "\nDrag typed pins in the graph to change connections.",
+            detailsContent_);
+        hint->setWordWrap(true);
+        detailsForm_->addRow(hint);
+    }
+}
+
 QJsonObject MaterialGraphEditor::graph() const {
     return enabled_?withPositions():QJsonObject{};
 }
@@ -631,6 +982,18 @@ void MaterialGraphEditor::draw() {
           op=="color"||op=="scalar"?QColor("#686147"):QColor("#345b68");
         bar->setBrush(barColor);
         addText(box,nodeTitle(item).left(28),9,6);
+        if(op=="color") {
+            auto rgba=item.value("value").toArray();
+            if(rgba.size()>=3) {
+                QColor tint;
+                tint.setRgbF(std::clamp(rgba[0].toDouble(),0.,1.),
+                             std::clamp(rgba[1].toDouble(),0.,1.),
+                             std::clamp(rgba[2].toDouble(),0.,1.));
+                auto* swatch=new QGraphicsRectItem(16,39,128,15,box);
+                swatch->setBrush(tint);
+                swatch->setPen(QPen(QColor("#a9bac5"),.8));
+            }
+        }
         addText(box,id,12,height-22,QColor("#91a9bc"));
         addPin(box,id,{},true,212,44,
                op=="function"||op=="function_input"?
@@ -678,6 +1041,9 @@ void MaterialGraphEditor::draw() {
         addText(output,names[i].toUpper(),14,y-11);
     }
     refreshWires();
+    if(stats_)stats_->setText(QString("Nodes: %1  |  Links: %2  |  Comment groups: %3  |  Zoom: wheel  |  Pan: middle mouse  |  Frame: F / Home")
+        .arg(nodes.size()).arg(wires_.size()).arg(groups.size()));
+    updateNodeDetails();
     if(search_)highlightSearch(search_->text());
 }
 void MaterialGraphEditor::refreshWires() {
@@ -876,6 +1242,17 @@ QString MaterialGraphEditor::nodeAt(QPointF position) const {
     return {};
 }
 void MaterialGraphEditor::moveFinished() {
+    if(snapEnabled_) {
+        auto snap=[](qreal x) {return std::round(x/16.)*16.;};
+        auto alignItem=[&](QGraphicsRectItem* item) {
+            if(!item->isSelected())return;
+            auto const p=item->scenePos();
+            item->setPos(item->pos()+QPointF(snap(p.x())-p.x(),
+                                              snap(p.y())-p.y()));
+        };
+        for(auto* item:graphics_)alignItem(item);
+        for(auto* item:groupGraphics_)alignItem(item);
+    }
     auto next=withPositions();
     if(next==document_)return;
     if(undo_.size()>=80)undo_.removeFirst();

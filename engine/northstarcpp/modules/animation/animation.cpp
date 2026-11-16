@@ -1,6 +1,8 @@
 // NorthStarCpp — scene transform animation service
 // Copyright (c) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/scene_animation.hpp>
+#include <northstarcpp/scene_pawn.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include "transition_curve.h"
 #include <boost/property_tree/json_parser.hpp>
 #include <algorithm>
@@ -140,7 +142,7 @@ void SceneAnimationPlayer::play(Scene const& scene, std::uint64_t id,
         [id](SceneObject const& obj){return obj.node.id==id;});
     if (found==scene.objects.end())
         throw std::out_of_range("Animation entity ID is not present in the scene");
-    if (found->player || found->mass!=0.f)
+    if (scene_pawn::is_pawn(scene,*found) || found->mass!=0.f)
         throw std::invalid_argument("Transform clips currently require static non-player entities");
     auto const i=static_cast<std::size_t>(found-scene.objects.begin());
     playing_.insert_or_assign(id,Instance{std::move(clip),i,id,

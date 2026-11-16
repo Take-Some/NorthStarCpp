@@ -46,7 +46,10 @@ int main(int argc,char** argv) {
         // Both the viewport and form must explicitly carry the editor's
         // dark palette, independent of QMainWindow/QDockWidget QSS.
         QColor const inspectorDark("#151c26");
-        check(elements.scroll->objectName()=="inspectorScrollArea" &&
+        check(elements.panel->objectName()=="inspectorPanel" &&
+              elements.search->objectName()=="detailsPropertySearch" &&
+              elements.search->isClearButtonEnabled() &&
+              elements.scroll->objectName()=="inspectorScrollArea" &&
               elements.scroll->viewport()->objectName()=="inspectorViewport" &&
               elements.content->objectName()=="inspectorFormContent",
               "Inspector dark-theme style selectors changed");
@@ -81,7 +84,7 @@ int main(int argc,char** argv) {
         help->setWordWrap(true);
         elements.form->addRow(help);
         elements.scroll->setWidget(elements.content);
-        inspector->setWidget(elements.scroll);
+        inspector->setWidget(elements.panel);
         editor.addDockWidget(Qt::RightDockWidgetArea,inspector);
 
         auto* browser=new QDockWidget("Content Browser",&editor);
@@ -89,6 +92,18 @@ int main(int argc,char** argv) {
         browser->setWidget(new QTreeWidget(browser));
         editor.addDockWidget(Qt::BottomDockWidgetArea,browser);
         editor.show();
+        // Search is pinned above the scroll viewport and filters by labels.
+        elements.search->setText("ECS");
+#if QT_VERSION >= QT_VERSION_CHECK(6,4,0)
+        check(elements.form->isRowVisible(ecs) &&
+              !elements.form->isRowVisible(apply),
+              "Details property search did not filter the form");
+#endif
+        elements.search->clear();
+#if QT_VERSION >= QT_VERSION_CHECK(6,4,0)
+        check(elements.form->isRowVisible(apply),
+              "Clearing property search did not restore hidden rows");
+#endif
         QCoreApplication::processEvents(QEventLoop::AllEvents,50);
         auto contentPixels=elements.content->grab(
             QRect(1,1,5,5)).toImage();

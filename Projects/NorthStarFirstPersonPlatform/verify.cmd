@@ -1,15 +1,19 @@
 @echo off
 setlocal
 for %%I in ("%~dp0..\..") do set "ROOT=%%~fI"
-set "PLAYER=%ROOT%\out\fps-release-qa-20261114\northstarcpp_player.exe"
+if defined NORTHSTARCPP_PLAYER_EXE (
+  set "PLAYER=%NORTHSTARCPP_PLAYER_EXE%"
+) else (
+  set "PLAYER=%ROOT%\..\cache\qt-pie-icons-build\northstarcpp_player.exe"
+)
 if not exist "%PLAYER%" (
-  echo [ERROR] Current NorthStarCpp development Player is not built.
-  echo Expected: "%PLAYER%"
-  echo Build: cmake --build out/fps-release-qa-20261114 --target northstarcpp_player
+  echo [ERROR] Current Player not built: "%PLAYER%"
   exit /b 2
 )
+set "NORTHSTARCPP_PHYSICS_PROVIDER=jolt"
+set "NORTHSTARCPP_RENDER_PROVIDER=d3d12"
 cd /d "%ROOT%"
-"%PLAYER%" --warp --check-scene --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\sharedAssets" %*
+"%PLAYER%" --warp --check-scene --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\sharedAssets"
 if errorlevel 1 exit /b %ERRORLEVEL%
 "%PLAYER%" --warp --runtime-init-smoke --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\sharedAssets"
 exit /b %ERRORLEVEL%

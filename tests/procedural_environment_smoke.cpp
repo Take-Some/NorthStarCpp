@@ -1,3 +1,4 @@
+#include "qa_scene_fixture.hpp"
 #include <northstarcpp/procedural_environment.hpp>
 #include <northstarcpp/scene_world.hpp>
 #include <algorithm>
@@ -36,7 +37,7 @@ int main() {
               "Generated world exceeds object cap");
         unsigned players=0,solid=0;
         for (auto const& o: generated.objects) {
-            if (o.player) ++players;
+            if (northstarcpp::scene_pawn::is_local(generated,o)) ++players;
             else if(o.mass==0 && o.node.collision && !o.node.cell.empty()) ++solid;
         }
         check(players==1 && solid>world.columns*world.rows,

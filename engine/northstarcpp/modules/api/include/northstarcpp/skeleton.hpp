@@ -52,7 +52,21 @@ class SkeletonPose {
 public:
     explicit SkeletonPose(Skeleton const&);
     void sample(Skeleton const&, SkeletalClip const&, float seconds, bool in_place);
+    // Presentation-only CCD grip; never modifies the authored YCD clip.
+    // Targets are in the same skeleton-local space as joints_world().
+    bool aim_hand(Skeleton const&, char const* shoulder, char const* elbow,
+                  char const* wrist, math::float3 target, unsigned iterations=5);
+
+    // Anatomically constrained two-bone IK with an explicit elbow pole.
+    // Keeps imported animation and mesh weights unchanged.
+    bool pose_two_bone(Skeleton const&, char const* shoulder,
+                       char const* elbow, char const* wrist,
+                       math::float3 target, math::float3 elbow_pole,
+                       float shoulder_limit=1.55f,
+                       float elbow_limit=1.80f);
+
     std::vector<math::float4x4> const& palette() const { return palette_; }
+    std::vector<math::float4x4> const& joints_world() const { return global_; }
 private:
     std::vector<JointTransform> local_;
     std::vector<math::float4x4> global_, palette_;

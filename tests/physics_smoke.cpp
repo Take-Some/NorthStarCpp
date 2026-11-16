@@ -1,8 +1,13 @@
+#include "qa_scene_fixture.hpp"
 // NorthStarCpp
 // Author: Kayla Verner
 // Updated: 2026
 
 #include <northstarcpp/physics.hpp>
+#include <northstarcpp/collision_authoring.hpp>
+#include <northstarcpp/collision_mesh.hpp>
+#include <northstarcpp/collision_hulls.hpp>
+#include <northstarcpp/collision_wireframe.hpp>
 #include <northstarcpp/scene_world.hpp>
 
 #include <cmath>
@@ -36,14 +41,14 @@ int fail(char const* reason)
 
 int main()
 {
-    Scene const falling{{
+    Scene const falling=qa::make({
         {"Floor block", {0.f, 0.f, 0.f}, 2.f, 0xffffff, false, 0.f},
         {"Stacked cube", {0.f, 5.f, 0.f}, 1.f, 0xffffff, false, 2.f},
         {"Ground cube", {5.f, 4.f, 0.f}, 1.f, 0xffffff, false, 3.f},
-    }};
+    });
     PhysicsScene gravity(falling);
     char const* requested_provider = std::getenv("NORTHSTARCPP_EXPECT_PHYSICS");
-    std::string const provider = requested_provider ? requested_provider : "Bullet";
+    std::string const provider = requested_provider ? requested_provider : "Jolt";
     std::string const version = provider == "Jolt" ? "5.6.0" : "3.25";
     if (gravity.provider_name() != provider || gravity.provider_version() != version)
         return fail("Unexpected physics provider or SDK version");
@@ -56,11 +61,11 @@ int main()
         bodies[0].position.y != 0.f || falling.objects[1].position.y != 5.f)
         return fail("Ground collision, stacking, or authored scene isolation failed");
 
-    Scene const obstacle{{
+    Scene const obstacle=qa::make({
         {"Player", {0.f, 0.f, 0.f}, 1.f, 0xffffff, true, 1.f},
         {"Wall", {2.f, 0.f, 0.f}, 1.f, 0xffffff, false, 0.f},
         {"Movable", {0.f, 0.f, 2.f}, 1.f, 0xffffff, false, 1.f},
-    }};
+    });
     PhysicsScene movement(obstacle);
     simulate(movement, 120, 1.f);
     if (!near(movement.scene().objects[0].position.x, 1.f) ||
@@ -71,17 +76,17 @@ int main()
     if (pushing.scene().objects[2].position.z < 2.4f)
         return fail("Player did not push the dynamic body");
 
-    Scene const balanced{{
+    Scene const balanced=qa::make({
         {"Pedestal", {0.f, 0.f, 0.f}, 1.f, 0xffffff, false, 0.f},
         {"Unbalanced", {0.8f, 1.5f, 0.f}, 1.f, 0xffffff, false, 1.f},
-    }};
+    });
     PhysicsScene tipping(balanced);
     simulate(tipping, 22);
     auto const rotated_up = tipping.orientation(1).transform_direction({0.f, 1.f, 0.f});
     if (std::abs(rotated_up.x) < 0.05f || !near(rotated_up.magnitude(), 1.f))
         return fail("Collision did not produce a usable rigid body orientation");
 
-    Scene const initial{{{"Player", {0.f, 0.f, 0.f}, 1.f, 0xffffff, true, 1.f}}};
+    Scene const initial=qa::make({{"Player", {0.f, 0.f, 0.f}, 1.f, 0xffffff, true, 1.f}});
     PhysicsScene sixty(initial), one_twenty(initial);
     simulate(sixty, 60, 1.f, 1.f);
     for (int i = 0; i < 120; ++i)
@@ -120,8 +125,193 @@ int main()
         return fail("Dynamic body was accepted as an animated static target");
     } catch (std::runtime_error const&) {}
 
+    // Editor-authored collision shapes must reach the active Jolt physics provider.
+    Scene collisionScene;
+    collisionScene.version=3;
+    SceneObject disabled;
+    disabled.name="Collision disabled";
+    disabled.node.id=701;
+    disabled.node.collision=false;
+    disabled.position={3.f,0.f,0.f};
+    SceneObject sphere=disabled;
+    sphere.name="Sphere collider";
+    sphere.node.id=702;
+    sphere.node.collision=true;
+    sphere.position={7.f,0.f,0.f};
+    collisionScene.objects={disabled,sphere};
+    collision_authoring::Collider sphereShape;
+    sphereShape.shape=collision_authoring::Shape::Sphere;
+    sphereShape.dimensions={2.f,2.f,2.f};
+    collision_authoring::assign(collisionScene,702,sphereShape);
+    validate_scene(collisionScene);
+    PhysicsScene authoredShapes(collisionScene);
+    if(authoredShapes.sweep_sphere({3.f,1.8f,0.f},
+                                  {3.f,.7f,0.f},.1f))
+        return fail("Disabled actor still participates in physics collision");
+    auto sphereHit=authoredShapes.sweep_sphere({7.f,2.8f,0.f},
+                                              {7.f,1.5f,0.f},.1f);
+    if(!sphereHit || sphereHit->object_index!=1)
+        return fail("Authored sphere collider was not registered in physics");
+
+    // Complex Mesh collision uses actual baked triangles, not a proxy box.
+    Scene meshWorld;
+    meshWorld.version=3;
+    SceneObject complex;
+    complex.name="Complex collision actor";
+    complex.node.id=751;
+    complex.node.asset="meshes/cube.obj";
+    complex.node.collision=true;
+    complex.mass=0.f;
+    complex.size=1.f;
+    complex.position={23.f,0.f,0.f};
+    SceneObject convex=complex;
+    convex.node.id=752;
+    convex.name="Auto Convex actor";
+    convex.mass=2.f;
+    convex.position={28.f,3.f,0.f};
+    meshWorld.objects={complex,convex};
+    collision_mesh::Mesh cube;
+    cube.source="meshes/cube.obj";
+    cube.xyz={
+        -.5f,0.f,-.5f, .5f,0.f,-.5f,
+        -.5f,1.f,-.5f, .5f,1.f,-.5f,
+        -.5f,0.f, .5f, .5f,0.f, .5f,
+        -.5f,1.f, .5f, .5f,1.f, .5f};
+    cube.indices={0,1,3,0,3,2,4,6,7,4,7,5,
+                  0,4,5,0,5,1,2,3,7,2,7,6,
+                  0,2,6,0,6,4,1,5,7,1,7,3};
+    collision_authoring::Collider exact;
+    exact.shape=collision_authoring::Shape::ComplexMesh;
+    exact.object_type=collision_authoring::ObjectType::WorldStatic;
+    collision_authoring::assign(meshWorld,751,exact);
+    collision_authoring::Collider autoConvex;
+    autoConvex.shape=collision_authoring::Shape::AutoConvex;
+    autoConvex.splits_num=2;
+    autoConvex.object_type=collision_authoring::ObjectType::PhysicsBody;
+    collision_authoring::assign(meshWorld,752,autoConvex);
+    collision_mesh::assign(meshWorld,751,cube);
+    collision_mesh::assign(meshWorld,752,cube);
+    collision_cooker::Hull cachedHull{cube.xyz,cube.indices};
+    collision_hulls::assign(meshWorld,752,
+        collision_hulls::Set{cube.source,2,{cachedHull}});
+    auto const restored=parse_scene_v3(serialize_scene_v3(meshWorld));
+    auto const restoredCollider=collision_authoring::lookup(restored,752);
+    if(!restoredCollider ||
+       restoredCollider->splits_num!=2 ||
+       restoredCollider->object_type!=collision_authoring::ObjectType::PhysicsBody ||
+       !collision_mesh::lookup(restored,751) ||
+       !collision_hulls::lookup(restored,752))
+        return fail("Complex collider or splitsNum lost after scene serialization");
+    std::size_t wireSegments=0;
+    collision_wireframe::draw(restored,restored.objects[0],
+        [&](Vector3,Vector3){++wireSegments;},true);
+    if(wireSegments!=cube.indices.size())
+        return fail("Complex collision wireframe differs from baked triangles");
+    PhysicsScene cooked(restored);
+    auto complexHit=cooked.sweep_sphere(
+        {23.f,2.f,0.f},{23.f,.55f,0.f},.1f);
+    if(!complexHit || complexHit->object_index!=0)
+        return fail("Complex mesh triangles do not produce collision");
+    auto convexHit=cooked.sweep_sphere(
+        {28.f,4.8f,0.f},{28.f,3.2f,0.f},.1f);
+    if(!convexHit || convexHit->object_index!=1)
+        return fail("Auto convex decomposition is not active in physics");
+
+    // Collision response matrix must affect Jolt broadphase/contact sensor.
+    auto response_scene=[](collision_authoring::Response static_to_dynamic) {
+        Scene s;
+        s.version=3;
+        SceneObject wall;
+        wall.name="Static response probe";
+        wall.node.id=801;wall.node.collision=true;
+        wall.position={41.f,0.f,0.f};wall.mass=0.f;
+        wall.size=2.f;
+        SceneObject movable=wall;
+        movable.node.id=802;movable.name="Dynamic response probe";
+        movable.position={41.f,.3f,0.f};movable.mass=1.f;
+        s.objects={wall,movable};
+        collision_authoring::Collider fixed;
+        fixed.object_type=collision_authoring::ObjectType::WorldStatic;
+        fixed.responses[1]=static_to_dynamic;
+        collision_authoring::assign(s,801,fixed);
+        collision_authoring::Collider moving;
+        moving.object_type=collision_authoring::ObjectType::WorldDynamic;
+        collision_authoring::assign(s,802,moving);
+        return s;
+    };
+    for(auto response:{collision_authoring::Response::Ignore,
+                       collision_authoring::Response::Overlap,
+                       collision_authoring::Response::Block}) {
+        PhysicsScene probe(response_scene(response));
+        if(!probe.supports_collision_response_matrix())
+            return fail("Jolt provider response matrix unavailable");
+        simulate(probe,3);
+        auto events=probe.poll_collision_events();
+        bool observed=false;
+        for(auto const& event:events) {
+            bool pair=(event.first_index==0&&event.second_index==1)||
+                      (event.first_index==1&&event.second_index==0);
+            if(pair&&event.phase==0) {
+                if(event.response!=static_cast<std::uint32_t>(response))
+                    return fail("Collision event has wrong Block/Overlap type");
+                observed=true;
+            }
+        }
+        if(observed!=(response!=collision_authoring::Response::Ignore))
+            return fail("Ignore/Overlap/Block broadphase or events incorrect");
+        // Ignore dynamic object 1 so queries only inspect the static body
+        // and test the authored response to WorldDynamic (channel 1).
+        auto ray=probe.raycast_channel(
+            {41.f,4.f,0.f},{41.f,.5f,0.f},1u,false,1u);
+        auto cast=probe.sweep_sphere_channel(
+            {41.f,4.f,0.f},{41.f,.5f,0.f},.1f,1u,false,1u);
+        if(bool(ray)!=(response==collision_authoring::Response::Block) ||
+           bool(cast)!=(response==collision_authoring::Response::Block))
+            return fail("Channel-aware ray/sweep Block filtering failed");
+        auto overlapRay=probe.raycast_channel(
+            {41.f,4.f,0.f},{41.f,.5f,0.f},1u,true,1u);
+        if(bool(overlapRay)!=(response!=collision_authoring::Response::Ignore))
+            return fail("Channel-aware overlap query filtering failed");
+        if(response==collision_authoring::Response::Overlap) {
+            probe.move_static(0,{70.f,0.f,0.f});
+            simulate(probe,3);
+            auto removed=probe.poll_collision_events();
+            bool ended=false;
+            for(auto const& event:removed)
+                if(event.phase==1 && event.response==1 &&
+                   ((event.first_index==0&&event.second_index==1)||
+                    (event.first_index==1&&event.second_index==0)))
+                    ended=true;
+            if(!ended)return fail("Overlap End event not delivered");
+        }
+    }
+
+    // Custom project channel 7 is genuinely enforced by Jolt query filtering.
+    auto customScene=response_scene(collision_authoring::Response::Block);
+    auto custom=collision_authoring::for_object(customScene,customScene.objects[0]);
+    custom.object_type=static_cast<collision_authoring::ObjectType>(7);
+    custom.responses[7]=collision_authoring::Response::Ignore;
+    custom.preset="Interactable";
+    collision_authoring::assign(customScene,customScene.objects[0].node.id,custom);
+    auto restoredCustom=parse_scene_v3(serialize_scene_v3(customScene));
+    auto migrated=collision_authoring::lookup(restoredCustom,801);
+    if(!migrated||migrated->responses[7]!=collision_authoring::Response::Ignore ||
+       migrated->preset!="Interactable" ||
+       std::uint32_t(migrated->object_type)!=7)
+        return fail("Project custom collision channel lost after scene save/load");
+    PhysicsScene customWorld(restoredCustom);
+    if(customWorld.raycast_channel({41.f,4.f,0.f},{41.f,.5f,0.f},7,false,1))
+        return fail("Custom channel Ignore raycast accepted");
+    custom.responses[7]=collision_authoring::Response::Block;
+    collision_authoring::assign(restoredCustom,801,custom);
+    PhysicsScene blockingCustom(restoredCustom);
+    auto customHit=blockingCustom.raycast_channel(
+        {41.f,4.f,0.f},{41.f,.5f,0.f},7,false,1);
+    if(!customHit||customHit->object_index!=0 || customHit->response!=2)
+        return fail("Custom channel Block raycast was not registered");
+
     // Full host -> SceneWorld -> optional provider-residency path. Both
-    // Bullet and Jolt must drop far static collision and restore it on
+    // The Jolt provider must drop far static collision and restore it on
     // fast travel while the player's/dynamic body's ID stays valid.
     Scene authored;
     authored.version=3;
@@ -133,7 +323,7 @@ int main()
     };
     SceneObject resident_player;
     resident_player.name="Driver"; resident_player.node.id=1;
-    resident_player.node.cell="Near"; resident_player.player=true;
+    resident_player.node.cell="Near"; // Pawn is a scene component rather than a flag.
     resident_player.mass=1.f; resident_player.position={10.f,0.f,0.f};
     SceneObject static_near;
     static_near.name="Roadside"; static_near.node.id=2;
@@ -143,6 +333,7 @@ int main()
     static_far.name="Distant wall"; static_far.node.id=3;
     static_far.node.cell="Far"; static_far.position={100.f,1.f,0.f};
     authored.objects={resident_player,static_near,static_far};
+    scene_pawn::migrate_imported_local(authored,1);
     validate_scene(authored);
     PhysicsScene simulated(authored);
     SceneWorld streaming(authored);

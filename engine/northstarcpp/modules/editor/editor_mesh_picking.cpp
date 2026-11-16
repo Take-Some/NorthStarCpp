@@ -5,6 +5,9 @@
 #include <northstarcpp/collision_service.hpp>
 #include <northstarcpp/geometry_service.hpp>
 #include <northstarcpp/geometry_scene.hpp>
+#include <northstarcpp/player_character_components.hpp>
+#include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -22,9 +25,30 @@ std::optional<ActorSurfaceHit> hit_actor_geometry(
         return {};
     float best = std::numeric_limits<float>::max();
     std::optional<ActorSurfaceHit> chosen;
+    std::unordered_map<std::uint64_t,std::uint64_t> parents;
+    std::unordered_set<std::uint64_t> pawns,visualized_pawns;
+    if(scene.version==3) {
+        for(auto const& o:scene.objects)
+            parents.emplace(o.node.id,o.node.parent);
+        for(auto const& component:scene.components)
+            if(component.type==player_character::pawn_type)
+                pawns.insert(component.entity_id);
+        for(auto const& o:scene.objects) {
+            if(!o.node.visible || o.node.asset.empty())continue;
+            auto parent=o.node.parent;
+            for(std::size_t depth=0;parent && depth<scene.objects.size();++depth) {
+                if(pawns.count(parent)) {visualized_pawns.insert(parent);break;}
+                auto it=parents.find(parent);
+                if(it==parents.end() || it->second==parent)break;
+                parent=it->second;
+            }
+        }
+    }
     for (std::size_t i = 0; i < scene.objects.size(); ++i) {
         auto const& object = scene.objects[i];
-        if (scene.version == 3 && !object.node.visible)
+        if (scene.version == 3 && (!object.node.visible ||
+            (object.node.asset.empty() &&
+             visualized_pawns.count(object.node.id))))
             continue;
 
         // Procedural objects have an authored, versioned geometry component.

@@ -58,6 +58,17 @@ int main(int argc, char** argv)
         input.feed_message(WM_KEYDOWN, 'A', 0);
         input.feed_message(WM_KILLFOCUS, 0, 0);
         if (input.poll().keys['A'] || input.poll().focused) return 11;
+        // A menu click focuses the child GPU viewport and drops main-window
+        // keyboard input. Gameplay must accept W/A/S/D again only after the
+        // host restores WM_SETFOCUS on the main Player HWND.
+        input.feed_message(WM_KEYDOWN, 'W', 0);
+        if (input.poll().keys['W']) return 21;
+        input.feed_message(WM_SETFOCUS, 0, 0);
+        if (!input.poll().focused) return 22;
+        input.feed_message(WM_KEYDOWN, 'W', 0);
+        if (!input.poll().keys['W']) return 23;
+        input.feed_message(WM_KEYUP, 'W', 0);
+        if (input.poll().keys['W']) return 24;
         return 0;
     } catch (std::exception const& e) {
         std::cerr << e.what() << '\n';

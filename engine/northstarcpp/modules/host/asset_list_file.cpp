@@ -11,6 +11,7 @@
 #include <array>
 #include <cstring>
 #include <sstream>
+#include <mutex>
 #include <stdexcept>
 
 namespace northstarcpp::shared_assets::detail {
@@ -94,6 +95,12 @@ void validate_reference(std::string const& reference)
 
 Tree parse_json(std::string const& text)
 {
+    // Boost.PropertyTree JSON parsing crashed when multiple catalog workers
+    // entered it concurrently on the Windows/MSYS2 runtime. The shared
+    // metadata parser is deliberately serialized; NEF8 dictionary indexes
+    // already bypass optional metadata JSON on their fast path.
+    static std::mutex read_json_mutex;
+    std::lock_guard<std::mutex> guard(read_json_mutex);
     Tree tree;
     std::istringstream input(text);
     boost::property_tree::read_json(input, tree);
@@ -165,7 +172,7 @@ std::vector<std::uint8_t> inflate_body(Bytes const& file,
 
 } // namespace
 
-static ListFile parse_list_file_v2(Bytes const& file)
+static ListFile parse_list_file_v2(Bytes const& file, bool include_metadata)
 {
     auto const minor = file.integer(5, 1);
     auto const kind = static_cast<std::uint16_t>(file.integer(6, 2));
@@ -174,10 +181,10 @@ static ListFile parse_list_file_v2(Bytes const& file)
     auto const entries = file.integer(12, 4);
     auto const compressed = file.integer(16, 8);
     auto const expanded = file.integer(24, 8);
-    auto const prefix = minor == 6 ? 64u : 32u;
-    auto const limit = kind == 1 ? 256ull * 1024 * 1024 : maximum_body_size;
-    require((minor == 5 || minor == 6) && (flags & 1u) != 0 &&
-        (flags & ~(minor == 6 ? 7u : 3u)) == 0 &&
+    auto const prefix = minor >= 6 ? 64u : 32u;
+    auto const limit = (kind == 1 || kind == 5) ? 256ull * 1024 * 1024 : maximum_body_size;
+    require((minor == 5 || minor == 6 || minor == 8) && (flags & 1u) != 0 &&
+        (flags & ~(minor >= 6 ? 7u : 3u)) == 0 &&
         schema > 0 && entries <= 65536 &&
         compressed > 0 && compressed <= file.size() - prefix &&
         expanded > 0 && expanded <= limit, "Invalid NEF8 v2 header");
@@ -197,20 +204,20 @@ static ListFile parse_list_file_v2(Bytes const& file)
         require(std::equal(digest.begin(), digest.end(), file.at(32, digest.size())),
             "NEF8 v2 body hash does not match");
     }
-    if (metadata_size)
+    if (include_metadata && metadata_size)
         result.metadata = parse_json(file.string(prefix, metadata_size));
     return result;
 }
 
-ListFile parse_list_file(std::vector<std::uint8_t> const& bytes)
+ListFile parse_list_file(std::vector<std::uint8_t> const& bytes, bool include_metadata)
 {
     Bytes const file(bytes);
-    require(file.size() >= 32 && file.size() <= maximum_body_size && file.magic(0, "NEF8"),
+    require(file.size() >= 32 && file.size() <= 256ull*1024*1024 && file.magic(0, "NEF8"),
         "Expected an NEF8 ListFile");
     if (file.integer(4, 1) == 2) {
-        if (file.integer(5, 1) == 6)
+        if (file.integer(5, 1) >= 6)
             require(file.size() >= 64, "Truncated NEF8 v2.6 header");
-        return parse_list_file_v2(file);
+        return parse_list_file_v2(file, include_metadata);
     }
     require(file.size() >= fixed_header_size, "Truncated NEF8 v1 header");
     auto const header_size = file.integer(6, 2);
@@ -237,7 +244,7 @@ ListFile parse_list_file(std::vector<std::uint8_t> const& bytes)
     result.body = inflate_body(file, offset, compressed, expanded,
         "Invalid NEF8 deflate stream or inflated length");
     validate_hash(kind, file, result.body);
-    if (metadata_size != 0)
+    if (include_metadata && metadata_size != 0)
         result.metadata = parse_json(file.string(metadata_offset, metadata_size));
     return result;
 }

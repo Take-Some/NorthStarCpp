@@ -161,7 +161,8 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
         check(vkAllocateCommandBuffers(device_,&ai,&command_),"vkAllocateCommandBuffers");
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         check(vkCreateSemaphore(device_,&si,nullptr,&available_),"vkCreateSemaphore available");
-        check(vkCreateSemaphore(device_,&si,nullptr,&ready_),"vkCreateSemaphore ready");
+        // Per-swapchain-image render-finished semaphores are created by
+        // create_swapchain() after the actual image count is known.
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fi.flags=VK_FENCE_CREATE_SIGNALED_BIT;
         check(vkCreateFence(device_,&fi,nullptr,&completed_),"vkCreateFence");
@@ -182,6 +183,20 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
             timestamp_period_ns_=gpu_properties.limits.timestampPeriod;
             timestamp_valid_bits_=family_properties[family_].timestampValidBits;
         }
+        char deferred_setting[8]{};
+        deferred_enabled_=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_DEFERRED",
+            deferred_setting,sizeof(deferred_setting))>0 &&
+            deferred_setting[0]=='1';
+        char ssao_setting[8]{};
+        ssao_enabled_=deferred_enabled_ && GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_SSAO",
+            ssao_setting,sizeof(ssao_setting))>0 && ssao_setting[0]=='1';
+        char gbuffer_setting[8]{};
+        gbuffer_v2_=deferred_enabled_ && GetEnvironmentVariableA(
+            "NORTHSTARCPP_GBUFFER_VERSION",gbuffer_setting,
+            sizeof(gbuffer_setting))>0 &&
+            gbuffer_setting[0]=='2' && gbuffer_setting[1]=='\0';
         create_vertex_buffer();
         create_material_resources();
         create_world_resources();
@@ -200,12 +215,57 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
         graph.add_pass({"present",{image},{},{p1},
             {{image,northstarcpp::render::ResourceAccess::Present}}});
         graph_plan_=graph.compile();
+        if(deferred_enabled_) {
+            using namespace northstarcpp::render;
+            RenderGraph deferred;
+            auto swap=deferred.add_resource("swapchain",true,ResourceAccess::Present);
+            auto depth=deferred.add_resource("gbuffer depth");
+            auto albedo=deferred.add_resource("gbuffer albedo");
+            auto normal=deferred.add_resource("gbuffer normal/roughness");
+            auto surface=deferred.add_resource("gbuffer surface");
+            auto auxiliary=deferred.add_resource("gbuffer v2 auxiliary");
+            std::vector<ResourceId> attachments{depth,albedo,normal,surface};
+            std::vector<ResourceUsage> attachment_usage{
+                {depth,ResourceAccess::DepthWrite},
+                {albedo,ResourceAccess::ColorAttachment},
+                {normal,ResourceAccess::ColorAttachment},
+                {surface,ResourceAccess::ColorAttachment}};
+            std::vector<ResourceId> sampled{depth,albedo,normal,surface};
+            std::vector<ResourceUsage> sampled_usage{
+                {depth,ResourceAccess::DepthRead},
+                {albedo,ResourceAccess::ShaderRead},
+                {normal,ResourceAccess::ShaderRead},
+                {surface,ResourceAccess::ShaderRead},
+                {swap,ResourceAccess::ColorAttachment}};
+            if(gbuffer_v2_) {
+                attachments.push_back(auxiliary);
+                attachment_usage.push_back({auxiliary,ResourceAccess::ColorAttachment});
+                sampled.push_back(auxiliary);
+                sampled_usage.push_back({auxiliary,ResourceAccess::ShaderRead});
+            }
+            auto g=deferred.add_pass({"gbuffer",{},std::move(attachments),{},
+                std::move(attachment_usage)});
+            auto l=deferred.add_pass({"deferred resolve",
+                std::move(sampled),{swap},{g},std::move(sampled_usage)});
+            auto f=deferred.add_pass({"authored forward",{}, {swap,depth},{l},
+                {{swap,ResourceAccess::ColorAttachment},
+                 {depth,ResourceAccess::DepthWrite}}});
+            auto ui=deferred.add_pass({"engine.ui overlay",{swap},{swap},{f},
+                {{swap,ResourceAccess::ColorAttachment}}});
+            auto capture=deferred.add_pass({"GPU readback",{swap},{swap},{ui},
+                {{swap,ResourceAccess::CopySource}}});
+            deferred.add_pass({"present",{swap},{},{capture},
+                {{swap,ResourceAccess::Present}}});
+            deferred_graph_plan_=deferred.compile();
+        }
     }catch(...) {shutdown();throw;}
 }
 Renderer::~Renderer() noexcept {shutdown();}
 void Renderer::destroy_pipeline() noexcept {
+    stop_shader_reload();
     if(!device_)return;
     if(pipeline_)vkDestroyPipeline(device_,pipeline_,nullptr);
+    if(pick_pipeline_)vkDestroyPipeline(device_,pick_pipeline_,nullptr);
     if(world_pipeline_)vkDestroyPipeline(device_,world_pipeline_,nullptr);
     if(world_pipeline_layout_)
         vkDestroyPipelineLayout(device_,world_pipeline_layout_,nullptr);
@@ -215,6 +275,8 @@ void Renderer::destroy_pipeline() noexcept {
     world_vs_=world_fs_=VK_NULL_HANDLE;
     if(material_pipeline_)
         vkDestroyPipeline(device_,material_pipeline_,nullptr);
+    if(material_gbuffer_pipeline_)
+        vkDestroyPipeline(device_,material_gbuffer_pipeline_,nullptr);
     for(auto& entry:material_variant_pipelines_)
         if(entry.second)vkDestroyPipeline(device_,entry.second,nullptr);
     material_variant_pipelines_.clear();
@@ -230,7 +292,8 @@ void Renderer::destroy_pipeline() noexcept {
     if(pipeline_layout_)vkDestroyPipelineLayout(device_,pipeline_layout_,nullptr);
     if(vertex_shader_)vkDestroyShaderModule(device_,vertex_shader_,nullptr);
     if(fragment_shader_)vkDestroyShaderModule(device_,fragment_shader_,nullptr);
-    pipeline_=VK_NULL_HANDLE;pipeline_layout_=VK_NULL_HANDLE;
+    pipeline_=VK_NULL_HANDLE;pick_pipeline_=VK_NULL_HANDLE;
+    pipeline_layout_=VK_NULL_HANDLE;
     vertex_shader_=fragment_shader_=VK_NULL_HANDLE;
 }
 void Renderer::destroy_readback() noexcept {
@@ -255,8 +318,10 @@ void Renderer::create_depth() {
     for(auto candidate:{VK_FORMAT_D32_SFLOAT,VK_FORMAT_D24_UNORM_S8_UINT}) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physical_,candidate,&properties);
-        if(properties.optimalTilingFeatures&
-            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+        VkFormatFeatureFlags needed=VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if(deferred_enabled_)needed=static_cast<VkFormatFeatureFlags>(
+            needed|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+        if((properties.optimalTilingFeatures&needed)==needed) {
             depth_format_=candidate;break;
         }
     }
@@ -269,7 +334,8 @@ void Renderer::create_depth() {
     desc.mipLevels=1;desc.arrayLayers=1;
     desc.samples=VK_SAMPLE_COUNT_1_BIT;
     desc.tiling=VK_IMAGE_TILING_OPTIMAL;
-    desc.usage=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    desc.usage=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|
+        (deferred_enabled_?VK_IMAGE_USAGE_SAMPLED_BIT:0u);
     desc.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
     check(vkCreateImage(device_,&desc,nullptr,&depth_image_),
           "vkCreateImage(depth)");
@@ -300,6 +366,12 @@ void Renderer::destroy_vertex_buffer() noexcept {
 void Renderer::destroy_swapchain() noexcept {
     if(!device_)return;
     destroy_ui_resources();
+    destroy_deferred_resources();
+    // Must be called after vkDeviceWaitIdle on resize/shutdown, including
+    // after any vkQueuePresentKHR waiting on these binary semaphores.
+    for(auto semaphore:present_ready_)
+        if(semaphore)vkDestroySemaphore(device_,semaphore,nullptr);
+    present_ready_.clear();
     destroy_pipeline();
     destroy_readback();
     destroy_depth();
@@ -310,7 +382,9 @@ void Renderer::destroy_swapchain() noexcept {
     swapchain_=VK_NULL_HANDLE;extent_={};format_=VK_FORMAT_UNDEFINED;
 }
 void Renderer::shutdown() noexcept {
+    if(device_)stop_shader_reload(); // join PSO workers before GPU teardown
     if(device_)vkDeviceWaitIdle(device_);
+    destroy_async_pick();
     destroy_swapchain();
     destroy_skin_resources();
     destroy_world_resources();
@@ -320,7 +394,6 @@ void Renderer::shutdown() noexcept {
         if(completed_)vkDestroyFence(device_,completed_,nullptr);
         if(timing_queries_)vkDestroyQueryPool(device_,timing_queries_,nullptr);
         if(available_)vkDestroySemaphore(device_,available_,nullptr);
-        if(ready_)vkDestroySemaphore(device_,ready_,nullptr);
         if(command_pool_)vkDestroyCommandPool(device_,command_pool_,nullptr);
         vkDestroyDevice(device_,nullptr);
     }
@@ -422,6 +495,11 @@ void Renderer::create_swapchain() {
           "vkGetSwapchainImagesKHR(list)");
     image_views_.resize(count,VK_NULL_HANDLE);
     swapchain_seen_.resize(count,false);
+    present_ready_.resize(count,VK_NULL_HANDLE);
+    VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    for(auto& signal:present_ready_)
+        check(vkCreateSemaphore(device_,&semaphore,nullptr,&signal),
+              "vkCreateSemaphore(per swapchain image)");
     extent_=dimensions;format_=chosen.format;swapchain_transfer_src_=true;
     for(std::uint32_t i=0;i<count;++i) {
         VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -437,6 +515,10 @@ void Renderer::create_swapchain() {
     create_pipeline();
     create_world_pipeline();
     create_material_pipeline();
+    if(deferred_enabled_) {
+        create_deferred_resources();
+        create_deferred_pipelines();
+    }
 }
 void Renderer::create_pipeline() {
     const auto shader=[&](const std::uint32_t* words,std::size_t n,
@@ -500,5 +582,12 @@ void Renderer::create_pipeline() {
     pi.layout=pipeline_layout_;
     check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,&pipeline_),
           "vkCreateGraphicsPipelines");
+    // The pick pass always uses exact linear RGBA8 UNORM regardless of
+    // swapchain BGRA/sRGB format, preventing ID corruption by gamma encoding.
+    VkFormat const pick_format=VK_FORMAT_R8G8B8A8_UNORM;
+    rendering.pColorAttachmentFormats=&pick_format;
+    check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,
+                                    &pick_pipeline_),
+          "vkCreateGraphicsPipelines(ID picking)");
 }
 }

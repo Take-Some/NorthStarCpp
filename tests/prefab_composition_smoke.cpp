@@ -147,9 +147,8 @@ int main(int argc,char** argv) {
         prefab.objects.push_back(instance);
         validate_scene(prefab);
         AssetManager assets;
-        assets.mount_shared_assets(repo/"sharedAssets");
-        assets.mount_directory("",
-            repo/"Projects/NorthStarFirstPersonPlatform"/"assets",100);
+        pp::mount_preview_assets(assets,
+            repo/"Projects/NorthStarFirstPersonPlatform"/"assets");
         auto real=pp::load_composition(prefab,assets);
         require(real.visible_objects==2 && real.modeled_objects==2 &&
                 real.missing_assets==0 && real.triangles>30000 &&
@@ -172,6 +171,43 @@ int main(int argc,char** argv) {
                 "Original two-pistol native preview could not be rasterized");
         std::cout<<"PASS: native multi-YDD Prefab scene transforms, "
                   "shared depth buffer, materials, light and visibility\n";
+        // Shared asset browser roots must mount exactly once; otherwise
+        // the native preview drops to its schematic cube fallback.
+        auto rifle=load_scene(repo/"sharedAssets"/"prefabs"/
+            "rifle_mini14.nprefab");
+        require(rifle.version==3 && rifle.objects.size()==1 &&
+                rifle.objects.front().node.asset==
+                    "models/weapon/rifle_mini14/rifle_mini14.ydd",
+                "Mini-14 prefab failed to resolve native Scene V3 model");
+        AssetManager rifle_assets;
+        pp::mount_preview_assets(rifle_assets,repo/"sharedAssets");
+        auto rifle_composition=pp::load_composition(rifle,rifle_assets);
+        require(rifle_composition.visible_objects==1 &&
+                rifle_composition.modeled_objects==1 &&
+                rifle_composition.proxy_objects==0 &&
+                rifle_composition.missing_assets==0 &&
+                rifle_composition.triangles>0 &&
+                !rifle_composition.drawable.meshes.empty() &&
+                rifle_composition.drawable.meshes.size()==
+                    rifle_composition.materials.size(),
+                "Mini-14 shared prefab 3D model did not compose");
+        std::size_t rifle_textured=0;
+        for(auto const& material:rifle_composition.materials)
+            if(material.textures[0].width>0 &&
+               !material.textures[0].rgba8.empty())++rifle_textured;
+        require(rifle_composition.warnings.empty() &&
+                rifle_textured==rifle_composition.materials.size(),
+                "Mini-14 material texture sections failed to resolve");
+        auto rifle_image=editor_tools::preview_drawable(
+            rifle_composition.drawable,320,320,.62f,.27f,1.f,false,
+            &rifle_composition.materials);
+        require(rifle_image.valid(),
+                "Mini-14 native preview could not be rasterized");
+        for(auto const& issue:rifle_composition.warnings)
+            std::cout<<"MINI14_WARN "<<issue<<"\n";
+        std::cout<<"MINI14 triangle_count="<<rifle_composition.triangles
+                 <<" mesh_sections="<<rifle_composition.drawable.meshes.size()
+                 <<" warnings="<<rifle_composition.warnings.size()<<"\n";
         return 0;
     }catch(std::exception const& error) {
         std::cerr<<"Prefab composition QA: "<<error.what()<<"\n";

@@ -53,11 +53,11 @@ Directly compiled original translation units (no compatibility bridge):
 
 SDK packaging:
 
-- All original headers are installed to engine/northstarcpp/modules/api/include/northstarcpp.
-- Original implementation sources are installed to
-  sdk/src/northstarcpp.
-- The old install rule deleting compat headers is removed.
-- Exported SDK libraries include libmath.a and libfoundation_core.a.
+- The active historical-header dependency closure (64 files) is maintained under
+  engine/northstarcpp/modules/api/include/northstarcpp/.
+- Original inactive source archives are NOT installed into the SDK.
+- Compiled static libraries expose their corresponding public APIs.
+- The original source archive remains in core/northstarcpp for provenance only.
 
 Coverage: 1,150 original C++ translation units and 1,585 .h headers
 currently remain in the tree. 17 original C++ units are now compiled

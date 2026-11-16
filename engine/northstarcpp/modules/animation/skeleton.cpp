@@ -313,6 +313,8 @@ void SkeletonPose::sample(Skeleton const& skeleton, SkeletalClip const& clip,
     auto const next = std::min(first + 1, static_cast<std::size_t>(clip.frames - 1));
     auto const fraction = frame - static_cast<float>(first);
     for (std::size_t i = 0; i < local_.size(); ++i) local_[i] = skeleton.joints[i].bind;
+    std::vector<std::uint8_t> keyed(local_.size(),0);
+    for(auto const joint:clip.joints)keyed[joint]=1;
     for (std::size_t i = 0; i < clip.joints.size(); ++i) {
         auto const& a = clip.samples[first * clip.joints.size() + i];
         auto const& b = clip.samples[next * clip.joints.size() + i];
@@ -330,7 +332,7 @@ void SkeletonPose::sample(Skeleton const& skeleton, SkeletalClip const& clip,
     // Import-time validation caches the mapping once; frame sampling does
     // not allocate name maps or repeatedly compare bind quaternions.
     for(auto const& [helper,source]:skeleton.mirrored_helpers) {
-        if(std::find(clip.joints.begin(),clip.joints.end(),source)!=clip.joints.end())
+        if(keyed[source])
             local_[helper]=local_[source];
     }
     evaluate(skeleton);
@@ -338,7 +340,7 @@ void SkeletonPose::sample(Skeleton const& skeleton, SkeletalClip const& clip,
     // constrained secondary joints; primary YCD-driven bones are untouched.
     // Source indices always refer to the primary, already-evaluated rig.
     for(auto const& rule:skeleton.secondary_palette_constraints) {
-        if(std::find(clip.joints.begin(),clip.joints.end(),rule.bone)!=clip.joints.end())
+        if(keyed[rule.bone])
             continue;
         auto const& a=palette_[rule.source_a];
         auto const& b=palette_[rule.source_b];
@@ -350,4 +352,90 @@ void SkeletonPose::sample(Skeleton const& skeleton, SkeletalClip const& clip,
                     b.elements[row][col]*rule.source_b_weight;
     }
 }
+
+bool SkeletonPose::aim_hand(Skeleton const& skeleton,char const* shoulder_name,
+    char const* elbow_name,char const* wrist_name,math::float3 target,
+    unsigned iterations) {
+    if(!target.valid() || iterations<1 || iterations>12)return false;
+    auto index_of=[&](char const* name) -> std::size_t {
+        auto found=std::find_if(skeleton.joints.begin(),skeleton.joints.end(),
+            [&](auto const& j){return j.name==name;});
+        return static_cast<std::size_t>(found-skeleton.joints.begin());
+    };
+    auto shoulder=index_of(shoulder_name);
+    auto elbow=index_of(elbow_name);
+    auto wrist=index_of(wrist_name);
+    if(wrist>=skeleton.joints.size() || elbow>=skeleton.joints.size() ||
+       shoulder>=skeleton.joints.size() || wrist==elbow || elbow==shoulder)
+        return false;
+    // Twist and socket helper joints may intervene in imported arm chains.
+    auto descendant=[&](std::size_t child,std::size_t ancestor) {
+        for(std::size_t depth=0;depth<skeleton.joints.size();++depth) {
+            if(child==ancestor)return true;
+            auto const parent=skeleton.joints[child].parent;
+            if(parent<0 || static_cast<std::size_t>(parent)>=skeleton.joints.size())
+                return false;
+            child=static_cast<std::size_t>(parent);
+        }
+        return false;
+    };
+    if(!descendant(wrist,elbow) || !descendant(elbow,shoulder))
+        return false;
+
+    auto origin=[&](std::size_t joint) {
+        auto const& m=global_[joint];
+        return math::float3{m.elements[3][0],m.elements[3][1],m.elements[3][2]};
+    };
+    bool changed=false;
+    for(unsigned iter=0;iter<iterations;++iter) {
+        for(auto joint:{elbow,shoulder}) {
+            auto const pivot=origin(joint);
+            auto const current=origin(wrist)-pivot;
+            auto const desired=target-pivot;
+            auto const a=current.magnitude(),b=desired.magnitude();
+            if(a<1.e-5f || b<1.e-5f)continue;
+            auto v=math::cross_product(desired,current);
+            auto const mag=v.magnitude();
+            if(mag<1.e-6f)continue;
+            float const cosine=std::clamp(math::dot_product(current,desired)/(a*b),
+                                          -1.f,1.f);
+            float const radians=std::min(std::atan2(mag,math::dot_product(current,desired)),
+                                         .65f);
+            if(radians<1.e-4f || cosine>0.999999f)continue;
+            auto axis=v/mag;
+            auto const parent=skeleton.joints[joint].parent;
+            if(parent>=0) {
+                math::float4x4 inverse{};
+                if(!inverse.try_invert(global_[static_cast<std::size_t>(parent)]))
+                    continue;
+                axis=inverse.transform_direction(axis).normalize();
+            }
+            auto delta=math::quaternion(axis,radians);
+            // Legacy unconstrained CCD path for generic rigs. Weapon
+            // holding uses pole-guided, angular-limited pose_two_bone().
+            local_[joint].rotation=(local_[joint].rotation*delta).normalize();
+            // Abby and other imported rigs can have bind-identical helper
+            // branches used by the visible skin. Keep those in step with
+            // their primary arm joints before evaluating the final palette.
+            for(auto const& [helper,source]:skeleton.mirrored_helpers)
+                if(source==joint) local_[helper].rotation=local_[joint].rotation;
+            evaluate(skeleton);
+            changed=true;
+        }
+        if((origin(wrist)-target).magnitude()<.018f)break;
+    }
+    // The same secondary skin constraints used by normal YCD playback.
+    for(auto const& rule:skeleton.secondary_palette_constraints) {
+        auto const& a=palette_[rule.source_a];
+        auto const& b=palette_[rule.source_b];
+        auto& output=palette_[rule.bone];
+        for(int row=0;row<4;++row)
+            for(int col=0;col<4;++col)
+                output.elements[row][col]=
+                    a.elements[row][col]*(1.f-rule.source_b_weight)+
+                    b.elements[row][col]*rule.source_b_weight;
+    }
+    return changed;
+}
+
 }

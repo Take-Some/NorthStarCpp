@@ -41,7 +41,7 @@ const characterAssets = {
 // 2. GAMEPLAY: the root classes read this configuration automatically.
 Player.configure({
     enabled: true,
-    eyeHeight: 1.85,                         // Eye position above the feet, metres
+    // Camera Rig component owns eye height and field of view.
 
     character: {
         resources: characterAssets,
@@ -56,7 +56,7 @@ Player.configure({
 
     // 3. CAMERA: switch with V; zoom with the mouse wheel in third person.
     camera: {
-        initialMode: "third_person",
+        initialMode: "first_person",
         toggleKey: Keys.V,
         transitionSeconds: 0.45,
         minDistance: 0.5,                     // Metres from the character
@@ -72,7 +72,17 @@ Player.configure({
         gamepadPitchSpeed: 2.1
     },
     movement: {
-        jumpKey: Keys.Space
+        jumpKey: Keys.Space,
+        sprintKey: Keys.Shift
+    },
+    // Standard ground-aware footsteps from sharedAssets/audio/footsteps/*.nac.
+    footsteps: {
+        enabled: true,
+        walkStride: 1.25,
+        runStride: 1.65,
+        sprintStride: 1.9,
+        runSpeed: 5.0,
+        sprintSpeed: 8.0
     },
     interaction: {
         enabled: true,
@@ -82,10 +92,26 @@ Player.configure({
         impulse: 9
     },
 
-    // 5. SESSION: pause, quit and the title displayed in the game window.
+    // 5. WEAPON: game-owned rules; the engine only supplies generic scene,
+    // physics, input, UI and audio services. No engine.weapon API.
+    weapon: {
+        enabled: true,
+        prefab: "prefabs/pistol.nprefab",
+        audio: "audio/weapon/pistol/pistol.nac",
+        magazineSize: 12,
+        reserveAmmo: 72,
+        roundsPerSecond: 5,
+        reloadSeconds: 1.65,
+        range: 110,
+        sweepRadius: 0.055,
+        impactImpulse: 14,
+        fireGain: 0.95
+    },
+
+    // 6. SESSION: pause, quit and the title displayed in the game window.
     session: {
         pauseKey: Keys.Escape,
         exitKey: Keys.F10,
-        title: "NorthStar First Person Platform | WASD Move | V View | Wheel Zoom | Space Jump | E Push"
+        title: "NorthStar: First Person Protocol | WASD | Shift sprint | Space jump | E push | R restart"
     }
 });

@@ -3,6 +3,7 @@
 // Portable little-endian fields, explicit sizes, checksum and bounded decoding.
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/scene_component_registry.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include "scene_nef8_records.hpp"
 #include <algorithm>
 #include <cmath>
@@ -118,12 +119,12 @@ struct Reader {
     }
 };
 
-void write_entity(Writer& w, SceneObject const& e) {
+void write_entity(Writer& w, SceneObject const& e,bool legacy_wire=false) {
     w.text(e.name);
     w.vector(e.position);
     w.f32(e.size);
     w.u32(e.color);
-    w.boolean(e.player);
+    if(legacy_wire)w.boolean(false); // NSCN-v1 reserved field, never authoritative
     w.f32(e.mass);
     auto const& n=e.node;
     w.u64(n.id);
@@ -141,13 +142,14 @@ void write_entity(Writer& w, SceneObject const& e) {
     w.boolean(n.collision);
 }
 
-SceneObject read_entity(Reader& r) {
+SceneObject read_entity(Reader& r,bool legacy_wire,std::uint32_t* imported_flag=nullptr) {
     SceneObject e;
     e.name=r.text(96);
     e.position=r.vector();
     e.size=r.f32();
     e.color=r.u32();
-    e.player=r.boolean();
+    auto const old_owned=legacy_wire?r.boolean():false;
+    if(imported_flag)*imported_flag=old_owned?1u:0u;
     e.mass=r.f32();
     auto& n=e.node;
     n.id=r.u64();
@@ -186,7 +188,7 @@ std::string scene_codec_detail::encode_legacy_nscn(Scene const& scene) {
     payload.u32(static_cast<std::uint32_t>(scene.cells.size()));
     payload.u32(static_cast<std::uint32_t>(scene.volumes.size()));
     payload.u32(static_cast<std::uint32_t>(scene.portals.size()));
-    for(auto const& entity:scene.objects)write_entity(payload,entity);
+    for(auto const& entity:scene.objects)write_entity(payload,entity,true);
     for(auto const& layer:scene.layers) {
         payload.text(layer.name);payload.boolean(layer.visible);
     }
@@ -254,7 +256,13 @@ Scene scene_codec_detail::decode_legacy_nscn(std::string const& bytes) {
     scene.cells.reserve(cells);
     scene.volumes.reserve(volumes);
     scene.portals.reserve(portals);
-    for(std::uint32_t i=0;i<objects;++i)scene.objects.push_back(read_entity(r));
+    std::vector<std::uint64_t> old_owned_ids;
+    for(std::uint32_t i=0;i<objects;++i) {
+        std::uint32_t was_owned=0;
+        auto entity=read_entity(r,true,&was_owned);
+        if(was_owned)old_owned_ids.push_back(entity.node.id);
+        scene.objects.push_back(std::move(entity));
+    }
     for(std::uint32_t i=0;i<layers;++i) {
         SceneLayer l;
         l.name=r.text(96);l.visible=r.boolean();
@@ -284,6 +292,7 @@ Scene scene_codec_detail::decode_legacy_nscn(std::string const& bytes) {
     }
     if(r.offset!=bytes.size())
         throw std::runtime_error("NSCN contains trailing unrecognized data");
+    for(auto id:old_owned_ids)scene_pawn::migrate_imported_local(scene,id);
     validate_scene(scene);
     return scene;
 }
@@ -308,7 +317,7 @@ std::vector<Record> encode_records(Scene const& scene) {
     records.push_back({RecordKind::document,0,std::move(header.bytes)});
     for(auto const& entity:scene.objects) {
         Writer w;write_entity(w,entity);
-        records.push_back({RecordKind::entity,entity.node.id,std::move(w.bytes)});
+        records.push_back({RecordKind::entity,entity.node.id,std::move(w.bytes),2});
     }
     for(auto const& layer:scene.layers) {
         Writer w;w.text(layer.name);w.boolean(layer.visible);
@@ -351,6 +360,7 @@ Scene decode_records(std::vector<Record> const& records) {
     Scene scene;
     scene.version=3;
     bool header_seen=false;
+    std::vector<std::uint64_t> old_owned_ids;
     for(auto const& record:records) {
         Reader r(record.bytes,0,record.bytes.size());
         if(record.kind==RecordKind::document && record.version==1) {
@@ -363,10 +373,12 @@ Scene decode_records(std::vector<Record> const& records) {
             s.lookahead_seconds=r.f32();
             s.max_cell_loads_per_update=r.u32();
             s.max_cell_unloads_per_update=r.u32();
-        } else if(record.kind==RecordKind::entity && record.version==1) {
+        } else if(record.kind==RecordKind::entity && (record.version==1 || record.version==2)) {
             if(scene.objects.size()>=max_scene_objects)
                 throw std::runtime_error("Scene ListFile entity count exceeds limit");
-            auto entity=read_entity(r);
+            std::uint32_t was_owned=0;
+            auto entity=read_entity(r,record.version==1,&was_owned);
+            if(was_owned)old_owned_ids.push_back(entity.node.id);
             if(!record.id || entity.node.id!=record.id)
                 throw std::runtime_error("Scene ListFile entity ID does not match record");
             scene.objects.push_back(std::move(entity));
@@ -426,6 +438,7 @@ Scene decode_records(std::vector<Record> const& records) {
         if(r.offset!=record.bytes.size())
             throw std::runtime_error("Scene ListFile record contains trailing bytes");
     }
+    for(auto id:old_owned_ids)scene_pawn::migrate_imported_local(scene,id);
     validate_scene(scene);
     return scene;
 }

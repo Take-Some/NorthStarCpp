@@ -46,21 +46,23 @@ remains available at the lower priority.
 
 The scripting provider owns the low-level `engine.*` host bridge. Its
 native methods remain ABI-backed and plugin-overridable. The shared script
-`sharedAssets/scripts/northstar/bootstrap.js` installs the public `NorthStar`
+`engine/northstarcpp/resources/api/northstar/bootstrap.js` installs the public `NorthStar`
 JavaScript helper namespace. This is project-independent SDK code.
 
 For every active project script context the Player executes, in this order:
 
 1. The scripting provider initializes `engine.*` and its native bindings.
 2. The Asset Manager mounts `sharedAssets` as a low-priority VFS layer.
-3. The root script `scripts/northstar/bootstrap.js` runs via `evaluate_asset`.
+3. The compiled root script `scripts/northstar/bootstrap.js` runs via the immutable embedded API registry (not through VFS).
 4. The project entrypoint `scripts/main.js` runs through the same VFS.
 5. Scene-attached project scripts run. Afterwards the `start` event is emitted.
 
-Scripts are loaded through the active VFS; the shared root script is not
-evaluated by opening a native filesystem path from JavaScript. Source and
-archive games follow this ordering. The default helper has no hardcoded
-gameplay input handling until a project creates and updates a controller.
+Only project gameplay scripts are loaded from VFS. The NorthStar SDK is
+compiled into the Player and Editor; API bootstrap, events, input enums,
+scene helpers, UI root and character base never resolve from writable
+project or shared-assets files. Optional gameplay Player/Camera roots may
+be replaced explicitly per project. Source and archived games use the same
+engine-owned baseline without requiring loose SDK scripts.
 
 ### Project-owned camera policy
 
@@ -105,7 +107,7 @@ FAT/DB archive.
 ## Scope
 
 The default script bootstrap is an engine SDK layer, not a project game mode.
-`sharedAssets/scripts/newviso/*.ysc` are existing different-format scripts;
+`engine/northstarcpp/resources/api/newviso/*.ysc` are existing different-format scripts;
 they are not silently executed as JavaScript. A project without a JavaScript
 entrypoint or attached scripts does not start a needless V8 gameplay context.
 All project scripts that do run receive the shared API by default.

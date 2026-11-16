@@ -340,7 +340,7 @@ def parser() -> argparse.ArgumentParser:
     game.add_argument("--project", metavar="FOLDER", help="Project folder or Projects/<name>")
     game.add_argument("--engine-package", metavar="FOLDER", help="Verified engine distribution")
     game.add_argument("--output-dir", metavar="FOLDER", default="dist/games")
-    game.add_argument("--physics", choices=("bullet", "jolt"), default="bullet")
+    game.add_argument("--physics", choices=("bullet", "jolt"), default="jolt")
     game.add_argument("--allow-debug", action="store_true")
     game.add_argument("--no-zip", action="store_true")
     game.add_argument("--verify", metavar="FOLDER")
