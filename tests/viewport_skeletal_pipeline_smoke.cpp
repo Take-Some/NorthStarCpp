@@ -146,6 +146,17 @@ void check_abby_grip(std::filesystem::path const& root) {
     auto native=load_native_model_resource(assets,
         "characters/abby/models/abby.ydd");
     REQUIRE(native.skeleton.has_value());
+    // Verify the gun's visible local origin against the hand socket.
+    // A wrong mesh pivot/asset offset cannot be compensated by wrist IK.
+    auto const pistol=load_native_model_resource(assets,
+        "models/weapon/pistol/pistol.ydd",true);
+    auto const& mn=pistol.mesh.minimum;
+    auto const& mx=pistol.mesh.maximum;
+    std::fprintf(stderr,
+        "[WEAPONLAB PISTOL BOUNDS] min=(%.3f %.3f %.3f)"
+        " max=(%.3f %.3f %.3f) middle=(%.3f %.3f %.3f)\\n",
+        mn.x,mn.y,mn.z,mx.x,mx.y,mx.z,
+        (mn.x+mx.x)*.5f,(mn.y+mx.y)*.5f,(mn.z+mx.z)*.5f);
     auto const& skeleton=*native.skeleton;
     for(auto const& [helper,source]:skeleton.mirrored_helpers)
         if(skeleton.joints[source].name.find("index")!=std::string::npos ||
