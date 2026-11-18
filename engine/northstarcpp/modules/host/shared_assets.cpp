@@ -115,28 +115,9 @@ Inventory inspect_directory(fs::path const& root)
         try {
             if (ext == ".ymat") {
                 auto const source=detail::read_list_file(assets,path);
-                if(source.kind==30) {
-                    // Authored character materials are JSON YMAT, not the
-                    // world material XML YMAT variant. Validate separately.
-                    auto const data=detail::parse_json(
-                        std::string(source.body.begin(),source.body.end()));
-                    auto const& records=data.get_child("materials");
-                    detail::require(data.get<std::string>("schema")=="northstar.ymat.v1" &&
-                        records.size()==source.entries,"Invalid character material library");
-                    std::set<std::string> names;
-                    for(auto const& record:records) {
-                        detail::require(record.first.empty(),"Invalid character material array");
-                        auto name=record.second.get<std::string>("name");
-                        detail::validate_name(name);
-                        detail::require(names.insert(name).second,
-                                        "Duplicate character material name");
-                    }
-                    result.materials+=records.size();
-                } else {
-                    auto list=detail::parse_materials(source,path);
-                    result.materials+=list.size();
-                    materials.emplace(path,std::move(list));
-                }
+                auto list=detail::parse_materials(source,path);
+                result.materials+=list.size();
+                materials.emplace(path,std::move(list));
             } else if (ext == ".ymt") {
                 auto const file = detail::read_list_file(assets, path);
                 if (detail::legacy_material_library(file))
@@ -222,7 +203,7 @@ void AssetStore::mount_shared_assets(std::filesystem::path const& root)
     if (root.extension()==".nsp" && std::filesystem::is_regular_file(root)) {
         mount_archive("",root,root,-100);
     } else {
-        mount_directory("",root,-100);
+        mount_directory("",root,-80); // unpacked source overrides base NSP (-100)
     }
 }
 

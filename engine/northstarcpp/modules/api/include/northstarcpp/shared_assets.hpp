@@ -124,6 +124,10 @@ std::vector<DictionaryEntry> list_dictionary_entries(
     AssetStore const& assets, std::string const& path);
 std::vector<DictionaryEntry> list_dictionary_entries(
     std::vector<std::uint8_t> const& bytes, std::string const& path);
+// Authenticated NVPT v1 JSON payload for editor and runtime particle FX.
+// The NEF8/NEF16 envelope is validated by the same native dictionary codec.
+std::string decode_particle_runtime_json(
+    std::vector<std::uint8_t> const& nef8);
 std::string load_source(AssetStore const& assets, std::string const& path);
 
 struct Inventory {

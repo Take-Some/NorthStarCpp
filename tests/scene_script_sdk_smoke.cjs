@@ -51,6 +51,21 @@ const engine = {
         }
     }
 };
+// The fixtures expose the canonical nested API, never flat game bindings.
+const flatScene=engine.scene,flatCamera=engine.camera,flatPlayer=engine.player;
+engine.scene={
+    entities:{objects:flatScene.objects,objectCount:flatScene.objectCount},
+    transforms:{moveStatic:flatScene.moveStatic,setColor:flatScene.setColor},
+    animation:{setAnimation:flatScene.setAnimation}
+};
+engine.camera={
+    views:{available:()=>true},
+    shots:{cut:flatCamera.cut,pushShot:flatCamera.pushShot,
+        clearShot:flatCamera.clearShot,clearShots:flatCamera.clearShots,
+        activeShot:flatCamera.activeShot,applyPreset:flatCamera.applyPreset},
+    effects:{shake:flatCamera.shake}
+};
+engine.player={controller:{controlledIndex:flatPlayer.controlledIndex}};
 const sandbox = vm.createContext({engine});
 const bootstrap = path.resolve(__dirname,
     "../engine/northstarcpp/resources/sharedAssets/api/northstar/bootstrap.js");

@@ -7,16 +7,17 @@
 namespace northstarcpp::render::d3d12::detail {
 enum class FrameStage:std::uint32_t {
     Shadow=0,GBuffer=1,Deferred=2,Translucency=3,
-    Bloom=4,Exposure=5,Tonemap=6,Composite=7,Present=8
+    Bloom=4,Exposure=5,Tonemap=6,Composite=7,Present=8,Motion=9
 };
 enum class FrameResource:std::uint32_t {
     Shadow=0,GBufferAlbedo=1,GBufferNormal=2,GBufferMaterial=3,
     Depth=4,Scene=5,Output=6,Bloom=7,Exposure=8,ToneMapped=9,
-    GBufferAuxiliary=10
+    GBufferAuxiliary=10,Velocity=11
 };
 inline northstarcpp::render::RenderGraph build_frame_graph(
     bool extended=false,bool bloom_enabled=false,
-    bool hdr_enabled=false,bool composite_enabled=false) {
+    bool hdr_enabled=false,bool composite_enabled=false,
+    bool velocity_enabled=false) {
     using namespace northstarcpp::render;
     RenderGraph graph;
     auto shadow=graph.add_resource("shadow depth array",true,ResourceAccess::ShaderRead);
@@ -30,6 +31,7 @@ inline northstarcpp::render::RenderGraph build_frame_graph(
     auto exposure=graph.add_resource("temporal exposure",true,ResourceAccess::ShaderRead);
     auto tonemapped=graph.add_resource("tonemapped LDR",true,ResourceAccess::ShaderRead);
     auto auxiliary=graph.add_resource("G-buffer v2 auxiliary");
+    auto velocity=graph.add_resource("RG16F camera motion");
     using A=ResourceAccess;
     auto p0=graph.add_pass({"shadow",{}, {shadow}, {},{{shadow,A::DepthWrite}}});
     std::vector<ResourceId> gbuffer_writes{albedo,normal,material,depth,scene};
@@ -54,10 +56,18 @@ inline northstarcpp::render::RenderGraph build_frame_graph(
     }
     auto p2=graph.add_pass({"deferred lighting",
         std::move(lighting_reads),{scene},{p1},std::move(lighting_usage)});
-    auto p3=graph.add_pass({"forward translucency",{}, {scene,depth},{p2},
-        {{scene,A::ColorAttachment},{depth,A::DepthWrite}}});
+    // Alpha-forward materials depth-test against opaque depth but have
+    // depth writes disabled. Never advertise a false depth write: it can
+    // force unnecessary barriers or invalidate later depth sampling.
+    auto p3=graph.add_pass({"forward translucency",{depth}, {scene},{p2},
+        {{scene,A::ColorAttachment},{depth,A::DepthRead}}});
+    auto after_geometry=p3;
+    if(velocity_enabled)
+        after_geometry=graph.add_pass({"camera motion vectors",{depth},
+            {velocity},{after_geometry},
+            {{depth,A::ShaderRead},{velocity,A::ColorAttachment}}});
     auto effects=append_postfx_graph(graph,{scene,output,bloom,exposure,tonemapped},
-        p3,{bloom_enabled,hdr_enabled,composite_enabled});
+        after_geometry,{bloom_enabled,hdr_enabled,composite_enabled});
     graph.add_pass({"HUD/Present",{output},{output},{effects.composite},
         {{output,A::ColorAttachment}}});
     return graph;

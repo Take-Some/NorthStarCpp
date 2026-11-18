@@ -61,18 +61,24 @@
     const native=Realm.shared.call;
     const subscriptions=new Map();
     const namespaces=new Map();
-    // Cache capability proxies and their bound methods: gameplay often calls
-    // engine.input/engine.scene many times per frame.
+    // Match the native V8 bridge: any engine.* method can also have child
+    // namespaces, without hard-coded categories or an additional callback.
     const exposed=(ns)=>{
       let proxy=namespaces.get(ns);
       if(proxy)return proxy;
       const methods=new Map();
       proxy=new Proxy(Object.create(null),{
-        get(_target,method) {
-          if(typeof method!=="string" || method==="then")return undefined;
+        get(_target,method){
+          if(typeof method!=="string"||method==="then")return undefined;
           let fn=methods.get(method);
-          if(!fn) {
-            fn=(...args)=>native(ns,method,args);
+          if(!fn){
+            const child=ns+"."+method;
+            fn=new Proxy((...args)=>native(ns,method,args),{
+              get(_target,nested){
+                if(typeof nested!=="string"||nested==="then")return undefined;
+                return exposed(child)[nested];
+              }
+            });
             methods.set(method,fn);
           }
           return fn;

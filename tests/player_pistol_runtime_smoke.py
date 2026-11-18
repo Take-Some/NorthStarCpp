@@ -17,10 +17,10 @@ from tools.v8_provider.player_e2e import run
 SCRIPT = r'''import { Scene, Prefab, Events, Physics } from "@northstar/engine";
 let item = null;
 let frames = 0;
-const save = (slot, data) => engine.save.write(slot, JSON.stringify(data));
+const save = (slot, data) => engine.storage.saves.write(slot, JSON.stringify(data));
 Events.on("start", () => {
     const before = Scene.objectCount();
-    item = Prefab.instantiate("prefabs/pistol.nprefab", {
+    item = Prefab.instantiate("prefabs/weapon/pistol.nprefab", {
         position: {x: 45, y: 1, z: 45}
     });
     const entity = item.root;
@@ -50,7 +50,7 @@ Events.on("update", () => {
             throw new Error("Pistol rigid body did not fall with gravity");
         save("scripting_update", {phase:"update", frames, dt:1/60,
             y:now.position.y});
-        engine.session.quit();
+        engine.session.lifecycle.quit();
     }
 });
 Events.on("stop", () => {
@@ -65,13 +65,14 @@ Events.on("stop", () => {
 
 def verify(player: Path) -> None:
     project_source = ROOT / "Projects/NorthStarFirstPersonPlatform"
-    assert (project_source/"prefabs/pistol.nprefab").is_file()
-    assert (ROOT/"sharedAssets/models/weapon/pistol/pistol.ydd").is_file()
+    assert (ROOT/"engine/northstarcpp/resources/sharedAssets/prefabs/weapon/pistol.nprefab").is_file()
+    assert (ROOT/"engine/northstarcpp/resources/sharedAssets/models/weapon/pistol/pistol.ydd").is_file()
     with tempfile.TemporaryDirectory(prefix="northstar-pistol-runtime-") as work:
         project = Path(work)/"project"
         shutil.copytree(project_source, project)
-        (project/"scripts/main.js").write_text(SCRIPT, encoding="utf-8")
-        (project/"scripts/playerConfig.js").write_text(
+        (project/"assets/scripts").mkdir(parents=True, exist_ok=True)
+        (project/"assets/scripts/main.js").write_text(SCRIPT, encoding="utf-8")
+        (project/"assets/scripts/playerConfig.js").write_text(
             "NorthStar.player.configure({enabled:false});\n", encoding="utf-8")
         output = run(player, None, project, None, seconds=45)
         assert output["markers"]["scripting_start"]["hit"] == \

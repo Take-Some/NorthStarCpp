@@ -2,6 +2,8 @@
 // NorthStarCpp - native D3D12 provider, stable engine.render ABI 5.
 // Copyright (C) 2026 Kayla's Systems - Kayla Verner.
 #include <northstarcpp/render_plugin.h>
+#include <northstarcpp/render_capture_api.h>
+#include <northstarcpp/render_sky_api.h>
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_postfx_api.h>
 #include "../shared/postfx_look.hpp"
@@ -18,6 +20,7 @@
 #include "../shared/tiled_lights.hpp"
 #include "../shared/tiled_light_cache.hpp"
 #include "../shared/temporal_history.hpp"
+#include "../shared/temporal_instance_history.hpp"
 #include "../shared/material_hlsl.hpp"
 #include "../shared/material_variants.hpp"
 #include "../shared/deferred_math.hpp"
@@ -41,6 +44,8 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
+#include <northstarcpp/render_rigid_instances_api.h>
+#include <northstarcpp/render_rigid_residency_api.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
@@ -73,6 +78,7 @@ using northstarcpp::render::d3d12::shader_compiler::compile_sky;
 using northstarcpp::render::d3d12::shader_compiler::compile_authored_material;
 using northstarcpp::render::d3d12::shader_compiler::compile_material_variant;
 using northstarcpp::render::d3d12::shader_compiler::compile_deferred;
+using northstarcpp::render::d3d12::shader_compiler::compile_motion;
 using northstarcpp::render::d3d12::shader_compiler::compile_fxaa;
 using northstarcpp::render::d3d12::shader_compiler::compile_bloom;
 using northstarcpp::render::d3d12::shader_compiler::compile_hdr;
@@ -106,6 +112,20 @@ struct MaterialDraw {
     unsigned blend_mode=0;
     UINT first=0,count=0;
     MaterialParams params{};
+    std::array<std::shared_ptr<MaterialGpuTexture>,5> maps{};
+};
+struct RigidMeshGpu {
+    ComPtr<ID3D12Resource> vertices,indices;
+    D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+    D3D12_INDEX_BUFFER_VIEW index_view{};
+    std::uint32_t vertex_count=0,index_count=0;
+    std::uint64_t bytes=0;
+};
+struct RigidDrawGpu {
+    std::uint64_t mesh_key=0,entity_id=0;
+    std::uint32_t first_index=0,index_count=0;
+    MaterialParams params{};
+    float world[16]{};
     std::array<std::shared_ptr<MaterialGpuTexture>,5> maps{};
 };
 struct MaterialTextureUpload {
@@ -208,6 +228,25 @@ struct RendererState {
     NorthStarRenderPickAsyncResult poll_async_pick(std::uint64_t);
     void invalidate_async_pick(std::uint64_t) noexcept;
     void shutdown_async_pick() noexcept;
+    // Original rigid vertices/indices are uploaded once to DEFAULT GPU memory.
+    // Each subsequent frame supplies only the instance transforms + material.
+    std::unordered_map<std::uint64_t,RigidMeshGpu> rigid_meshes;
+    std::uint64_t rigid_mesh_bytes=0;
+    std::uint64_t rigid_uploaded_bytes=0;
+    std::uint64_t rigid_last_indices=0;
+    std::vector<RigidDrawGpu> rigid_draws;
+    ComPtr<ID3D12Resource> rigid_constants;
+    unsigned char* rigid_constant_bytes=nullptr;
+    ComPtr<ID3D12DescriptorHeap> rigid_srvs;
+    ComPtr<ID3D12PipelineState> rigid_material_pipeline,rigid_shadow_pipeline;
+    std::size_t rigid_draw_capacity=0;
+    void upload_rigid_mesh(NorthStarRigidMesh const&);
+    void clear_rigid_meshes();
+    void release_rigid_meshes(std::uint64_t const*,UINT);
+    void set_rigid_instances(NorthStarRigidInstance const*,UINT);
+    void record_rigid_opaque();
+    void record_rigid_shadow(UINT cascade);
+    void read_rigid_stats(NorthStarRigidInstanceStats& out) const noexcept;
     ComPtr<ID3D12RootSignature> material_signature;
     ComPtr<ID3D12PipelineState> material_pipeline;
     std::unordered_map<std::string,ComPtr<ID3D12PipelineState>>
@@ -249,6 +288,10 @@ struct RendererState {
     ComPtr<ID3D12DescriptorHeap> hdr_rtv_heap,hdr_exposure_rtv_heap,
         hdr_srvs[2],hdr_exposure_srvs[2],hdr_bloom_srvs;
     ComPtr<ID3D12Resource> hdr_scene_color,hdr_exposure[2];
+    ComPtr<ID3D12Resource> motion_surface,motion_constants;
+    unsigned char* motion_constant_data=nullptr;
+    ComPtr<ID3D12DescriptorHeap> motion_rtv_heap;
+    ComPtr<ID3D12PipelineState> motion_pipeline;
     UINT hdr_exposure_rtv_stride=0;
     UINT exposure_frame_index=0;
     bool exposure_history_valid=false;
@@ -256,7 +299,9 @@ struct RendererState {
     bool exposure_frame_clock_valid=false;
     northstarcpp::render::TemporalHistoryTracker temporal_tracker;
     northstarcpp::render::TemporalFrameState temporal_frame{};
+    northstarcpp::render::TemporalInstanceHistory temporal_instances;
     bool hdr_enabled=false;
+    bool velocity_enabled=false;
     ComPtr<ID3D12DescriptorHeap> bloom_rtv_heap;
     ComPtr<ID3D12Resource> bloom_surface;
     bool bloom_enabled=false;
@@ -283,6 +328,7 @@ struct RendererState {
     unsigned char* fxaa_constant_data=nullptr;
     bool fxaa_enabled=true;
     bool ssao_enabled=false;
+    float height_fog_density=0.f;
     // Hardware GBuffer inspection without extra MRTs or readback stalls.
     unsigned gbuffer_debug_mode=0;
     ComPtr<ID3D12DescriptorHeap> deferred_rtvs,deferred_srvs;
@@ -307,6 +353,11 @@ struct RendererState {
     std::vector<NorthStarMaterialVertex> material_cpu_vertices,material_vertex_scratch;
     bool material_vertices_dirty=true;
     std::vector<MaterialDraw> material_draws;
+    struct TransparentTriangle {
+        float distance=0.f;
+        UINT batch=0u,first=0u;
+    };
+    std::vector<TransparentTriangle> translucent_draw_scratch;
     std::unordered_multimap<std::uint64_t,std::shared_ptr<MaterialGpuTexture>> material_texture_cache;
     std::uint64_t material_cache_bytes=0;
     UploadPages upload_pages;
@@ -315,7 +366,9 @@ struct RendererState {
     UINT material_descriptor_increment=0;
     ComPtr<ID3D12RootSignature> sky_signature;
     ComPtr<ID3D12PipelineState> sky_pipeline,hud_triangles_pso,
-                                  hud_lines_pso,hdr_sky_pipeline;
+                                  hud_lines_pso,hdr_sky_pipeline,
+                                  sky_fullscreen_pipeline,
+                                  hdr_sky_fullscreen_pipeline;
     ComPtr<ID3D12DescriptorHeap> sky_srv_heap;
     ComPtr<ID3D12Resource> sky_vertex,sky_index,sky_texture;
     ComPtr<ID3D12Resource> sky_camera,sky_tint,hud_camera;
@@ -336,6 +389,7 @@ struct RendererState {
     D3D12_INDEX_BUFFER_VIEW sky_index_view{};
     unsigned char* sky_camera_data=nullptr;
     unsigned char* sky_tint_data=nullptr;
+    NorthStarGpuSkyUniforms gpu_sky_uniforms{};
     unsigned char* hud_camera_data=nullptr;
     UINT sky_index_count=0;
     UINT64 sky_gpu_bytes=0;
@@ -343,6 +397,10 @@ struct RendererState {
     ComPtr<ID3D12Resource> timestamp_readback;
     UINT64 timestamp_frequency=0;
     bool timestamp_pending=false;
+    // Only one explicitly requested GPU backbuffer capture can be resident.
+    bool capture_pending=false;
+    UINT capture_width=0,capture_height=0;
+    std::vector<std::uint8_t> capture_rgba;
     static constexpr UINT timestamp_count=5;
 
     RendererState(HWND window,bool software);
@@ -365,13 +423,19 @@ struct RendererState {
     void set_material_batches_v2(NorthStarMaterialBatchV2 const* batches,UINT count);
     void set_triangles(const NorthStarRenderTriangleVertex* source,UINT count);
     void set_sky(NorthStarSky const* source);
+    void set_gpu_sky_uniforms(NorthStarGpuSkyUniforms const* source);
     NorthStarRenderTimingStats timing_stats();
     NorthStarRenderMemoryStats memory_stats() const;
     void verify_readback(ID3D12Resource* pixels,UINT pitch,UINT mode);
     void set_editor_grid(NorthStarRenderEditorGridSettings const* settings);
     void draw_editor_grid(FramePassContext& context);
-    void draw_translucent_materials();
+    void draw_translucent_materials(
+        const northstarcpp::math::float3& focus,
+        const northstarcpp::math::float3& forward);
     void draw(const NorthStarRenderFrame& frame);
+    void set_temporal_instances(const NorthStarRenderTemporalInstance* items, std::uint32_t count) {
+        temporal_instances.stage(items,count);
+    }
     int pick_cube(std::uint32_t x,std::uint32_t y);
     void set_pick_triangles(const NorthStarRenderPickVertex*,std::uint32_t);
     void set_pick_cubes(const std::uint64_t*,std::uint32_t);
@@ -382,6 +446,7 @@ struct RendererState {
     void record_gbuffer_pass(FramePassContext& context);
     void record_deferred_pass(FramePassContext& context);
     void record_translucency_pass(FramePassContext& context);
+    void record_motion_pass(FramePassContext& context);
     void record_bloom_pass(FramePassContext& context);
     void record_exposure_pass(FramePassContext& context);
     void record_tonemap_pass(FramePassContext& context);

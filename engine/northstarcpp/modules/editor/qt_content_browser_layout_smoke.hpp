@@ -176,6 +176,99 @@ inline bool verify(QMainWindow& window,QtContentBrowser& browser,
         settings.remove(asset_collections::storageKey(browser.contentRoot()));
     }
     okay=okay && dock.height()==h && browser.height()==browserHeight;
+    // Regression: saving/deleting files must not send navigation to /.
+    // Exercise the exact asynchronous refresh triggered by file watching.
+    if(okay) {
+        auto const nested=browser.contentRoot()+"/props/inside";
+        okay=QDir().mkpath(nested);
+        if(okay) {
+            for(int i=0;i<90;++i) {
+                QFile item(nested+QString("/asset_%1.txt").arg(i,3,10,QChar('0')));
+                if(!item.open(QIODevice::WriteOnly)) {okay=false;break;}
+                item.write("stable content");
+            }
+        }
+        auto awaitReady=[&](int expectedMinimum) {
+            QElapsedTimer clock;clock.start();
+            while(clock.elapsed()<9000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                if(browser.catalogReady() && browser.visibleCount()>=expectedMinimum)
+                    return true;
+                QThread::msleep(10);
+            }
+            return false;
+        };
+        auto refreshAndWait=[&](int minimum) {
+            browser.refresh();
+            // No intermediate root navigation, even before indexing finishes.
+            if(browser.currentFolder()!="props/inside")return false;
+            return awaitReady(minimum);
+        };
+        if(okay) {
+            browser.refresh();
+            okay=awaitReady(3);
+        }
+        if(okay) {
+            browser.browseTo("props/inside");
+            okay=browser.currentFolder()=="props/inside" && browser.visibleCount()==90;
+        }
+        if(okay) {
+            auto* items=grid->model();
+            for(int i=0;i<items->rowCount();++i) {
+                auto index=items->index(i,0);
+                if(index.data(Qt::DisplayRole).toString()=="asset_042.txt") {
+                    grid->setCurrentIndex(index);
+                    break;
+                }
+            }
+            okay=browser.currentSelection()=="props/inside/asset_042.txt";
+            // Intentionally scroll away from the selected item. Refresh must
+            // retain scroll, not scroll to a new topmost card.
+            auto* bar=grid->verticalScrollBar();
+            int const target=std::min(6,bar->maximum());
+            bar->setValue(target);
+            okay=okay && refreshAndWait(90);
+            QCoreApplication::processEvents();
+            okay=okay && browser.currentFolder()=="props/inside" &&
+                 browser.currentSelection()=="props/inside/asset_042.txt" &&
+                 bar->value()==target;
+            if(okay) {
+                QFile changed(nested+"/asset_042.txt");
+                okay=changed.open(QIODevice::Append);
+                if(okay) {
+                    changed.write(" after save");
+                    changed.close();
+                    browser.refresh();
+                    browser.refresh(); // watcher burst / overlapping scans
+                    okay=awaitReady(90) &&
+                        browser.currentFolder()=="props/inside" &&
+                        browser.currentSelection()=="props/inside/asset_042.txt";
+                }
+            }
+            if(okay) {
+                okay=QFile::remove(nested+"/asset_042.txt") &&
+                    refreshAndWait(89);
+                okay=okay && browser.currentFolder()=="props/inside" &&
+                     browser.currentSelection().isEmpty();
+            }
+        }
+        if(okay) {
+            // If the folder itself disappears, use its existing parent.
+            okay=QDir(nested).removeRecursively();
+            if(okay) {
+                browser.refresh();
+                QElapsedTimer clock;clock.start();
+                while(clock.elapsed()<9000 && !browser.catalogReady()) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                    QThread::msleep(10);
+                }
+                okay=browser.catalogReady() &&
+                    browser.currentFolder()=="props";
+            }
+        }
+        std::cout<<"Content Browser preserve folder/selection/scroll on save/delete: "
+                 <<(okay?"PASS":"FAIL")<<"\n";
+    }
     std::cout<<"Content Browser stable dock, sort, search, favorites: "
              <<(okay?"PASS":"FAIL")<<" ("<<h<<"px)\n";
     return okay;

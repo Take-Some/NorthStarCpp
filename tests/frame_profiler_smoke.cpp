@@ -45,6 +45,7 @@ int main()
         FrameProfiler scoped(1000);
         {
             FrameProfileScope frame(&scoped, 0.016);
+            frame.record_gpu_timing(1.5);
             frame.measure(FrameStage::scripting, [] { volatile int n = 10; (void)n; });
             frame.measure(FrameStage::animation, [] {});
             frame.measure(FrameStage::rendering, [] {
@@ -70,6 +71,8 @@ int main()
             require(thrown, "Frame profiler hid a renderer exception");
         }
         require(scoped.collected() == 1, "Frame scope did not record the frame");
+        require(scoped.gpu_samples() == 1 && scoped.statistics_gpu().p50 == 1.5,
+            "Optional GPU timing sample was not retained");
         require(scoped.statistics_interval().p50 == 16.0,
             "Unclamped 16ms frame interval was not recorded");
         require(scoped.statistics_stage(FrameStage::rendering).maximum >= 0,

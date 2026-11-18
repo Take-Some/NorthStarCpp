@@ -89,11 +89,11 @@ int main(int argc,char** argv) {
     std::error_code ec;
     std::filesystem::remove(path,ec);
 
-    // Legacy sources are import-only; saving always produces NSCN binary.
+    // Legacy sources are import-only; saving always produces NEF8 binary.
     Scene const legacy=parse_scene_data(
         "NorthStarCpp.Scene 2\n"
         "cube \"Player\" 0 0 0 1.5 46b9d8 1 1\n");
-    if(legacy.version!=2) return 5;
+    if(legacy.version!=3) return 5;
     save_scene(legacy,path);
     auto upgraded=load_scene(path);
     if(upgraded.version!=3 || upgraded.objects.size()!=1 ||
@@ -114,6 +114,7 @@ int main(int argc,char** argv) {
     auto extra=b;
     extra.push_back('\0');
     if(!throws([&] {parse_scene_binary(extra);}))return 11;
-    if(!throws([&] {serialize_scene_binary(legacy);}))return 12;
+    auto const migrated_text=serialize_scene_binary(legacy);
+    if(serialize_scene_binary(parse_scene_binary(migrated_text))!=migrated_text)return 12;
     return 0;
 }

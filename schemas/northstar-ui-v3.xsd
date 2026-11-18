@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NorthStarCpp .nui format v3. Use for completion and static validation.
+     Runtime additionally checks parent order, token resolution, text length,
+     property uniqueness, numeric finiteness and the 256 KiB input bound. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="qualified" attributeFormDefault="unqualified">
+  <xs:simpleType name="uiIdentifier">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z][A-Za-z0-9._-]{0,63}"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="uiValueType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="string"/>
+      <xs:enumeration value="number"/>
+      <xs:enumeration value="bool"/>
+      <xs:enumeration value="color"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="propertyType">
+    <xs:attribute name="name" type="uiIdentifier" use="required"/>
+    <xs:attribute name="type" type="uiValueType"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="token" type="uiIdentifier"/>
+  </xs:complexType>
+  <xs:complexType name="widgetType">
+    <xs:sequence>
+      <xs:element name="Property" type="propertyType" minOccurs="0" maxOccurs="48"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="uiIdentifier" use="required"/>
+    <xs:attribute name="parent" type="uiIdentifier"/>
+    <xs:attribute name="style" type="uiIdentifier"/>
+  </xs:complexType>
+  <xs:element name="NorthStarUI">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Tokens" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Token" minOccurs="0" maxOccurs="128">
+              <xs:complexType>
+                <xs:attribute name="name" type="uiIdentifier" use="required"/>
+                <xs:attribute name="type" type="uiValueType" use="required"/>
+                <xs:attribute name="value" type="xs:string" use="required"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="Styles" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Style" minOccurs="0" maxOccurs="128">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="Property" type="propertyType"
+                              minOccurs="0" maxOccurs="48"/>
+                </xs:sequence>
+                <xs:attribute name="name" type="uiIdentifier" use="required"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="Components" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Component" minOccurs="0" maxOccurs="64">
+              <xs:complexType><xs:sequence>
+                <xs:element name="Property" type="propertyType" minOccurs="0" maxOccurs="48"/>
+              </xs:sequence>
+                <xs:attribute name="name" type="uiIdentifier" use="required"/>
+                <xs:attribute name="type" type="xs:string" use="required"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="Elements">
+          <xs:complexType>
+            <xs:choice minOccurs="0" maxOccurs="256">
+              <xs:element name="Panel" type="widgetType"/>
+              <xs:element name="Text" type="widgetType"/>
+              <xs:element name="Button" type="widgetType"/>
+              <xs:element name="Image" type="widgetType"/>
+              <xs:element name="Input" type="widgetType"/>
+              <xs:element name="Use">
+                <xs:complexType><xs:sequence>
+                  <xs:element name="Property" type="propertyType" minOccurs="0" maxOccurs="48"/>
+                </xs:sequence>
+                  <xs:attribute name="id" type="uiIdentifier" use="required"/>
+                  <xs:attribute name="component" type="uiIdentifier" use="required"/>
+                  <xs:attribute name="parent" type="uiIdentifier"/>
+                  <xs:attribute name="style" type="uiIdentifier"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:choice>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="Actions" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Action" minOccurs="0" maxOccurs="128">
+              <xs:complexType>
+                <xs:attribute name="id" type="uiIdentifier" use="required"/>
+                <xs:attribute name="event" type="xs:string" use="required"/>
+                <xs:attribute name="emit" type="xs:string" use="required"/>
+                <xs:attribute name="animation" type="uiIdentifier"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="Animations" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Animation" minOccurs="0" maxOccurs="128">
+              <xs:complexType>
+                <xs:attribute name="name" type="uiIdentifier" use="required"/>
+                <xs:attribute name="id" type="uiIdentifier" use="required"/>
+                <xs:attribute name="property" type="xs:string" use="required"/>
+                <xs:attribute name="from" type="xs:double" use="required"/>
+                <xs:attribute name="to" type="xs:double" use="required"/>
+                <xs:attribute name="duration" type="xs:double" use="required"/>
+                <xs:attribute name="easing" type="xs:string"/>
+                <xs:attribute name="trigger" type="xs:string"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+        <xs:element name="Breakpoints" minOccurs="0">
+          <xs:complexType><xs:sequence>
+            <xs:element name="Breakpoint" minOccurs="0" maxOccurs="64">
+              <xs:complexType><xs:sequence>
+                <xs:element name="Override" minOccurs="0" maxOccurs="128">
+                  <xs:complexType><xs:sequence>
+                    <xs:element name="Property" type="propertyType"
+                                minOccurs="0" maxOccurs="48"/>
+                  </xs:sequence>
+                    <xs:attribute name="id" type="uiIdentifier" use="required"/>
+                  </xs:complexType>
+                </xs:element>
+              </xs:sequence>
+                <xs:attribute name="minWidth" type="xs:nonNegativeInteger"/>
+                <xs:attribute name="maxWidth" type="xs:nonNegativeInteger"/>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence></xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="version" use="required">
+        <xs:simpleType><xs:restriction base="xs:string">
+          <xs:enumeration value="3"/>
+        </xs:restriction></xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="target" use="required">
+        <xs:simpleType><xs:restriction base="xs:string">
+          <xs:enumeration value="screen"/>
+          <xs:enumeration value="world"/>
+        </xs:restriction></xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="layer" type="uiIdentifier"/>
+      <xs:attribute name="entityId" type="xs:string"/>
+      <xs:attribute name="width" type="xs:positiveInteger"/>
+      <xs:attribute name="height" type="xs:positiveInteger"/>
+      <xs:attribute name="worldWidth" type="xs:decimal"/>
+      <xs:attribute name="worldHeight" type="xs:decimal"/>
+    </xs:complexType>
+    <xs:key name="widgetIds">
+      <xs:selector xpath="Elements/*"/>
+      <xs:field xpath="@id"/>
+    </xs:key>
+    <xs:keyref name="widgetParents" refer="widgetIds">
+      <xs:selector xpath="Elements/*"/>
+      <xs:field xpath="@parent"/>
+    </xs:keyref>
+    <xs:key name="styleIds">
+      <xs:selector xpath="Styles/Style"/>
+      <xs:field xpath="@name"/>
+    </xs:key>
+    <xs:keyref name="widgetStyles" refer="styleIds">
+      <xs:selector xpath="Elements/*"/>
+      <xs:field xpath="@style"/>
+    </xs:keyref>
+    <xs:key name="componentIds">
+      <xs:selector xpath="Components/Component"/>
+      <xs:field xpath="@name"/>
+    </xs:key>
+    <xs:keyref name="instanceComponents" refer="componentIds">
+      <xs:selector xpath="Elements/Use"/>
+      <xs:field xpath="@component"/>
+    </xs:keyref>
+    <xs:key name="tokenIds">
+      <xs:selector xpath="Tokens/Token"/>
+      <xs:field xpath="@name"/>
+    </xs:key>
+  </xs:element>
+</xs:schema>

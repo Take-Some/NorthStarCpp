@@ -13,8 +13,11 @@
 #include <northstarcpp/scene_world.hpp>
 #include <northstarcpp/ecs.hpp>
 #include <northstarcpp/physics_plugin.h>
+#include <northstarcpp/physics_terrain_streaming_api.h>
 #include <northstarcpp/physics_surface.hpp>
 #include "module_loader.hpp"
+#include "physics_residency_guards.hpp"
+#include "character_motor_provider_bridge.hpp"
 // Collision authoring contract is provided by <northstarcpp/collision_authoring.hpp>.
 
 #include <algorithm>
@@ -23,6 +26,8 @@
 #include <limits>
 #include <unordered_set>
 #include <unordered_map>
+#include <deque>
+#include <mutex>
 
 namespace northstarcpp {
 
@@ -82,12 +87,28 @@ struct PhysicsScene::State {
             NORTHSTARCPP_PHYSICS_MESH_MODULE_ABI);
         cooked_hulls_api=module.query_extension<NorthStarPhysicsCookedHullsApi>(
             NORTHSTARCPP_PHYSICS_COOKED_HULLS_MODULE_ABI);
+        body_material_api=module.query_extension<NorthStarPhysicsBodyMaterialApi>(
+            NORTHSTARCPP_PHYSICS_BODY_MATERIAL_MODULE_ABI);
         response_api=module.query_extension<NorthStarPhysicsResponseApi>(
             NORTHSTARCPP_PHYSICS_RESPONSE_MODULE_ABI);
         channels_api=module.query_extension<NorthStarPhysicsChannelsApi>(
             NORTHSTARCPP_PHYSICS_CHANNELS_MODULE_ABI);
         character_api = module.query_extension<NorthStarPhysicsCharacterApi>(
             NORTHSTARCPP_PHYSICS_CHARACTER_MODULE_ABI);
+        ai_motor_api=module.query_extension<NorthStarPhysicsAiMotorApi>(
+            NORTHSTARCPP_PHYSICS_AI_MOTOR_MODULE_ABI);
+        root_motion_api=module.query_extension<NorthStarPhysicsRootMotionApi>(
+            NORTHSTARCPP_PHYSICS_ROOT_MOTION_MODULE_ABI);
+        terrain_api=module.query_extension<NorthStarPhysicsTerrainApi>(
+            NORTHSTARCPP_PHYSICS_TERRAIN_MODULE_ABI);
+        if(!terrain_api){
+            auto const query=module.symbol<NorthStarPhysicsGetTerrainApi>(
+                "northstar_physics_get_terrain_api");
+            auto const* candidate=query?query(NORTHSTARCPP_PHYSICS_TERRAIN_ABI):nullptr;
+            if(candidate && candidate->abi_version==NORTHSTARCPP_PHYSICS_TERRAIN_ABI &&
+               candidate->upsert && candidate->remove && candidate->resident_count && candidate->commit)
+                terrain_api=candidate;
+        }
         vehicle_api = module.query_extension<NorthStarPhysicsVehicleApi>(
             NORTHSTARCPP_PHYSICS_VEHICLE_MODULE_ABI);
         resident_mask.assign(snapshot.objects.size(),1);
@@ -203,18 +224,18 @@ struct PhysicsScene::State {
                 }
             }
             if(controller.possessed()) {
-                if(!character_api || !character_api->possess_body ||
-                   !character_api->configure_motor || !character_api->set_sprinting)
-                    throw std::runtime_error("Selected physics provider "+module.provider()+
-                        " lacks Pawn possession API");
+                if(!character_api || !character_api->set_sprinting)
+                    throw std::runtime_error("Selected physics provider lacks Pawn API");
                 auto const index=controller.controlled_index(snapshot);
-                if(!index)throw std::runtime_error("Controller Pawn not in physics world");
+                if(!index || *index>UINT32_MAX)
+                    throw std::runtime_error("Pawn is absent from physics world");
                 auto const tune=gameplay::motor_settings(snapshot,controller.controlled_entity());
                 NorthStarPhysicsCharacterMotor motor{tune.walk_speed,tune.run_speed,
                     tune.jump_speed,tune.acceleration,tune.air_control,tune.gravity_scale};
-                if(!character_api->configure_motor(world,std::uint32_t(*index),&motor) ||
-                   !character_api->possess_body(world,std::uint32_t(*index)))
-                    throw module.error("Failed to initialize Jolt Pawn");
+                auto const outcome=gameplay::physics_bridge::transfer(
+                    character_api,ai_motor_api,world,std::uint32_t(*index),motor,false);
+                if(outcome!=gameplay::physics_bridge::Result::Ok)
+                    throw module.error(gameplay::physics_bridge::message(outcome));
             }
             read_poses();
             initialize_player_animation();
@@ -322,17 +343,38 @@ struct PhysicsScene::State {
     NorthStarPhysicsColliderApi const* collider_api = nullptr;
     NorthStarPhysicsMeshApi const* mesh_api = nullptr;
     NorthStarPhysicsCookedHullsApi const* cooked_hulls_api = nullptr;
+    NorthStarPhysicsBodyMaterialApi const* body_material_api = nullptr;
     NorthStarPhysicsResponseApi const* response_api = nullptr;
     NorthStarPhysicsChannelsApi const* channels_api = nullptr;
     NorthStarPhysicsSurfaceApi const* surface_api = nullptr;
+    NorthStarPhysicsTerrainApi const* terrain_api = nullptr;
     NorthStarPhysicsVehicleApi const* vehicle_api = nullptr;
     NorthStarPhysicsCharacterApi const* character_api = nullptr;
+    NorthStarPhysicsRootMotionApi const* root_motion_api = nullptr;
+    NorthStarPhysicsAiMotorApi const* ai_motor_api = nullptr;
     gameplay::PlayerController controller;
     std::optional<player_animation::Controller> player_animator;
     std::uint64_t animation_pawn_id=0;
     std::uint64_t animation_mesh_id=0;
     std::unordered_set<std::uint32_t> native_vehicles;
     std::vector<uint8_t> resident_mask;
+    // Persistent per-world scratch: no heap churn during physics streaming/contact polling.
+    std::vector<physics_detail::VehicleResidencyGuard> vehicle_residency_guards;
+    std::vector<NorthStarPhysicsContactEvent> contact_event_scratch;
+    struct DeferredGroundProbe {
+        std::uint64_t ticket;
+        Vector3 start,end;
+        std::uint32_t channel;
+        std::size_t ignore;
+    };
+    mutable std::mutex root_motion_mutex;
+    mutable Vector3 queued_root_motion{0.f,0.f,0.f};
+    mutable float queued_root_seconds=0.f;
+    mutable std::mutex ground_probe_mutex;
+    std::deque<DeferredGroundProbe> ground_probe_pending;
+    std::deque<std::pair<std::uint64_t,PhysicsGroundProbe>> ground_probe_completed;
+    std::uint64_t next_probe_ticket=1;
+    bool warned_ground_probe_provider=false;
     void* world = nullptr;
 };
 
@@ -348,6 +390,23 @@ northstarcpp::math::float4x4 PhysicsScene::orientation(std::size_t index) const
     using northstarcpp::math::float4;
     return {float4(r[0], r[1], r[2], 0.f), float4(r[3], r[4], r[5], 0.f),
         float4(r[6], r[7], r[8], 0.f), float4(0.f, 0.f, 0.f, 1.f)};
+}
+
+std::optional<math::float4x4> PhysicsScene::body_transform(
+    std::size_t index) const {
+    if(index>=state->poses.size() ||index>=state->snapshot.objects.size())
+        return std::nullopt;
+    if(index>=state->authored_count &&
+       (index>=state->runtime_alive.size()||!state->runtime_alive[index]))
+        return std::nullopt;
+    auto pose=orientation(index);
+    auto const& position=state->snapshot.objects[index].position;
+    if(!std::isfinite(position.x)||!std::isfinite(position.y)||
+       !std::isfinite(position.z))return std::nullopt;
+    pose.elements[3][0]=position.x;
+    pose.elements[3][1]=position.y;
+    pose.elements[3][2]=position.z;
+    return pose;
 }
 
 bool PhysicsScene::supports_scene_residency() const
@@ -366,18 +425,34 @@ std::vector<PhysicsContactEvent> PhysicsScene::poll_collision_events(
     if(max_events>4096)
         throw std::invalid_argument("Collision event drain exceeds safe budget");
     if(!state->response_api || !max_events)return {};
-    std::vector<NorthStarPhysicsContactEvent> events(max_events);
-    auto const n=state->response_api->drain_events(state->world,events.data(),
-        static_cast<std::uint32_t>(events.size()));
-    if(n>events.size())throw state->module.error("Physics response event count invalid");
+    auto& scratch=state->contact_event_scratch;
+    if(scratch.size()<max_events)
+        scratch.resize(max_events);
+    auto const n=state->response_api->drain_events(state->world,scratch.data(),
+        static_cast<std::uint32_t>(max_events));
+    if(n>max_events)throw state->module.error("Physics response event count invalid");
     std::vector<PhysicsContactEvent> result;
     result.reserve(n);
     for(std::uint32_t i=0;i<n;++i)
-        result.push_back({events[i].first_index,events[i].second_index,
-                          events[i].phase,events[i].response});
+        result.push_back({scratch[i].first_index,scratch[i].second_index,
+                          scratch[i].phase,scratch[i].response});
     return result;
 }
 
+bool PhysicsScene::set_body_material(
+    std::size_t index,float friction,float restitution) {
+    if(!std::isfinite(friction)||!std::isfinite(restitution)||
+       friction<0.f||friction>1.f||restitution<0.f||restitution>1.f||
+       index>=state->snapshot.objects.size() ||
+       state->snapshot.objects[index].mass<=0.f ||
+       (index>=state->authored_count && !runtime_alive(index)))
+        throw std::invalid_argument("Invalid physics body material");
+    if(!state->body_material_api)return false;
+    if(!state->body_material_api->configure(state->world,
+        static_cast<std::uint32_t>(index),friction,restitution))
+        throw state->module.error("Cannot configure dynamic body material");
+    return true;
+}
 std::size_t PhysicsScene::authored_object_count() const { return state->authored_count; }
 Scene const& PhysicsScene::authored_scene() const { return state->authored_snapshot; }
 bool PhysicsScene::runtime_alive(std::size_t index) const
@@ -387,201 +462,14 @@ bool PhysicsScene::runtime_alive(std::size_t index) const
         state->runtime_alive[index - state->authored_count] != 0;
 }
 
-std::size_t PhysicsScene::spawn_runtime(SceneObject const& object)
-{
-    if (!state->runtime_api)
-        throw std::runtime_error("Active physics provider lacks runtime-body extension");
-    if (object.name.empty() || object.name.size() >= NORTHSTARCPP_ECS_NAME_BYTES ||
-        !object.node.id || object.node.cell.size() > 128 ||
-        !std::isfinite(object.position.x) || !std::isfinite(object.position.y) ||
-        !std::isfinite(object.position.z) || !std::isfinite(object.size) ||
-        !std::isfinite(object.mass) || object.size <= 0.f || object.size > 1000.f ||
-        object.mass < 0.f || object.mass > 1000000.f ||
-        std::max({std::abs(object.position.x),std::abs(object.position.y),
-                  std::abs(object.position.z)}) > 1000000.f ||
-        state->snapshot.objects.size() >= max_scene_objects)
-        throw std::invalid_argument("Invalid runtime scene entity");
-    if (state->used_ids.find(object.node.id)!=state->used_ids.end())
-        throw std::invalid_argument("Duplicate runtime entity stable ID");
-    if (!object.node.collision && !state->collider_api)
-        throw std::runtime_error("Noncolliding runtime visuals require collider provider ABI");
-    // Allocate host snapshot storage first. On a provider failure, roll back.
-    auto const index = state->snapshot.objects.size();
-    state->snapshot.objects.push_back(object);
-    try {
-        state->poses.push_back({});
-        state->resident_mask.push_back(1);
-        state->runtime_alive.push_back(1);
-    } catch (...) {
-        state->snapshot.objects.pop_back();
-        if (state->poses.size() > index) state->poses.pop_back();
-        if (state->resident_mask.size() > index) state->resident_mask.pop_back();
-        if (state->runtime_alive.size() > index-state->authored_count)
-            state->runtime_alive.pop_back();
-        throw;
-    }
-    NorthStarRigidBody const body{
-        object.position.x, object.position.y, object.position.z,
-        object.size, object.mass, 0u};
-    uint32_t result = UINT32_MAX;
-    if (!state->runtime_api->add_body(state->world, &body, &result)) {
-        state->snapshot.objects.pop_back();
-        state->poses.pop_back();
-        state->resident_mask.pop_back();
-        state->runtime_alive.pop_back();
-        throw state->module.error("Cannot spawn runtime physics body");
-    }
-    if (result != index)
-        throw std::runtime_error("Runtime physics provider violated stable scene index contract");
-    if (!object.node.collision) {
-        NorthStarPhysicsCollider const disabled{0u,0u,object.size,object.size,
-            object.size,0.f,0.f,0.f};
-        if(!state->collider_api->configure(state->world,result,&disabled)) {
-            (void)state->runtime_api->remove_body(state->world,result);
-            state->snapshot.objects.pop_back();
-            state->poses.pop_back();
-            state->resident_mask.pop_back();
-            state->runtime_alive.pop_back();
-            throw state->module.error("Unable to disable runtime visual collision");
-        }
-    }
-    state->used_ids.insert(object.node.id);
-    // Initialize only the new pose instead of reading every provider body.
-    // PhysicsScene::step updates all dynamic poses normally on the next tick.
-    state->poses[index] = {object.position.x, object.position.y, object.position.z,
-        {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f}};
-    return index;
-}
-
-void PhysicsScene::rotate_authored_visual(
-    std::size_t index,Vector3 euler_degrees) {
-    if(index>=state->authored_count)
-        throw std::out_of_range("Authored visual index required");
-    auto& object=state->snapshot.objects[index];
-    if(object.mass!=0.f || object.node.collision || !object.node.id)
-        throw std::invalid_argument("Authored visual must be static without collision");
-    bool const skeletal=std::any_of(state->snapshot.components.begin(),
-        state->snapshot.components.end(),[&](SceneComponentBlob const& component) {
-            return component.entity_id==object.node.id &&
-                   component.type=="northstar.gameplay.skeletal_mesh";
-        });
-    if(!skeletal)
-        throw std::invalid_argument("Authored visual needs SkeletalMesh component");
-    if(!std::isfinite(euler_degrees.x)||!std::isfinite(euler_degrees.y)||
-       !std::isfinite(euler_degrees.z)||
-       std::max({std::abs(euler_degrees.x),std::abs(euler_degrees.y),
-                 std::abs(euler_degrees.z)})>360000.f)
-        throw std::invalid_argument("Invalid authored visual rotation");
-    object.node.rotation=euler_degrees;
-    state->authored_snapshot.objects[index].node.rotation=euler_degrees;
-}
-void PhysicsScene::rotate_runtime(std::size_t index, Vector3 euler_degrees) {
-    // The Editor/Project API uses the same rotation entry point for the
-    // authored visual; reject nonvisual authored actors in the guard below.
-    if(index<state->authored_count) {
-        rotate_authored_visual(index,euler_degrees);
-        return;
-    }
-    if(!runtime_alive(index) || state->snapshot.objects[index].mass!=0.f ||
-       state->snapshot.objects[index].node.collision)
-        throw std::invalid_argument("Rotation requires a live visual-only runtime entity");
-    if(!std::isfinite(euler_degrees.x) || !std::isfinite(euler_degrees.y) ||
-       !std::isfinite(euler_degrees.z) ||
-       std::max({std::abs(euler_degrees.x),std::abs(euler_degrees.y),
-                 std::abs(euler_degrees.z)})>360000.f)
-        throw std::invalid_argument("Invalid visual rotation");
-    state->snapshot.objects[index].node.rotation=euler_degrees;
-}
-
-void PhysicsScene::destroy_runtime(std::size_t index)
-{
-    if (!runtime_alive(index))
-        throw std::out_of_range("Runtime scene entity is stale or authored");
-    if (!state->runtime_api->remove_body(state->world,static_cast<uint32_t>(index)))
-        throw state->module.error("Cannot destroy runtime physics body");
-    state->runtime_alive[index-state->authored_count] = 0;
-    // Keep the slot but never render or query it: authored indices must remain
-    // stable, including during World Partition updates.
-    auto& dead = state->snapshot.objects[index];
-    dead.node.visible = false;
-    dead.node.collision = false;
-    dead.node.asset.clear();
-}
+#include "physics_runtime_entities.inc"
 
 std::size_t PhysicsScene::ecs_resident_entity_count() const
 {
     return state->ecs.size();
 }
 
-std::size_t PhysicsScene::sync_scene_residency(
-    SceneWorld const& scene_world, Vector3 protected_position)
-{
-    // The ECS provider is independent of the physics collision residency
-    // extension. An older physics DLL retains safe, eager collision fallback.
-    if (!std::isfinite(protected_position.x) ||
-        !std::isfinite(protected_position.y) ||
-        !std::isfinite(protected_position.z))
-        throw std::invalid_argument("Invalid protected position for collision streaming");
-    auto const& objects=state->snapshot.objects;
-    auto const& authored=scene_world.source().objects;
-    if (objects.size()<authored.size() ||
-        state->authored_count!=authored.size() ||
-        objects.size()!=state->resident_mask.size())
-        throw std::runtime_error("Collision streaming source indices do not match physics world");
-    std::vector<NorthStarPhysicsVehiclePose> vehicle_guards;
-    for(auto id:state->native_vehicles) {
-        NorthStarPhysicsVehiclePose pose{};pose.size=sizeof(pose);
-        if(!state->vehicle_api || !state->vehicle_api->pose(state->world,id,&pose))
-            throw state->module.error("Vehicle streaming pose unavailable");
-        vehicle_guards.push_back(pose);
-    }
-    std::size_t changed=0;
-    for (std::size_t i=0;i<authored.size();++i) {
-        auto const& object=objects[i];
-        auto const& node=authored[i].node;
-        if (node.id!=object.node.id)
-            throw std::runtime_error("Collision streaming stable ID mismatch");
-        // Never detach dynamic traffic/NPCs or their player controller.
-        if (scene_pawn::is_pawn(state->snapshot,object) || object.mass>0.f ||
-            state->native_vehicles.count(static_cast<std::uint32_t>(i)))
-            continue;
-        // Preserve static world surfaces with no sector assignment (terrain,
-        // persistent roads and other collision assets).
-        if (node.cell.empty() && node.collision)
-            continue;
-        auto const dx=object.position.x-protected_position.x;
-        auto const dy=object.position.y-protected_position.y;
-        auto const dz=object.position.z-protected_position.z;
-        auto const protect=std::max(32.f,object.size*2.f);
-        bool const nearby=dx*dx+dy*dy+dz*dz <= protect*protect;
-        bool vehicle_nearby=false;
-        for(auto const& v:vehicle_guards) {
-            float const ahead_x=v.x+v.linear_velocity[0]*2.f;
-            float const ahead_z=v.z+v.linear_velocity[2]*2.f;
-            float const radius=std::clamp(48.f+2.f*std::hypot(
-                v.linear_velocity[0],v.linear_velocity[2]),48.f,180.f)+object.size;
-            float const dx=object.position.x-ahead_x;
-            float const dz=object.position.z-ahead_z;
-            float const dy=object.position.y-v.y;
-            if(dx*dx+dy*dy+dz*dz<=radius*radius) {
-                vehicle_nearby=true;break;
-            }
-        }
-        bool const desired=node.collision &&
-            (nearby || vehicle_nearby || scene_world.object_resident(i));
-        if (state->resident_mask[i] == static_cast<uint8_t>(desired))
-            continue;
-        if (state->residency_api) {
-            if (!state->residency_api->set_static_resident(
-                    state->world,static_cast<uint32_t>(i),desired ? 1u : 0u))
-                throw state->module.error("Cannot change static collision residency");
-            state->resident_mask[i]=static_cast<uint8_t>(desired);
-            ++changed;
-        }
-    }
-    (void)state->ecs.reconcile_scene_residency(state->authored_snapshot,scene_world);
-    return changed;
-}
+#include "physics_scene_residency.inc"
 
 void PhysicsScene::jump()
 {
@@ -662,6 +550,48 @@ void PhysicsScene::add_static_mesh(std::vector<Vector3> const& vertices,
     add_static_mesh(vertices,triangles,{});
 }
 #include "physics_channel_queries.inc"
+void PhysicsScene::commit_streamed_terrain() {
+    if(!state->terrain_api)
+        throw std::runtime_error("Physics provider lacks streamed terrain extension");
+    if(!state->terrain_api->commit(state->world))
+        throw state->module.error("Physics provider terrain commit failed");
+}
+bool PhysicsScene::supports_streamed_terrain() const noexcept {
+    return state->terrain_api!=nullptr;
+}
+std::uint32_t PhysicsScene::terrain_resident_count() const noexcept {
+    return state->terrain_api ? state->terrain_api->resident_count(state->world) : 0u;
+}
+void PhysicsScene::upsert_terrain_chunk(std::int32_t cx,std::int32_t cz,
+    std::vector<Vector3> const& vertices,
+    std::vector<std::uint32_t> const& indices) {
+    if(!state->terrain_api)
+        throw std::runtime_error("Physics provider lacks streamed terrain extension");
+    if(vertices.size()<4||vertices.size()>16384||indices.size()<6||
+       indices.size()>98304||indices.size()%3)
+        throw std::invalid_argument("Invalid streamed terrain mesh size");
+    std::vector<float> xyz;
+    xyz.reserve(vertices.size()*3);
+    for(auto const& v:vertices){
+        if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))
+            throw std::invalid_argument("Invalid terrain vertex");
+        xyz.insert(xyz.end(),{v.x,v.y,v.z});
+    }
+    for(auto const idx:indices)
+        if(idx>=vertices.size())
+            throw std::invalid_argument("Invalid terrain triangle index");
+    if(!state->terrain_api->upsert(state->world,cx,cz,xyz.data(),
+                                  std::uint32_t(vertices.size()),
+                                  indices.data(),std::uint32_t(indices.size())))
+        throw state->module.error("Physics provider terrain registration failed");
+}
+void PhysicsScene::remove_terrain_chunk(std::int32_t cx,std::int32_t cz) {
+    if(!state->terrain_api)
+        throw std::runtime_error("Physics provider lacks streamed terrain extension");
+    if(!state->terrain_api->remove(state->world,cx,cz))
+        throw state->module.error("Physics provider terrain eviction failed");
+}
+
 bool PhysicsScene::supports_surface_materials() const {
     return state->surface_api!=nullptr;
 }
@@ -703,51 +633,42 @@ void PhysicsScene::add_static_mesh(std::vector<Vector3> const& vertices,
         throw state->module.error("Physics static triangle registration failed");
 }
 
-void PhysicsScene::possess(std::uint64_t entity_id) {
-    if(!state->character_api || !state->character_api->possess_body ||
-       !state->character_api->configure_motor)
-        throw std::runtime_error("Physics provider lacks Pawn control extension");
-    gameplay::PlayerController proposed=state->controller;
-    proposed.possess(state->snapshot,entity_id);
-    auto const index=proposed.controlled_index(state->snapshot);
-    if(!index || *index>UINT32_MAX)
-        throw std::out_of_range("Controlled entity has no provider body");
-    auto const tune=gameplay::motor_settings(state->snapshot,entity_id);
-    NorthStarPhysicsCharacterMotor motor{tune.walk_speed,tune.run_speed,
-        tune.jump_speed,tune.acceleration,tune.air_control,tune.gravity_scale};
-    if(!state->character_api->configure_motor(state->world,std::uint32_t(*index),&motor) ||
-       !state->character_api->possess_body(state->world,std::uint32_t(*index)))
-        throw state->module.error("Cannot possess physics Pawn");
-    state->controller=proposed;
-    state->initialize_player_animation();
+#include "physics_player_possession.inc"
+#include "physics_player_root_motion.inc"
+#include "physics_ai_motor_bridge.inc"
+
+std::uint64_t PhysicsScene::enqueue_ground_probe(Vector3 start,Vector3 end,
+    std::uint32_t channel,std::size_t ignore_index) const {
+    auto finite=[](Vector3 const& p) {
+        return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z)&&
+            std::abs(p.x)<1000000.f&&std::abs(p.y)<1000000.f&&
+            std::abs(p.z)<1000000.f;
+    };
+    if(!finite(start)||!finite(end)||start.y<=end.y ||
+       start.y-end.y>5.f||channel>=16 ||
+       (ignore_index!=std::size_t(-1) &&
+        ignore_index>UINT32_MAX))
+        return 0;
+    std::lock_guard lock(state->ground_probe_mutex);
+    if(state->ground_probe_pending.size()>=96)return 0;
+    auto ticket=state->next_probe_ticket++;
+    if(ticket==0)ticket=state->next_probe_ticket++;
+    state->ground_probe_pending.push_back(
+        {ticket,start,end,channel,ignore_index});
+    return ticket;
 }
-void PhysicsScene::unpossess() {
-    if(!state->character_api || !state->character_api->possess_body ||
-       !state->character_api->possess_body(state->world,UINT32_MAX))
-        throw state->module.error("Cannot unpossess physics Pawn");
-    state->controller.unpossess();
-    state->initialize_player_animation();
-}
-std::uint64_t PhysicsScene::controlled_entity() const noexcept {
-    return state->controller.controlled_entity();
-}
-std::optional<std::size_t> PhysicsScene::controlled_index() const noexcept {
-    return state->controller.controlled_index(state->snapshot);
-}
-void PhysicsScene::set_sprinting(bool active) {
-    if(!state->character_api || !state->character_api->set_sprinting ||
-       !state->character_api->set_sprinting(state->world,active?1u:0u))
-        throw state->module.error("Physics provider lacks Character sprint control");
-}
-std::optional<PlayerAnimationFrame> PhysicsScene::player_animation() const {
-    if(!state->player_animator || !state->animation_pawn_id)
-        return std::nullopt;
-    auto const& sample=state->player_animator->sample();
-    return PlayerAnimationFrame{
-        state->animation_pawn_id,state->animation_mesh_id,
-        player_animation::name(sample.state),sample.clip,
-        sample.previous_clip,sample.blend_alpha,sample.playback_seconds,
-        sample.grounded};
+
+std::optional<PhysicsGroundProbe> PhysicsScene::consume_ground_probe(
+    std::uint64_t ticket) const {
+    if(ticket==0)return std::nullopt;
+    std::lock_guard lock(state->ground_probe_mutex);
+    auto& results=state->ground_probe_completed;
+    auto it=std::find_if(results.begin(),results.end(),
+        [ticket](auto const& result){return result.first==ticket;});
+    if(it==results.end())return std::nullopt;
+    auto output=it->second;
+    results.erase(it);
+    return output;
 }
 
 void PhysicsScene::step(float seconds, float input_x, float input_z)
@@ -757,6 +678,20 @@ void PhysicsScene::step(float seconds, float input_x, float input_z)
     auto const controlled=state->controller.controlled_index(state->snapshot);
     std::optional<Vector3> previous;
     if(controlled)previous=state->snapshot.objects[*controlled].position;
+    Vector3 root_delta{0.f,0.f,0.f};
+    float root_seconds=0.f;
+    if(state->root_motion_api &&controlled &&*controlled<=UINT32_MAX) {
+        std::lock_guard<std::mutex> lock(state->root_motion_mutex);
+        root_delta=state->queued_root_motion;
+        root_seconds=state->queued_root_seconds;
+        state->queued_root_motion={0.f,0.f,0.f};
+        state->queued_root_seconds=0.f;
+    }
+    if(root_seconds>0.f &&
+       !state->root_motion_api->submit(state->world,
+           static_cast<std::uint32_t>(*controlled),
+           root_delta.x,root_delta.y,root_delta.z,root_seconds))
+        throw state->module.error("Physics provider refused Root Motion");
     if (!state->api.step(state->world, seconds, input_x, input_z))
         throw state->module.error("Cannot update physics world");
     state->read_poses();
@@ -775,62 +710,49 @@ void PhysicsScene::step(float seconds, float input_x, float input_z)
     }
     state->ecs.sync_positions(state->authored_snapshot);
     state->ecs.step(std::min(seconds, 0.1f), 0.f, 0.f);
+
+    // Queue from animation; execute only after the Jolt/Bullet simulation
+    // step. Worker threads never access a mutable provider world.
+    std::deque<State::DeferredGroundProbe> jobs;
+    {
+        std::lock_guard lock(state->ground_probe_mutex);
+        jobs.swap(state->ground_probe_pending);
+    }
+    std::deque<std::pair<std::uint64_t,PhysicsGroundProbe>> completed;
+    for(auto const& job:jobs) {
+        PhysicsGroundProbe output;
+        try {
+            auto const hit=state->channels_api?
+                raycast_channel(job.start,job.end,job.channel,false,job.ignore):
+                sweep_sphere(job.start,job.end,.025f,job.ignore);
+            if(hit && hit->normal.y>=.20f && hit->response==2u) {
+                output.hit=true;
+                output.normal=hit->normal;
+                output.fraction=hit->fraction;
+                output.object_index=hit->object_index;
+                output.point=job.start+(job.end-job.start)*hit->fraction;
+                if(!state->channels_api)
+                    output.point-=output.normal*.025f;
+            }
+        } catch(std::exception const&) {
+            if(!state->warned_ground_probe_provider) {
+                state->warned_ground_probe_provider=true;
+                std::fprintf(stderr,
+                    "[WARN] [engine.ik] Ground probe failed: ignoring unavailable contact\n");
+            }
+        }
+        completed.emplace_back(job.ticket,output);
+    }
+    {
+        std::lock_guard lock(state->ground_probe_mutex);
+        for(auto& item:completed) {
+            if(state->ground_probe_completed.size()>=192)
+                state->ground_probe_completed.pop_front();
+            state->ground_probe_completed.push_back(std::move(item));
+        }
+    }
 }
 
-bool PhysicsScene::supports_native_vehicle() const {
-    return state->vehicle_api!=nullptr;
-}
-void PhysicsScene::create_native_vehicle(std::size_t index,
-    NorthStarVehicleRig const& rig,float yaw) {
-    if(!state->vehicle_api)
-        throw std::runtime_error("Selected engine.physics provider lacks Jolt native vehicle extension");
-    if(index>=state->snapshot.objects.size() ||
-       !state->snapshot.objects[index].node.collision ||
-       scene_pawn::is_pawn(state->snapshot,state->snapshot.objects[index]) ||
-       state->snapshot.objects[index].mass!=0.f)
-        throw std::invalid_argument("Native vehicle must own a collidable, static authored entity");
-    if(!state->vehicle_api->create(state->world,
-        static_cast<std::uint32_t>(index),&rig,yaw))
-        throw state->module.error("Jolt cannot construct native vehicle");
-    state->resident_mask.at(index)=1;
-    state->native_vehicles.insert(static_cast<std::uint32_t>(index));
-}
-void PhysicsScene::destroy_native_vehicle(std::size_t index) {
-    if(!state->vehicle_api || index>=state->snapshot.objects.size() ||
-       !state->vehicle_api->destroy(state->world,
-        static_cast<std::uint32_t>(index)))
-        throw state->module.error("Cannot destroy Jolt native vehicle");
-    state->native_vehicles.erase(static_cast<std::uint32_t>(index));
-}
-void PhysicsScene::native_vehicle_controls(std::size_t index,float throttle,
-    float steering,float brake,float handbrake) {
-    if(!state->vehicle_api ||
-       !state->vehicle_api->controls(state->world,
-            static_cast<std::uint32_t>(index),throttle,steering,brake,handbrake))
-        throw state->module.error("Native Jolt vehicle controls failed");
-}
-NorthStarPhysicsVehiclePose PhysicsScene::native_vehicle_pose(std::size_t index) const {
-    NorthStarPhysicsVehiclePose out{};out.size=sizeof(out);
-    if(!state->vehicle_api ||
-       !state->vehicle_api->pose(state->world,
-            static_cast<std::uint32_t>(index),&out) ||
-       out.size<sizeof(out))
-        throw state->module.error("Native Jolt vehicle pose unavailable");
-    return out;
-}
-NorthStarVehicleWheelState PhysicsScene::native_vehicle_wheel(std::size_t index,
-    std::uint32_t wheel) const {
-    NorthStarVehicleWheelState out{};out.size=sizeof(out);
-    if(!state->vehicle_api ||
-       !state->vehicle_api->wheel(state->world,
-            static_cast<std::uint32_t>(index),wheel,&out) ||
-       out.size<sizeof(out))
-        throw state->module.error("Native Jolt wheel telemetry unavailable");
-    return out;
-}
-std::uint32_t PhysicsScene::native_vehicle_wheel_count(std::size_t index) const {
-    return state->vehicle_api?
-        state->vehicle_api->wheel_count(state->world,static_cast<std::uint32_t>(index)):0u;
-}
+#include "physics_vehicle_bindings.inc"
 
 } // namespace northstarcpp

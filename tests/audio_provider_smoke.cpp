@@ -11,16 +11,6 @@ int main(int argc, char** argv) {
     try {
         northstarcpp::AudioEngine audio;
         const std::string mode = argv[1];
-        if (mode == "winmm") {
-            if (audio.provider_name() != "WinMM" || audio.supports_voices()) return 3;
-            const int16_t sample = 73;
-            try {
-                NorthStarAudioVoiceOptions options{sizeof(NorthStarAudioVoiceOptions),
-                    1.0f, 0, 0, {0, 0, 0}};
-                audio.play_voice({&sample, 1, 24000, 1}, options);
-                return 4;
-            } catch (std::runtime_error const&) { return 0; }
-        }
         if (mode == "northstar") {
             if (audio.provider_name() != "NorthStar Audio" || !audio.supports_voices())
                 return 10;

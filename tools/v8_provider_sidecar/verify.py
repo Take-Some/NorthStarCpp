@@ -84,7 +84,7 @@ def run() -> int:
         with TemporaryDirectory(prefix="northstar-official-v8-e2e-") as tmp:
             project=Path(tmp)/"project"
             copytree(root/"Projects/NorthStarFirstPersonPlatform",project)
-            script=project/"scripts/main.js"
+            script=project/"assets/scripts/main.js"
             script.parent.mkdir(parents=True,exist_ok=True)
             script.write_text(
                 '(() => { "use strict"; let frames=0;'

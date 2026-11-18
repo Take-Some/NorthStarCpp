@@ -33,7 +33,9 @@ int main() {
             {"Highway East",{730.f,-15.f,-90.f},{870.f,30.f,90.f},false}
         };
         SceneObject bus;
-        bus.name="Bus";// Vehicle Pawn uses a separate scene component.bus.mass=1200.f;
+        bus.name="Bus";
+        // Vehicle is dynamic and has a nonzero mass when authored as Pawn.
+        bus.mass=1200.f;
         bus.node.id=101;bus.node.cell="Highway West";
         authored.objects.push_back(bus);
     scene_pawn::migrate_imported_local(authored,101);

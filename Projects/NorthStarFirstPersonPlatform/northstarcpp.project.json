@@ -1,1 +1,36 @@
-{"schema_version":"1","engine":"NorthStarCpp","name":"NorthStar: First Person Protocol","game_mode":"explore","category":"Games","template":"sandbox","description":"Playable first-person training course using Pawn, Jolt Character Motor, Camera Rig and mission checkpoints","tags":["First Person","Jolt","Pawn","Character Motor","ECS","Checkpoints","Exploration"    ],"startup_scene":"main.nscn","state":"playable-development","genre":"first-person-challenge","level":"Training Course","asset_root":"assets","scripting":{"runtime":"V8","entry":"scripts\/main.js"},"providers":{"engine.physics":"jolt","engine.render":"d3d11"}}
+{
+    "schema_version":  "1",
+    "engine":  "NorthStarCpp",
+    "name":  "NorthStar: First Person Protocol",
+    "game_mode":  "explore",
+    "category":  "Games",
+    "template":  "sandbox",
+    "description":  "Playable first-person training course using Pawn, Jolt Character Motor, Camera Rig and mission checkpoints",
+    "tags":  [
+                 "First Person",
+                 "Jolt",
+                 "Pawn",
+                 "Character Motor",
+                 "ECS",
+                 "Checkpoints",
+                 "Exploration"
+             ],
+    "startup_scene":  "main.nscn",
+    "state":  "playable-development",
+    "genre":  "first-person-challenge",
+    "level":  "Training Course",
+    "asset_root":  "assets",
+    "scripting":  {
+                      "runtime":  "V8",
+                      "entry":  "scripts/main.js"
+                  },
+    "providers":  {
+                      "engine.physics":  "jolt",
+                      "engine.render":  "d3d11"
+                  },
+    "ui":  {
+               "default":  "ui/mission_hud.nui",
+               "format":  "northstar.ui/xml/3",
+               "asset_root":  "assets"
+           }
+}

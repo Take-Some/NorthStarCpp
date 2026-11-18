@@ -12,6 +12,21 @@ layout(location=0) in vec4 vertex_color;
 layout(location=1) in vec3 vertex_world;
 layout(location=2) flat in int vertex_surface;
 layout(location=0) out vec4 output_color;
+layout(push_constant) uniform ForwardAtmosphere {
+    vec4 camera; // world metres + density
+    vec4 haze;   // aerial scattering radiance
+} atmosphere;
+vec3 resolve_forward_haze(vec3 rgb,vec3 world) {
+    if(atmosphere.camera.w<=0.)return rgb;
+    float distance=length(world-atmosphere.camera.xyz);
+    float h0=exp(clamp(-.025*atmosphere.camera.y,-8.,8.));
+    float h1=exp(clamp(-.025*world.y,-8.,8.));
+    float tau=min(20.,atmosphere.camera.w*distance*
+                  clamp(.5*(h0+h1),.01,8.));
+    float extinction=min(.96,1.-exp(-tau));
+    return mix(rgb,atmosphere.haze.rgb,extinction);
+}
+
 
 vec3 triplanar_albedo(vec3 weights,vec3 pos,int kind) {
     vec2 yz=pos.yz*.65;
@@ -74,7 +89,10 @@ float triplanar_rough(vec3 weights,vec3 pos,int kind) {
     return a*weights.x+b*weights.y+c*weights.z;
 }
 void main() {
-    if(vertex_surface==0) { output_color=vertex_color;return; }
+    if(vertex_surface==0) {
+        output_color=vec4(resolve_forward_haze(vertex_color.rgb,vertex_world),1.);
+        return;
+    }
     vec3 dx=dFdx(vertex_world),dy=dFdy(vertex_world);
     vec3 surface_normal=normalize(cross(dx,dy));
     vec3 weights=pow(abs(surface_normal),vec3(4.0));
@@ -90,5 +108,5 @@ void main() {
     vec3 rgb=clamp(albedo*vertex_color.rgb*light*brightness,0.0,1.0);
     // The selected Vulkan swapchain format may be UNORM or sRGB.
     // Keep this shader in linear colors, consistent with attachment format.
-    output_color=vec4(rgb,1.0);
+    output_color=vec4(resolve_forward_haze(rgb,vertex_world),1.);
 }

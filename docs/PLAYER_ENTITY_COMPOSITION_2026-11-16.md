@@ -62,7 +62,7 @@ Binary backup before migration:
 The project template generator now writes new, separate objects by default
 (42 Scene objects; Controller 40, Motor 41, Camera 42).
 
-Only `prefabs/abby.nprefab` is instantiated by the project. FPS uses
+Only `prefabs/characters/abby.nprefab` is instantiated by the project. FPS uses
 `Scene.setVisualMode(index, 'first_person_arms')` on the same actor and
 performs skinned-arm filtering using YMT weights; TPS uses full world mesh.
 Pistol bone socket remains attached to the same Abby, changing the weapon

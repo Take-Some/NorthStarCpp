@@ -3,6 +3,14 @@
 // Qt 6 Widgets + Font Awesome 6 Free (see resources/fontawesome/LICENSE.txt).
 #include <northstarcpp/project_catalog.hpp>
 #include "provider_inventory.hpp"
+#include "project_cover.hpp"
+#include <QImage>
+#include <QImageReader>
+#include <QSaveFile>
+#include <QBuffer>
+#include <QFontMetrics>
+#include <QFileInfo>
+
 #include "../shared/crash_handler.hpp"
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_feature_requirements.hpp>
@@ -72,45 +80,74 @@ namespace fs = std::filesystem;
 namespace {
 QString fontFamily;
 constexpr char const* stylesheet = R"QSS(
-QMainWindow, QWidget#root, QDialog { background:#f6f8fb; color:#202b39; }
-QWidget#sidebar { background:#edf2f8; border-right:1px solid #dce4ef; }
-QWidget#details { background:#fff; border-left:1px solid #dce4ef; }
-QFrame#projectCard {
-  background:#fff; border:1px solid #dce4ed; border-radius:12px;
+QWidget { color:#d9e2ed; font-size:12px; }
+QDialog, QMainWindow { background:#101218; }
+QWidget#root { background:#0c0f15; }
+QWidget#sidebar { background:#141820; border-right:1px solid #2a303b; }
+QWidget#details { background:#171b24; border:1px solid #303745;
+                  border-radius:10px; }
+QFrame#projectCard { background:#181d26; border:1px solid #343b49;
+                     border-radius:11px; }
+QFrame#projectCard:hover { background:#202735; border:1px solid #7096c9; }
+QFrame#projectCard[selected="true"] {
+    background:#202b3d; border:2px solid #4f9df4;
 }
-QFrame#projectCard:hover { border:2px solid #329dcc; background:#f5fbff; }
-QFrame#projectCard[selected="true"] { border:2px solid #167cac; background:#eff8fd; }
-QFrame#cardBanner { border-radius:8px; background:#e7f1f8; }
-QLabel#headline { color:#16283b; font-size:22px; font-weight:700; }
-QLabel#section { color:#273b50; font-size:18px; font-weight:700; }
-QLabel#cardTitle { color:#203246; font-size:15px; font-weight:700; }
-QLabel#muted { color:#6f8296; font-size:12px; }
-QLabel#brand { color:#182c45; font-size:19px; font-weight:800; }
-QLabel#eyebrow { color:#1478a5; font-weight:700; }
+QWidget#cardCover { background:#1c2632; border:0; border-radius:8px; }
+QLabel#headline { color:#f2f6fc; font-size:26px; font-weight:700; }
+QLabel#section { color:#f0f4fa; font-size:16px; font-weight:700; }
+QLabel#cardTitle { color:#edf3fa; font-size:15px; font-weight:700;
+                   background:transparent; }
+QLabel#cardStatus { color:#95cfae; font-size:11px; font-weight:700; }
+QLabel#muted { color:#96a5bb; font-size:12px; background:transparent; }
+QLabel#brand { color:#f1f5fc; font-size:19px; font-weight:800; }
+QLabel#eyebrow { color:#79aefa; font-size:10px; font-weight:800;
+                 letter-spacing:1px; }
+QLabel#detailCover { border:1px solid #394456; background:#111923;
+                     border-radius:8px; }
 QPushButton, QToolButton {
-  padding:9px 13px; background:#fff; color:#233749;
-  border:1px solid #d5dfe9; border-radius:8px;
+   padding:10px 12px; background:#252b36; color:#dce6f4;
+   border:1px solid #3e4858; border-radius:7px;
 }
-QPushButton:hover, QToolButton:hover { background:#e8f3fc; border-color:#78b8db; }
-QPushButton:disabled, QToolButton:disabled { color:#9ba8b8; background:#f3f6fa; }
+QPushButton:hover, QToolButton:hover {
+   background:#303d50; border-color:#6a91c6; color:#fff;
+}
+QPushButton:pressed, QToolButton:pressed { background:#223951; }
+QPushButton:disabled, QToolButton:disabled {
+   background:#1b2029; color:#647184; border-color:#2b3340;
+}
 QPushButton#primary {
-  background:#197fae; border-color:#197fae; color:#fff; font-weight:700;
+   background:#287fc5; color:#fff; border:1px solid #3698e2; font-weight:700;
 }
-QPushButton#primary:hover { background:#126b98; }
-QToolButton#nav { border:0; text-align:left; padding:13px 17px; background:transparent; }
-QToolButton#nav:checked { background:#dbeaf6; color:#135c83; font-weight:700; }
+QPushButton#primary:hover { background:#3399e7; border-color:#8fc8ff; }
+QToolButton#nav { border:0; text-align:left; padding:13px 17px;
+                  background:transparent; }
+QToolButton#nav:hover { background:#252e3d; }
+QToolButton#nav:checked { background:#1d3550; color:#b8dbff;
+                          border-left:3px solid #54a9f5; font-weight:700; }
 QLineEdit, QComboBox {
- background:white; border:1px solid #d5dfe9; border-radius:8px;
- padding:9px; selection-background-color:#197fae;
+    background:#1b2029; color:#e2ebf8; border:1px solid #3b4555;
+    border-radius:7px; padding:10px; selection-background-color:#287fc5;
 }
-QLineEdit:focus, QComboBox:focus { border:1px solid #168fc6; }
+QLineEdit:hover, QComboBox:hover { border-color:#5a6c83; }
+QLineEdit:focus, QComboBox:focus { border-color:#55a6f3; }
+QComboBox QAbstractItemView {
+    background:#222936; color:#e0e8f3;
+    border:1px solid #3e5168; selection-background-color:#315f8d;
+}
 QScrollArea { border:0; background:transparent; }
 QScrollArea QWidget#scrollContent { background:transparent; }
-QFrame#providerSettingCard {
-  background:#ffffff; border:1px solid #dce4ed; border-radius:10px;
-}
-QFrame#providerSettingCard QLabel { border:0; background:transparent; }
+QScrollBar:vertical { border:0; background:#121720; width:9px; margin:1px; }
+QScrollBar::handle:vertical { background:#3c4858; min-height:30px; border-radius:4px; }
+QScrollBar::handle:vertical:hover { background:#5a779c; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+QFrame#providerSettingCard { background:#202631;
+                             border:1px solid #384657; border-radius:8px; }
+QFrame#providerSettingCard QLabel { background:transparent; border:0; }
 QMessageBox QLabel { min-width:220px; }
+QTableWidget { background:#171d27; alternate-background-color:#202937;
+               color:#d9e2ef; gridline-color:#394350; }
+QHeaderView::section { background:#293240; color:#e9eff8;
+                       border:0; border-right:1px solid #3c4858; padding:7px; }
 )QSS";
 
 QString qpath(fs::path const& p) { return QString::fromStdWString(p.wstring()); }
@@ -212,78 +249,77 @@ QString rendererCompatibilityWarning(ns::ProviderChoice const& option)
 }
 class Card final : public QFrame {
 public:
-    Card(ns::Project const& project, bool selected, std::function<void(bool)> callback,
-         QWidget* parent = nullptr)
-        : QFrame(parent), callback_(std::move(callback)), path_(project.directory)
+    Card(ns::Project const& project,bool selected,std::function<void(bool)> callback,
+         QWidget* parent=nullptr)
+        :QFrame(parent),callback_(std::move(callback)),path_(project.directory)
     {
         setObjectName("projectCard");
         setProperty("selected",selected);
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
-        setMinimumWidth(236);
-        setMinimumHeight(195);
+        setAccessibleName("Project "+qwide(project.name));
+        setMinimumWidth(265);
+        setFixedHeight(293);
         setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
-        auto* vertical=new QVBoxLayout(this);
-        vertical->setContentsMargins(13,13,13,13);
-        vertical->setSpacing(8);
-        auto* banner=new QFrame(this);
-        banner->setObjectName("cardBanner");
-        banner->setFixedHeight(66);
-        auto* bannerLayout=new QHBoxLayout(banner);
-        auto* mark=new QLabel(banner);
-        mark->setPixmap(awesome(project.template_id=="city"||project.template_id=="architecture"
-                                    ?0xf1ad:0xf11b,QColor("#227dae"),27).pixmap(27,27));
-        bannerLayout->addWidget(mark);
-        bannerLayout->addStretch();
-        auto* category=makeLabel(qwide(project.category),"eyebrow",banner);
-        bannerLayout->addWidget(category);
-        vertical->addWidget(banner);
+        auto* content=new QVBoxLayout(this);
+        content->setContentsMargins(10,10,10,12);
+        content->setSpacing(9);
+
+        auto* cover=new northstarcpp::project_browser::CoverWidget(project,this);
+        content->addWidget(cover);
+
         auto* name=makeLabel(qwide(project.name),"cardTitle",this);
         name->setWordWrap(true);
-        vertical->addWidget(name);
-        auto* footer=new QHBoxLayout;
-        auto* state=makeLabel(statusLabel(project),"muted",this);
-        footer->addWidget(state);
-        footer->addStretch();
-        if (project.favorite) {
+        name->setMinimumHeight(31);
+        name->setMaximumHeight(41);
+        name->setAlignment(Qt::AlignVCenter|Qt::AlignLeft);
+        content->addWidget(name);
+
+        auto* meta=new QHBoxLayout;
+        meta->setContentsMargins(1,0,1,0);
+        auto* state=makeLabel(statusLabel(project),"cardStatus",this);
+        if(project.status!=ns::Project::Status::ready)
+            state->setStyleSheet("color:#e7b175;");
+        meta->addWidget(state);
+        meta->addStretch();
+        if(project.favorite){
             auto* star=new QLabel(this);
-            star->setPixmap(awesome(0xf005,QColor("#dfaa36"),15).pixmap(15,15));
-            footer->addWidget(star);
+            star->setPixmap(awesome(0xf005,QColor("#e7b46d"),15).pixmap(15,15));
+            meta->addWidget(star);
         }
-        vertical->addLayout(footer);
-        auto* location=makeLabel(qpath(project.directory),"muted",this);
-        location->setToolTip(qpath(project.directory));
-        location->setMaximumHeight(18);
-        vertical->addWidget(location);
+        content->addLayout(meta);
+
+        auto const fullPath=qpath(project.directory);
+        auto* location=makeLabel(
+            QFontMetrics(font()).elidedText(fullPath,Qt::ElideMiddle,258),
+            "muted",this);
+        location->setToolTip(fullPath);
+        content->addWidget(location);
         setToolTip(qwide(project.description));
-        // Child labels should not consume clicks intended to select/open a card.
-        for (auto* widget : findChildren<QWidget*>())
-            widget->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        for(auto* child:findChildren<QWidget*>())
+            child->setAttribute(Qt::WA_TransparentForMouseEvents,true);
     }
-    fs::path const& path() const { return path_; }
-    void setSelected(bool selected)
-    {
-        if (property("selected").toBool() == selected) return;
-        setProperty("selected", selected);
+    fs::path const& path() const {return path_;}
+    void setSelected(bool selected) {
+        if(property("selected").toBool()==selected)return;
+        setProperty("selected",selected);
         style()->unpolish(this);
         style()->polish(this);
         update();
     }
 protected:
-    void mousePressEvent(QMouseEvent* event) override
-    {
-        if (event->button()==Qt::LeftButton) callback_(false);
+    void mousePressEvent(QMouseEvent* event) override {
+        if(event->button()==Qt::LeftButton)callback_(false);
         QFrame::mousePressEvent(event);
     }
-    void mouseDoubleClickEvent(QMouseEvent* event) override
-    {
-        if (event->button()==Qt::LeftButton) callback_(true);
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        if(event->button()==Qt::LeftButton)callback_(true);
         QFrame::mouseDoubleClickEvent(event);
     }
-    void keyPressEvent(QKeyEvent* event) override
-    {
-        if (event->key()==Qt::Key_Return||event->key()==Qt::Key_Enter) callback_(true);
-        else if (event->key()==Qt::Key_Space) callback_(false);
+    void keyPressEvent(QKeyEvent* event) override {
+        if(event->key()==Qt::Key_Return||event->key()==Qt::Key_Enter)
+            callback_(true);
+        else if(event->key()==Qt::Key_Space)callback_(false);
         else QFrame::keyPressEvent(event);
     }
 private:
@@ -301,9 +337,9 @@ public:
                    : ns::default_catalog_file(),NORTHSTARCPP_ENGINE_VERSION)
     {
         setObjectName("projectBrowser");
-        setWindowTitle("NorthStarCpp | Project Browser");
-        setMinimumSize(960,620);
-        resize(1390,850);
+        setWindowTitle("NorthStarCpp | Project Library");
+        setMinimumSize(1020,660);
+        resize(1460,910);
         setWindowIcon(QIcon(":/logoStar.ico"));
         buildUi();
         refresh();
@@ -314,6 +350,30 @@ public:
             auto p=catalog_.create(L"Qt Smoke Project","sandbox");
             refresh(p.directory);
             if (projects_.empty() || !selection() || !fontFamily.size()) return 3;
+            auto const cover=northstarcpp::project_browser::coverForProject(p);
+            if(cover.screenshot || !cover.image.isNull())return 67;
+            // Project directory remains valid without a startup scene.
+            auto const sceneFile=p.directory/"main.nscn";
+            auto const hidden=p.directory/"main.nscn.qa-hidden";
+            fs::rename(sceneFile,hidden);
+            auto const folderOnly=catalog_.inspect(p.directory);
+            refresh(p.directory);
+            if(folderOnly.status!=ns::Project::Status::ready ||
+               !folderOnly.startup_scene.empty() ||
+               !selection() || !projectActions_.at(0)->isEnabled() ||
+               projectActions_.back()->isEnabled())return 68;
+            fs::rename(hidden,sceneFile);
+            // Use a real local image owned by this temporary smoke project.
+            auto const iconFile=p.directory/"project_icon.png";
+            QImage iconFixture(96,96,QImage::Format_ARGB32);
+            iconFixture.fill(QColor("#2154ad"));
+            if(!iconFixture.save(qpath(iconFile),"PNG"))return 69;
+            QPixmapCache::clear();
+            auto const image=northstarcpp::project_browser::coverForProject(p);
+            if(image.icon.isNull() || !image.screenshot ||
+               !image.source.endsWith("project_icon.png"))return 70;
+            refresh(p.directory);
+            if(!detailIcon_ || detailIcon_->pixmap().isNull())return 71;
             if(ns::provider_environment_key("engine.render")!="NORTHSTARCPP_RENDER_PROVIDER" ||
                ns::provider_environment_key("engine.physics")!="NORTHSTARCPP_PHYSICS_PROVIDER")
                 return 33;
@@ -538,19 +598,19 @@ private:
 
         auto* sidebar=new QWidget(root);
         sidebar->setObjectName("sidebar");
-        sidebar->setFixedWidth(236);
+        sidebar->setFixedWidth(240);
         auto* side=new QVBoxLayout(sidebar);
         side->setContentsMargins(17,24,17,18);
         side->setSpacing(9);
         auto* brand=new QHBoxLayout;
         auto* logo=new QLabel(sidebar);
-        logo->setPixmap(awesome(0xf005,QColor("#167da9"),29).pixmap(29,29));
+        logo->setPixmap(awesome(0xf005,QColor("#e3b75a"),29).pixmap(29,29));
         brand->addWidget(logo);
         brand->addWidget(makeLabel("NORTHSTAR","brand",sidebar));
         brand->addStretch();
         side->addLayout(brand);
         side->addSpacing(12);
-        side->addWidget(makeLabel("PROJECT WORKSPACE","eyebrow",sidebar));
+        side->addWidget(makeLabel("WORKSPACE / PROJECTS","eyebrow",sidebar));
         auto navButton=[&](QString name,char32_t icon,int view) {
             auto* button=new QToolButton(sidebar);
             button->setObjectName("nav");
@@ -561,7 +621,11 @@ private:
             button->setCheckable(true);
             button->setMinimumHeight(44);
             button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);
-            connect(button,&QToolButton::clicked,this,[this,view]{filter_=view;refresh();});
+            connect(button,&QToolButton::clicked,this,[this,view]{
+                filter_=view;
+                for(int i=0;i<3;++i)nav_[i]->setChecked(i==filter_);
+                rebuildCards();
+            });
             side->addWidget(button);
             nav_.push_back(button);
         };
@@ -592,8 +656,8 @@ private:
         main->setSpacing(14);
         auto* heading=new QHBoxLayout;
         auto* titleBox=new QVBoxLayout;
-        titleBox->addWidget(makeLabel("PROJECT BROWSER","headline",content));
-        titleBox->addWidget(makeLabel("Choose a project or create a new experience.","muted",content));
+        titleBox->addWidget(makeLabel("PROJECT LIBRARY","headline",content));
+        titleBox->addWidget(makeLabel("Build worlds, manage projects and launch the editor.","muted",content));
         heading->addLayout(titleBox);
         heading->addStretch();
         auto* refreshButton=actionButton("Refresh",0xf2f1,content);
@@ -641,14 +705,30 @@ private:
 
         auto* detail=new QWidget(content);
         detail->setObjectName("details");
-        detail->setFixedWidth(328);
+        detail->setMinimumWidth(0);
         auto* detailLayout=new QVBoxLayout(detail);
         detailLayout->setContentsMargins(16,18,16,16);
         detailLayout->setSpacing(10);
         detailLayout->addWidget(makeLabel("PROJECT DETAILS","eyebrow",detail));
+        auto* identity=new QHBoxLayout;
+        identity->setSpacing(12);
+        detailIcon_=new QLabel(detail);
+        detailIcon_->setObjectName("selectedProjectIcon");
+        detailIcon_->setFixedSize(58,58);
+        detailIcon_->setAlignment(Qt::AlignCenter);
+        detailIcon_->setStyleSheet(
+            "background:#111923;border:1px solid #394456;border-radius:8px;");
+        identity->addWidget(detailIcon_);
         detailTitle_=makeLabel("Select a project","section",detail);
         detailTitle_->setWordWrap(true);
-        detailLayout->addWidget(detailTitle_);
+        identity->addWidget(detailTitle_,1);
+        detailLayout->addLayout(identity);
+        detailCover_=new QLabel(detail);
+        detailCover_->setObjectName("detailCover");
+        detailCover_->setFixedHeight(150);
+        detailCover_->setAlignment(Qt::AlignCenter);
+        detailCover_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+        detailLayout->addWidget(detailCover_);
         detailDescription_=makeLabel("Select a project to view information.","muted",detail);
         detailDescription_->setWordWrap(true);
         detailLayout->addWidget(detailDescription_);
@@ -683,8 +763,16 @@ private:
         detailAction("Duplicate",0xf0c5,[this]{duplicateProject();});
         detailAction("Open Folder",0xf07c,[this]{openFolder();});
         detailAction("Remove from List",0xf2ed,[this]{forgetProject();});
+        detailAction("Set Project Icon...",0xf03e,[this]{chooseProjectIcon();});
+        detailAction("Capture from Scene",0xf030,[this]{captureSceneCover();});
         detailLayout->addStretch();
-        body->addWidget(detail,0);
+        auto* detailScroll=new QScrollArea(content);
+        detailScroll->setObjectName("detailsScroll");
+        detailScroll->setWidgetResizable(true);
+        detailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        detailScroll->setFixedWidth(340);
+        detailScroll->setWidget(detail);
+        body->addWidget(detailScroll,0);
         main->addLayout(body,1);
         overall->addWidget(content,1);
     }
@@ -716,26 +804,34 @@ private:
             if (auto* w=item->widget()) delete w;
             delete item;
         }
-        std::vector<ns::Project> visible;
+        // Borrow from the stable catalog for this synchronous rebuild.
+        // Project contains filesystem paths, tags and provider maps: avoid
+        // copying every project on each filter/resize/search keystroke.
+        std::vector<ns::Project const*> visible;
+        visible.reserve(projects_.size());
         auto const search=search_->text().trimmed();
         for (auto const& p:projects_) {
             if (filter_==1 && p.last_opened.empty()) continue;
             if (filter_==2 && !p.favorite) continue;
-            QString const fields=qwide(p.name)+" "+qwide(p.category)+" "+
-                qwide(p.description)+" "+qpath(p.directory);
-            QStringList tags;
-            for (auto const& tag:p.tags) tags<<qwide(tag);
-            if (!search.isEmpty() && !fields.contains(search,Qt::CaseInsensitive) &&
-                !tags.join(' ').contains(search,Qt::CaseInsensitive)) continue;
-            visible.push_back(p);
+            if (!search.isEmpty()) {
+                QString const fields=qwide(p.name)+" "+qwide(p.category)+" "+
+                    qwide(p.description)+" "+qpath(p.directory);
+                bool matches=fields.contains(search,Qt::CaseInsensitive);
+                if (!matches) for (auto const& tag:p.tags)
+                    if (qwide(tag).contains(search,Qt::CaseInsensitive)) {
+                        matches=true;break;
+                    }
+                if (!matches)continue;
+            }
+            visible.push_back(&p);
         }
         if (sort_->currentIndex()==1) {
             std::sort(visible.begin(),visible.end(),
-                [](auto const& a,auto const& b){return a.name<b.name;});
+                [](auto const* a,auto const* b){return a->name<b->name;});
         } else if (sort_->currentIndex()==2) {
             std::sort(visible.begin(),visible.end(),
                 [](auto const& a,auto const& b){
-                    return a.category==b.category?a.name<b.name:a.category<b.category;
+                    return a->category==b->category?a->name<b->name:a->category<b->category;
                 });
         }
         visibleCount_=static_cast<int>(visible.size());
@@ -744,8 +840,9 @@ private:
         count_->setText(QString("%1 of %2 projects").arg(visible.size()).arg(projects_.size()));
         int const available=std::max(360,scroll_->viewport()->width());
         int const columns=std::max(1,std::min(4,available/265));
+        lastColumns_=columns;
         for (int index=0;index<static_cast<int>(visible.size());++index) {
-            auto const path=visible[index].directory;
+            auto const path=visible[index]->directory;
             auto callback=[this,path](bool open) {
                 if (open) {
                     // Never rebuild/delete a card during its mouse/keyboard event.
@@ -757,7 +854,7 @@ private:
                     selectProject(path);
                 }
             };
-            grid_->addWidget(new Card(visible[index],path==selectedPath_,callback,scrollContent_),
+            grid_->addWidget(new Card(*visible[index],path==selectedPath_,callback,scrollContent_),
                              index/columns,index%columns);
         }
         for (int i=0;i<columns;++i) grid_->setColumnStretch(i,1);
@@ -1320,6 +1417,8 @@ private:
         for (auto* button:projectActions_) button->setEnabled(p!=nullptr);
         if (!p) {
             updateProviderControls(nullptr);
+            detailCover_->clear();
+            detailIcon_->clear();
             detailTitle_->setText("Select a project");
             detailDescription_->clear();
             detailPath_->clear();
@@ -1331,13 +1430,33 @@ private:
         projectActions_.at(2)->setEnabled(ready);
         projectActions_.at(3)->setEnabled(ready);
         projectActions_.at(4)->setEnabled(fs::is_directory(p->directory));
+        projectActions_.at(6)->setEnabled(fs::is_directory(p->directory));
+        projectActions_.back()->setEnabled(ready &&
+            !p->startup_scene.empty() &&
+            fs::is_regular_file(p->startup_scene) &&
+            (!thumbnailProcess_ || thumbnailProcess_->state()==QProcess::NotRunning));
         updateProviderControls(p);
         detailTitle_->setText(qwide(p->name));
+        const auto cover=northstarcpp::project_browser::coverForProject(*p);
+        auto icon=cover.icon.isNull()?cover.image:cover.icon;
+        if(icon.isNull())detailIcon_->clear();
+        else detailIcon_->setPixmap(northstarcpp::project_browser::cropped(
+            icon,{54,54}));
+        detailIcon_->setToolTip(cover.iconSource.isEmpty()?
+            "Project thumbnail (choose a project icon to customize)":
+            cover.iconSource);
+        if(cover.image.isNull())detailCover_->clear();
+        else detailCover_->setPixmap(cover.image.scaled({312,150},
+            Qt::KeepAspectRatioByExpanding,Qt::SmoothTransformation));
+        detailCover_->setToolTip(cover.screenshot?
+            cover.source:"No image yet. Choose Set Project Icon or capture a scene.");
         detailDescription_->setText(qwide(p->description).isEmpty()
                                   ?"No project description":qwide(p->description));
         detailPath_->setText(qpath(p->directory));
         detailStatus_->setText("Status: "+statusLabel(*p)+"\nEngine: "+
                                qs(p->engine_version.empty()?"unspecified":p->engine_version)+
+                               "\nUI Asset: "+
+                               (p->ui_default.empty()?"Legacy / not declared":qs(p->ui_default))+
                                (p->diagnostic.empty()?QString{}:"\n"+qwide(p->diagnostic)));
     }
     void openProject()
@@ -1449,7 +1568,12 @@ private:
                     L"northstarcpp_editor_qt.exe";
             if (!fs::is_regular_file(executable))
                 throw std::runtime_error("NorthStarCpp editor is missing");
-            QStringList args{"--scene",qpath(current.startup_scene)};
+            // The project directory is the editor's primary identity.
+            // A startup scene is only an optional document to open.
+            QStringList args{"--project",qpath(configured.directory)};
+            if(!configured.startup_scene.empty() &&
+               fs::is_regular_file(configured.startup_scene))
+                args.append({"--scene",qpath(configured.startup_scene)});
             if (smoke_ && smokeEditorHandoff_) {
                 executable=fs::path(QApplication::applicationFilePath().toStdWString());
                 args={"--smoke-editor-child",
@@ -1502,6 +1626,122 @@ private:
             refresh(path);
         }
     }
+    void chooseProjectIcon() {
+        auto const* selected=selection();
+        if(!selected || !fs::is_directory(selected->directory))return;
+        auto const destination=selected->directory/"project_icon.png";
+        if(QFileInfo(qpath(destination)).isSymLink()) {
+            QMessageBox::warning(this,"Project Icon",
+                "Refusing to replace a redirected project icon.");
+            return;
+        }
+        auto const filename=QFileDialog::getOpenFileName(
+            this,"Choose Project Icon",qpath(selected->directory),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp)");
+        if(filename.isEmpty())return;
+        QFileInfo input(filename);
+        if(!input.isFile() || input.isSymLink() || input.size()<1 ||
+           input.size()>24*1024*1024) {
+            QMessageBox::warning(this,"Project Icon",
+                "Choose a regular local image under 24 MiB.");
+            return;
+        }
+        QImageReader reader(filename);
+        reader.setAutoTransform(true);
+        auto const size=reader.size();
+        if(!size.isValid() || size.width()>8192 || size.height()>8192 ||
+           qint64(size.width())*size.height()>32000000) {
+            QMessageBox::warning(this,"Project Icon",
+                "Invalid image dimensions (limit: 8192 px / 32 megapixels).");
+            return;
+        }
+        reader.setScaledSize(size.scaled({512,512},Qt::KeepAspectRatioByExpanding));
+        auto image=reader.read();
+        if(image.isNull()) {
+            QMessageBox::warning(this,"Project Icon",
+                "The selected image could not be decoded.");
+            return;
+        }
+        QImage icon(512,512,QImage::Format_ARGB32_Premultiplied);
+        icon.fill(Qt::transparent);
+        {
+            QPainter painter(&icon);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            auto const size=image.size();
+            painter.drawImage(
+                QRect((512-size.width())/2,(512-size.height())/2,
+                      size.width(),size.height()),image);
+        }
+        QSaveFile file(qpath(destination));
+        if(!file.open(QIODevice::WriteOnly) ||
+           !icon.save(&file,"PNG") || !file.commit()) {
+            QMessageBox::warning(this,"Project Icon",
+                "Could not save project_icon.png in the project directory.");
+            return;
+        }
+        QPixmapCache::clear();
+        refresh(selected->directory);
+    }
+    void captureSceneCover() {
+        if(thumbnailProcess_ && thumbnailProcess_->state()!=QProcess::NotRunning)
+            return;
+        auto const* current=selection();
+        if(!current || current->status!=ns::Project::Status::ready ||
+           current->startup_scene.empty() ||
+           !fs::is_regular_file(current->startup_scene))
+            return;
+        const auto path=current->directory;
+        auto editor=ns::executable_directory()/L"northstarcpp_editor_qt.exe";
+        // Development builds may need a side-by-side updated editor while
+        // a live editor session keeps the original executable locked.
+        auto const staged=ns::executable_directory()/L"northstarcpp_editor_qt_preview.exe";
+        if(fs::is_regular_file(staged))editor=staged;
+        if(!fs::is_regular_file(editor))
+            editor=ns::executable_directory().parent_path()/
+                   L"northstarcpp_editor_qt.exe";
+        if(!fs::is_regular_file(editor)){
+            QMessageBox::warning(this,"Project Preview",
+                "NorthStar Editor is missing. Build northstarcpp_editor_qt first.");
+            return;
+        }
+        auto* process=new QProcess(this);
+        thumbnailProcess_=process;
+        process->setObjectName("projectSceneThumbnailCapture");
+        process->setProgram(qpath(editor));
+        process->setArguments({"--scene",qpath(current->startup_scene),
+                               "--capture-project-thumbnail"});
+        process->setWorkingDirectory(qpath(editor.parent_path()));
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        if(!projectActions_.empty())projectActions_.back()->setEnabled(false);
+        connect(process,&QProcess::finished,this,
+                [this,process,path](int exitCode,QProcess::ExitStatus exitStatus){
+            const auto output=QString::fromUtf8(process->readAll());
+            if(thumbnailProcess_==process)thumbnailProcess_=nullptr;
+            process->deleteLater();
+            if(exitStatus==QProcess::NormalExit && exitCode==0){
+                QPixmapCache::clear();
+                refresh(path);
+            }else {
+                refresh(path);
+                QMessageBox::warning(this,"Scene preview capture failed",
+                    "The editor could not capture a GPU frame from this project.\n"+
+                    output.right(1900));
+            }
+        });
+        connect(process,&QProcess::errorOccurred,this,
+                [this,process](QProcess::ProcessError error){
+            if(error!=QProcess::FailedToStart)return;
+            if(thumbnailProcess_==process)thumbnailProcess_=nullptr;
+            QMessageBox::warning(this,"Cannot start preview renderer",
+                process->errorString());
+            process->deleteLater();
+        });
+        QTimer::singleShot(35000,process,[process]{
+            if(process->state()!=QProcess::NotRunning)process->kill();
+        });
+        process->start();
+    }
+
     void createProject()
     {
         QDialog d(this);
@@ -1529,6 +1769,12 @@ private:
         description->setPlaceholderText("Description (optional)");
         form->addRow("Description",description);
         layout->addLayout(form);
+        // The project scaffold ships an editable .nui UI asset by default.
+        auto* uiAssetHint=makeLabel(
+            "Includes assets/ui/project_root.nui - edit the UI layout in Content Browser.",
+            "muted",&d);
+        uiAssetHint->setWordWrap(true);
+        layout->addWidget(uiAssetHint);
         auto* actions=new QDialogButtonBox(QDialogButtonBox::Cancel,&d);
         auto* create=actions->addButton("Create Project",QDialogButtonBox::AcceptRole);
         create->setObjectName("primary");
@@ -1631,7 +1877,18 @@ private:
     void resizeEvent(QResizeEvent* event) override
     {
         QMainWindow::resizeEvent(event);
-        if (scroll_) QTimer::singleShot(0,this,[this]{rebuildCards();});
+        // Coalesce high-frequency window resize events. A new pixel width
+        // rarely changes the grid's discrete 1..4 column layout.
+        if(scroll_ && !layoutRefreshPending_) {
+            layoutRefreshPending_=true;
+            QTimer::singleShot(0,this,[this] {
+                layoutRefreshPending_=false;
+                if(!scroll_ || !grid_)return;
+                int const available=std::max(360,scroll_->viewport()->width());
+                int const columns=std::max(1,std::min(4,available/265));
+                if(columns!=lastColumns_)rebuildCards();
+            });
+        }
     }
     bool smoke_;
     bool smokeEditorHandoff_=false;
@@ -1642,6 +1899,8 @@ private:
     fs::path selectedPath_;
     int filter_=0;
     int visibleCount_=0;
+    int lastColumns_=-1;
+    bool layoutRefreshPending_=false;
     std::vector<QToolButton*> nav_;
     std::vector<QPushButton*> projectActions_;
     std::vector<ns::ProviderChoice> providerChoices_;
@@ -1651,6 +1910,9 @@ private:
     QComboBox* sort_=nullptr;
     QLabel *section_=nullptr,*count_=nullptr,*detailTitle_=nullptr,
            *detailDescription_=nullptr,*detailPath_=nullptr,*detailStatus_=nullptr;
+    QLabel* detailCover_=nullptr;
+    QLabel* detailIcon_=nullptr;
+    QProcess* thumbnailProcess_=nullptr;
     QScrollArea* scroll_=nullptr;
     QWidget* scrollContent_=nullptr;
     QGridLayout* grid_=nullptr;
@@ -1695,7 +1957,7 @@ int main(int argc,char** argv)
         app.setOrganizationName("Kayla's Systems");
         app.setStyleSheet(stylesheet);
         northstarcpp::editor::installMenuTheme(
-            app,northstarcpp::editor::MenuTheme::Light);
+            app,northstarcpp::editor::MenuTheme::Dark);
         int const fontId=QFontDatabase::addApplicationFont(":/fontawesome/fa-solid-900.ttf");
         if (fontId<0 || QFontDatabase::applicationFontFamilies(fontId).empty()) {
             qCritical("Font Awesome 6 Free resource failed to load");

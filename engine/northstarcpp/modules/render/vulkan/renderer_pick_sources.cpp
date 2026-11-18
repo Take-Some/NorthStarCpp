@@ -75,7 +75,8 @@ std::vector<ColoredVertex> Renderer::build_pick_vertices(
         auto dx=p.x-f.camera_x,dy=p.y-f.camera_y,dz=p.z-f.camera_z;
         auto horizontal=dx*cy-dz*sy,forward=dx*sy+dz*cy;
         auto vertical=dy*cp-forward*sp,distance=dy*sp+forward*cp;
-        if(distance<=near_clip)return false;
+        // The ID pass uses the same homogeneous hardware clipper as the
+        // color pass. Never drop a whole pick triangle at the near plane.
         v.clip[0]=horizontal*scale/aspect;
         v.clip[1]=-vertical*scale;
         v.clip[2]=(far_clip*distance-far_clip*near_clip)/(far_clip-near_clip);

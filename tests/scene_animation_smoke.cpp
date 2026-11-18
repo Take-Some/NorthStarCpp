@@ -107,6 +107,37 @@ int main(int argc,char** argv) {
         check(!player.active(41) && player.advance(0.f).empty(),
               "Stop releases animation instance");
 
+        // Pre-sorted timeline and caller-owned samples: no frame-by-frame
+        // sort, output vector allocation, or unstable order after hot replace.
+        auto many=test_scene();
+        auto second=many.objects.front(),third=many.objects.front();
+        second.node.id=42;
+        third.node.id=43;
+        many.objects.push_back(second);
+        many.objects.push_back(third);
+        SceneAnimationPlayer batch;
+        batch.play(many,43,clip);
+        batch.play(many,41,clip);
+        batch.play(many,42,clip);
+        std::vector<SceneAnimationSample> reused;
+        batch.advance_into(.1f,reused);
+        check(reused.size()==3 && reused[0].entity_id==41 &&
+              reused[1].entity_id==42 && reused[2].entity_id==43,
+              "Scene animation ordering must follow scene indices");
+        auto const* stable=reused.data();
+        for(int i=0;i<100;++i)batch.advance_into(.01f,reused);
+        check(reused.data()==stable,
+              "Scene animation samples reallocated during steady playback");
+        batch.play(many,41,clip);
+        batch.stop(42);
+        batch.advance_into(0.f,reused);
+        check(reused.size()==2 && reused[0].entity_id==41 &&
+              reused[1].entity_id==43,
+              "Hot-replace and stop must maintain sorted animation order");
+        batch.clear();
+        batch.advance_into(0.f,reused);
+        check(reused.empty(),"Clear must release all ordered animation state");
+
         rejects([&] {player.play(scene,42,clip);},"Unknown entity accepted");
         rejects([&] {player.play(scene,41,clip,false,0.f);},"Zero speed accepted");
         rejects([&] {player.advance(0.5f);},"Excessive frame delta accepted");

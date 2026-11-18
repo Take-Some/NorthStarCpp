@@ -50,5 +50,18 @@ int main() {
     // NAC1 envelopes are not silently accepted as new NEF8 assets.
     std::vector<std::uint8_t> legacy{'N','A','C','1',0,0,0,0};
     if(nac::decode(legacy,output,error))return 11;
+
+    // A soundtrack-sized track must cross the former 64 MiB NAC body limit.
+    std::vector<nac::Track> extended(1);
+    auto& clip=extended.front();
+    clip.id=20;clip.name="LongClip";clip.sample_rate=48000;clip.channels=2;
+    clip.samples.resize(34u*1024*1024);
+    clip.samples.front()=101;
+    clip.samples.back()=-302;
+    if(!nac::encode(extended,bytes,error) || !nac::decode(bytes,output,error)) {
+        std::cerr<<error;return 12;
+    }
+    if(output.size()!=1 || output.front().id!=clip.id ||
+       output.front().samples!=clip.samples)return 13;
     return 0;
 }

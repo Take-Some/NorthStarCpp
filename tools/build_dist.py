@@ -22,6 +22,7 @@ from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.dev.cli import ROOT, config_load, toolchain, build_path
+from tools.build_layout import BUILD_DIR, OUTPUT_ROOT, QA_PACKAGE_DIR, RELEASE_PACKAGE_DIR, require_canonical_build, require_inside_output
 from tools.deploy_qt import (deploy as deploy_qt, isolate_qt_runtime,
                              verified_extras, QtDeploymentError)
 from tools.v8_provider.registry import registered_v8_runtime, stage_v8_provider
@@ -182,7 +183,7 @@ def parse_registry(package: Path) -> tuple[dict, dict[str, str]]:
                 raise DistError("Missing bundled V8 sidecar file: " + name)
     v8_libs = registered_v8_runtime(package)
     qt_libs = verified_extras(package, v8_libs)
-    nonplugins = qt_libs | {Path(x).name.casefold() for x in v8_libs}
+    nonplugins = qt_libs | {Path(x).name.casefold() for x in v8_libs} | verified_native_runtime(package)
     on_disk = {p.relative_to(package).as_posix().casefold()
                for p in executable_dir.glob("*.dll")
                if p.name.casefold() not in nonplugins}
@@ -196,6 +197,35 @@ def parse_registry(package: Path) -> tuple[dict, dict[str, str]]:
         raise DistError("Deprecated northstarcpp.modules file included in release")
     # bootstrap.json is optional. Without it, all capabilities resolve from bin/ (./).
     return info, defaults
+
+
+def verified_native_runtime(package: Path) -> set[str]:
+    """Read the hash-checked runtime DLL inventory, distinct from engine plugins."""
+    source = package / "native.runtime.json"
+    if not source.exists():
+        return set()
+    record = json.loads(source.read_text(encoding="utf-8"))
+    files = record.get("files")
+    if (record.get("schema") != 1 or record.get("runtime") != "MinGW-w64" or
+            not isinstance(files, dict)):
+        raise DistError("Native runtime registry invalid")
+    seen: set[str] = set()
+    for relative, metadata in files.items():
+        name = Path(relative).name
+        if (not relative.startswith("bin/") or relative.count("/") != 1 or
+                not re.fullmatch(r"[a-zA-Z0-9_.+-]+[.]dll", name) or
+                not name.casefold().startswith(("lib", "zlib"))):
+            raise DistError("Invalid native runtime dependency path: " + relative)
+        lowered = name.casefold()
+        if lowered in seen or lowered.startswith(("qt5", "qt6")):
+            raise DistError("Duplicate/forbidden native DLL: " + name)
+        file = confined(package, relative)
+        if (not file.is_file() or not isinstance(metadata, dict) or
+                metadata.get("size") != file.stat().st_size or
+                metadata.get("sha256") != sha256(file)):
+            raise DistError("Native runtime DLL hash mismatch: " + relative)
+        seen.add(lowered)
+    return seen
 
 
 def check_binary_imports(package: Path, objdump: str) -> dict[str, list[dict]]:
@@ -263,6 +293,52 @@ def check_binary_imports(package: Path, objdump: str) -> dict[str, list[dict]]:
             data.append({"name": imported, "status": status})
         report[executable.relative_to(package).as_posix()] = data
     return report
+
+
+def stage_native_runtime(package: Path, gpp: str) -> dict:
+    """Complete the native DLL import closure without leaking private Qt DLLs.
+
+    Windows resolves the Player's implicit imports beside its EXE, not under
+    the process-private Qt directory. Store only required imported MinGW DLLs
+    there, with SHA-256 entries separate from the engine provider registry.
+    """
+    bin_dir = package / "bin"
+    toolchain_bin = Path(gpp).parent
+    objdump = toolchain_bin / "objdump.exe"
+    if not objdump.is_file():
+        raise DistError("Cannot inspect native runtime imports: objdump missing")
+    bundled: dict[str, dict] = {}
+    for _ in range(64):
+        try:
+            check_binary_imports(package, str(objdump))
+            break
+        except DistError as exc:
+            result = re.search(
+                r"Unresolved/unsupported DLL import in (.+?): ([^\\/]+[.]dll)$",
+                str(exc))
+            if not result:
+                raise
+            name = result.group(2)
+            lower = name.casefold()
+            if (not re.fullmatch(r"[a-zA-Z0-9_.+-]+[.]dll", name) or
+                    not lower.startswith(("lib", "zlib")) or
+                    lower.startswith(("qt5", "qt6"))):
+                raise DistError("Import requires unsupported DLL: " + name) from exc
+            source = toolchain_bin / name
+            target = bin_dir / name
+            if not source.is_file() or target.exists():
+                raise DistError("Missing or duplicate native runtime dependency: " + name) from exc
+            shutil.copy2(source, target)
+            bundled["bin/" + name] = {
+                "sha256": sha256(target), "size": target.stat().st_size}
+    else:
+        raise DistError("Native runtime import closure exceeds 64 iterations")
+    record = {"schema": 1, "runtime": "MinGW-w64",
+              "files": bundled}
+    (package / "native.runtime.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    return record
 
 
 def package_smoke(package: Path) -> None:
@@ -464,10 +540,19 @@ def release(args: argparse.Namespace) -> dict:
         # developer owns the Ninja build process. Tests and package smoke are
         # still mandatory; no artifact is created from missing modules.
         build = (ROOT / args.from_build).resolve()
-        outputs = (ROOT / cfg.get("build_root", "out")).resolve()
-        if outputs not in build.parents or not (build / "CMakeCache.txt").is_file():
-            raise DistError("--from-build must name an existing build beneath out/")
+        # Exceptional isolated QA builds avoid changing the binaries used by a
+        # live Editor/Player. The alternate tree is exact, never user-supplied
+        # arbitrary paths, and is not eligible for direct publication.
+        isolated = (args.qa_only and args.allow_isolated_qa_build and
+                    build == (ROOT / "out/q7").resolve())
+        if (build != BUILD_DIR.resolve() and not isolated) or not (build / "CMakeCache.txt").is_file():
+            raise DistError("--from-build must use out/build (or explicit isolated out/q7 QA)")
         cache = (build / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+        if isolated and (
+            "NORTHSTARCPP_ALLOW_NONCANONICAL_BUILD:BOOL=ON" not in cache or
+            "CMAKE_HOME_DIRECTORY:INTERNAL=" + str(ROOT).replace("\\", "/") not in cache.replace("\\", "/")
+        ):
+            raise DistError("Isolated QA build cache does not match this repository")
         if "CMAKE_BUILD_TYPE:STRING=" + args.build_type not in cache:
             raise DistError("--from-build configuration type does not match " + args.build_type)
         if "BUILD_TESTING:BOOL=ON" not in cache:
@@ -482,22 +567,27 @@ def release(args: argparse.Namespace) -> dict:
                                 "-DNORTHSTARCPP_V8_SIDECAR=OFF and rebuild before packaging")
         # A stale --from-build can run old codecs against newly serialized
         # scenes and report misleading CTest failures or false positives.
-        # Dry-run the ENTIRE Ninja graph before accepting reused binaries.
-        stale = subprocess.run(
-            [ninja, "-C", str(build), "-n", "all"],
-            capture_output=True, text=True, errors="replace", timeout=40)
-        if stale.returncode or re.search(r"^\[\d+/\d+\]", stale.stdout, re.M):
-            raise DistError(
-                "--from-build is stale: regenerate/rebuild Ninja all targets "
-                "before packaging (pending build work detected)")
+        if isolated:
+            # Files generated via CONFIGURE_DEPENDS produce CMake reconfigure
+            # entries even in Ninja -n. For the isolated QA tree, execute the
+            # whole build graph instead of trusting a dry-run that cannot
+            # reliably distinguish regeneration from pending compilation.
+            run([ninja, "-C", str(build), "-j", str(args.jobs), "all"],
+                timeout=None)
+        else:
+            stale = subprocess.run(
+                [ninja, "-C", str(build), "-n", "all"],
+                capture_output=True, text=True, errors="replace", timeout=40)
+            if stale.returncode or re.search(r"^\[\d+/\d+\]", stale.stdout, re.M):
+                raise DistError(
+                    "--from-build is stale: regenerate/rebuild Ninja all targets "
+                    "before packaging (pending build work detected)")
         print("Using existing CMake build:", build, flush=True)
     else:
-        # A fresh uniquely named build tree prevents lock/contention with
-        # concurrent engine development and stale Ninja state.
-        builds = ROOT / cfg.get("build_root", "out") / "distribution"
-        builds.mkdir(parents=True, exist_ok=True)
-        build = Path(tempfile.mkdtemp(prefix="gcc-{}-".format(args.build_type.lower()),
-                                      dir=builds))
+        # Always configure the ONE canonical CMake build tree.
+        # This intentionally does not permit parallel Debug and Release builds.
+        build = BUILD_DIR
+        build.mkdir(parents=True, exist_ok=True)
         print("NorthStarCpp distribution build:", args.build_type, flush=True)
         configure = [cmake, "-S", str(ROOT), "-B", str(build), "-G", "Ninja",
                      "-DCMAKE_BUILD_TYPE=" + args.build_type,
@@ -579,6 +669,7 @@ def release(args: argparse.Namespace) -> dict:
             isolated = isolate_qt_runtime(stage)
             if isolated.get("layout") != "process-isolated":
                 raise DistError("Qt process isolation failed")
+        stage_native_runtime(stage, gpp)
         plugins, defaults = parse_registry(stage)
         version = str(plugins["engine_version"])
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.]+)?", version):
@@ -617,8 +708,14 @@ def release(args: argparse.Namespace) -> dict:
             raise DistError("QA candidate already exists; refusing replacement")
         stage.rename(qa_final)
         qa_verified = verify_manifest(qa_final)
+        # QA split remains unapproved until clean-machine validation.
+        from tools.split_distribution import assemble
+        qa_components = assemble(
+            qa_final, dist / (name + "-Components-QA"), approved=False,
+            zip_packages=False)
         print("Non-shipping QA candidate assembled:", qa_final, flush=True)
         return {
+            "qa_components": qa_components,
             "qa_package": str(qa_final), "release_approved": False,
             "files": len(qa_verified["files"]),
             "requires": "Independent signed clean Windows VM acceptance",
@@ -674,22 +771,22 @@ def promote_qa(args: argparse.Namespace) -> dict:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     publishing.mkdir()
     try:
+        # Signed acceptance covers the original QA bytes. Only split
+        # Engine/GameClient artifacts are eligible for public release.
+        from tools.split_distribution import assemble, verify_component
         payload = publishing / name
-        shutil.copytree(qa, payload, symlinks=False)
-        verify_manifest(payload)
-        if not args.no_zip:
-            tmp_zip = publishing / (name + ".zip")
-            archive_package(payload, tmp_zip, name)
+        assemble(qa, payload, approved=True, zip_packages=not args.no_zip)
+        verify_component(payload / "Engine", "Engine")
+        verify_component(payload / "GameClient", "GameClient")
         payload.rename(final)
-        if not args.no_zip:
-            os.replace(tmp_zip, args.output_dir / (name + ".zip"))
     finally:
         if publishing.exists():
             shutil.rmtree(publishing)
     return {
-        "package": str(final), "release_approved": True,
-        "clean_machine_acceptance": True, "files": len(verified["files"]),
-        "source_qa_package": str(qa)
+        "package": str(final), "engine": str(final / "Engine"),
+        "game_client": str(final / "GameClient"),
+        "release_approved": True, "clean_machine_acceptance": True,
+        "files": len(verified["files"]), "source_qa_package": str(qa)
     }
 
 
@@ -705,20 +802,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clean-machine-report", type=Path,
                         help="Detached-signature clean Windows VM acceptance report")
     parser.add_argument("--from-build", metavar="BUILD_DIR", help="Reuse tested existing CMake build")
+    parser.add_argument("--allow-isolated-qa-build", action="store_true",
+                        help="Allow the separately configured out/q7 tree for QA only")
     parser.add_argument("--v8-provider-dir", type=Path,
                         help="Optional V8 provider build bin directory (requires security-reviewed SDK)")
     parser.add_argument("--v8-sdk-root", type=Path,
                         help="Matching SDK root, with pkgconfig version and V8 license notices")
     parser.add_argument("--v8-attestation", type=Path,
                         help="Security-reviewed V8 binary approval JSON and detached .sig")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "dist",
-                        help="Directory for the verified package and archive (default: dist)")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Directory for verified release packages (default: out/package/release)")
     parser.add_argument("--verify", metavar="PACKAGE", help="Verify a package under the output directory")
     args = parser.parse_args(argv)
     try:
         if args.jobs < 1 or args.jobs > 64:
             raise DistError("Build parallelism must be between 1 and 64")
-        args.output_dir = args.output_dir.resolve()
+        args.output_dir = (args.output_dir or (QA_PACKAGE_DIR if args.qa_only else RELEASE_PACKAGE_DIR)).resolve()
+        require_inside_output(args.output_dir,"Distribution output")
         if bool(args.v8_provider_dir) != bool(args.v8_sdk_root):
             raise DistError("--v8-provider-dir and --v8-sdk-root must be specified together")
         if args.v8_provider_dir and not args.v8_attestation:
@@ -733,14 +833,21 @@ def main(argv: list[str] | None = None) -> int:
         if not args.verify and not args.promote_qa:
             if not args.qa_only:
                 raise DistError("Direct publication disabled: use --qa-only then --promote-qa")
-            shipping = (ROOT / "dist").resolve()
+            shipping = RELEASE_PACKAGE_DIR.resolve()
             if args.output_dir == shipping or shipping in args.output_dir.parents:
-                raise DistError("QA candidates cannot be written under production dist")
+                raise DistError("QA candidates cannot be written under out/package/release")
         if args.verify:
             package = Path(args.verify).resolve()
             if args.output_dir not in package.parents:
                 raise DistError("Verification path must be a subdirectory of " + str(args.output_dir))
-            data = verify_manifest(package)
+            from tools.split_distribution import verify_component
+            manifest = package / "manifest.json"
+            if not manifest.is_file():
+                raise DistError("Package manifest is missing")
+            header = json.loads(manifest.read_text(encoding="utf-8"))
+            data = (verify_component(package)
+                    if header.get("distribution_role")
+                    else verify_manifest(package))
             result = {"package": str(package), "files": len(data["files"]),
                       "plugins": len(data["plugins"]), "valid": True}
         elif args.promote_qa:

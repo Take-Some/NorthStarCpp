@@ -24,6 +24,13 @@ VkShaderModule shader(VkDevice d,const std::uint32_t* code,std::size_t bytes) {
 }
 void Renderer::destroy_deferred_resources() noexcept {
     if(!device_)return;
+    if(velocity_pipeline_)
+        vkDestroyPipeline(device_,velocity_pipeline_,nullptr);
+    velocity_pipeline_=VK_NULL_HANDLE;
+    if(ssao_pipeline_)vkDestroyPipeline(device_,ssao_pipeline_,nullptr);
+    ssao_pipeline_=VK_NULL_HANDLE;
+    destroy_ssao_resource();
+    destroy_csm_resources();
     if(gbuffer_pipeline_)vkDestroyPipeline(device_,gbuffer_pipeline_,nullptr);
     if(deferred_resolve_pipeline_)
         vkDestroyPipeline(device_,deferred_resolve_pipeline_,nullptr);
@@ -94,6 +101,8 @@ void Renderer::create_deferred_resources() {
         VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     ensure(vkCreateSampler(device_,&s,nullptr,&gbuffer_sampler_),
            "vkCreateSampler(GBuffer)");
+    create_ssao_resource();
+    create_csm_resources();
     // GPU-visible tile grid: 32x32 pixel tiles, [count + 64 indices].
     deferred_tile_columns_=(extent_.width+31)/32;
     deferred_tile_rows_=(extent_.height+31)/32;
@@ -117,7 +126,7 @@ void Renderer::create_deferred_resources() {
     ensure(vkBindBufferMemory(device_,deferred_tile_buffer_,deferred_tile_memory_,0),
            "vkBindBufferMemory(Vulkan tile lights)");
     deferred_tile_cache_.invalidate();
-    std::array<VkDescriptorSetLayoutBinding,7> bindings{};
+    std::array<VkDescriptorSetLayoutBinding,10> bindings{};
     for(unsigned i=0;i<4;++i) {
         bindings[i].binding=i;bindings[i].descriptorCount=1;
         bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -139,12 +148,32 @@ void Renderer::create_deferred_resources() {
     }
     VkDescriptorSetLayoutCreateInfo layout{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layout.bindingCount=gbuffer_v2_?7u:6u;layout.pBindings=bindings.data();
+    if(ssao_enabled_) {
+        auto& b=bindings[gbuffer_v2_?7:6];
+        b.binding=7;b.descriptorCount=1;
+        b.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    if(csm_enabled_) {
+        const unsigned index=6u+(gbuffer_v2_?1u:0u)+(ssao_enabled_?1u:0u);
+        bindings[index].binding=8;
+        bindings[index].descriptorCount=1;
+        bindings[index].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[index].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[index+1].binding=9;
+        bindings[index+1].descriptorCount=1;
+        bindings[index+1].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[index+1].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    layout.bindingCount=6u+(gbuffer_v2_?1u:0u)+(ssao_enabled_?1u:0u)+
+                        (csm_enabled_?2u:0u);
+    layout.pBindings=bindings.data();
     ensure(vkCreateDescriptorSetLayout(device_,&layout,nullptr,&gbuffer_layout_),
            "vkCreateDescriptorSetLayout(GBuffer)");
     std::array<VkDescriptorPoolSize,3> pool_sizes{{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,gbuffer_v2_?5u:4u},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            4u+(gbuffer_v2_?1u:0u)+(ssao_enabled_?1u:0u)+(csm_enabled_?1u:0u)},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,csm_enabled_?2u:1u},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1}}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets=1;pool.poolSizeCount=3;pool.pPoolSizes=pool_sizes.data();
@@ -155,8 +184,8 @@ void Renderer::create_deferred_resources() {
     ai.pSetLayouts=&gbuffer_layout_;
     ensure(vkAllocateDescriptorSets(device_,&ai,&gbuffer_set_),
            "vkAllocateDescriptorSets(GBuffer)");
-    std::array<VkDescriptorImageInfo,5> images{};
-    std::array<VkWriteDescriptorSet,7> writes{};
+    std::array<VkDescriptorImageInfo,7> images{};
+    std::array<VkWriteDescriptorSet,10> writes{};
     for(unsigned i=0;i<4;++i) {
         images[i].sampler=gbuffer_sampler_;
         images[i].imageView=i==3?depth_view_:gbuffer_views_[i];
@@ -200,22 +229,127 @@ void Renderer::create_deferred_resources() {
         writes[6].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[6].pImageInfo=&images[4];
     }
-    vkUpdateDescriptorSets(device_,gbuffer_v2_?7u:6u,writes.data(),0,nullptr);
+    if(ssao_enabled_) {
+        images[5].sampler=gbuffer_sampler_;
+        images[5].imageView=ssao_view_;
+        images[5].imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        auto& w=writes[gbuffer_v2_?7:6];
+        w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet=gbuffer_set_;w.dstBinding=7;
+        w.descriptorCount=1;
+        w.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo=&images[5];
+    }
+    VkDescriptorBufferInfo shadow_uniform{csm_buffer_,0,sizeof(csm_uniform_)};
+    if(csm_enabled_) {
+        const unsigned index=6u+(gbuffer_v2_?1u:0u)+(ssao_enabled_?1u:0u);
+        images[6].sampler=csm_sampler_;
+        images[6].imageView=csm_array_view_;
+        images[6].imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        auto& shadow_image_write=writes[index];
+        shadow_image_write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        shadow_image_write.dstSet=gbuffer_set_;
+        shadow_image_write.dstBinding=8;
+        shadow_image_write.descriptorCount=1;
+        shadow_image_write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadow_image_write.pImageInfo=&images[6];
+        auto& shadow_buffer_write=writes[index+1];
+        shadow_buffer_write.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        shadow_buffer_write.dstSet=gbuffer_set_;
+        shadow_buffer_write.dstBinding=9;
+        shadow_buffer_write.descriptorCount=1;
+        shadow_buffer_write.descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        shadow_buffer_write.pBufferInfo=&shadow_uniform;
+    }
+    vkUpdateDescriptorSets(device_,
+        6u+(gbuffer_v2_?1u:0u)+(ssao_enabled_?1u:0u)+
+            (csm_enabled_?2u:0u),
+        writes.data(),0,nullptr);
 }
 void Renderer::create_deferred_pipelines() {
     if(!deferred_enabled_)return;
-    VkShaderModule gfs=VK_NULL_HANDLE,vs=VK_NULL_HANDLE,fs=VK_NULL_HANDLE;
+    VkShaderModule gfs=VK_NULL_HANDLE,gvs=VK_NULL_HANDLE,
+                   vs=VK_NULL_HANDLE,fs=VK_NULL_HANDLE,
+                   aofs=VK_NULL_HANDLE,vfs=VK_NULL_HANDLE;
     try {
+        gvs=shader(device_,shaders::deferred_primitive_vertex,
+                   sizeof(shaders::deferred_primitive_vertex));
         gfs=shader(device_,gbuffer_v2_?shaders::deferred_gbuffer_fragment_v2:
                             shaders::deferred_gbuffer_fragment,
                    gbuffer_v2_?sizeof(shaders::deferred_gbuffer_fragment_v2):
                    sizeof(shaders::deferred_gbuffer_fragment));
         vs=shader(device_,shaders::deferred_resolve_vertex,
                   sizeof(shaders::deferred_resolve_vertex));
-        fs=shader(device_,gbuffer_v2_?shaders::deferred_resolve_fragment_v2:
-                          shaders::deferred_resolve_fragment,
-                  gbuffer_v2_?sizeof(shaders::deferred_resolve_fragment_v2):
-                   sizeof(shaders::deferred_resolve_fragment));
+        fs=shader(device_,gbuffer_v2_?(ssao_enabled_?shaders::deferred_resolve_fragment_v2_ssao:
+                                     shaders::deferred_resolve_fragment_v2):
+                          (ssao_enabled_?shaders::deferred_resolve_fragment_ssao:
+                         shaders::deferred_resolve_fragment),
+                  gbuffer_v2_?(ssao_enabled_?sizeof(shaders::deferred_resolve_fragment_v2_ssao):
+                                      sizeof(shaders::deferred_resolve_fragment_v2)):
+                   (ssao_enabled_?sizeof(shaders::deferred_resolve_fragment_ssao):
+                                 sizeof(shaders::deferred_resolve_fragment)));
+        if(csm_enabled_) {
+            // Select the matching material layout and AO variant; the
+            // ordinary resolve shader remains unchanged for CSM=off.
+            vkDestroyShaderModule(device_,fs,nullptr);
+            fs=VK_NULL_HANDLE;
+            const auto* code=gbuffer_v2_?
+                (ssao_enabled_?shaders::deferred_resolve_fragment_v2_ssao_csm:
+                               shaders::deferred_resolve_fragment_v2_csm):
+                (ssao_enabled_?shaders::deferred_resolve_fragment_ssao_csm:
+                               shaders::deferred_resolve_fragment_csm);
+            const auto bytes=gbuffer_v2_?
+                (ssao_enabled_?sizeof(shaders::deferred_resolve_fragment_v2_ssao_csm):
+                               sizeof(shaders::deferred_resolve_fragment_v2_csm)):
+                (ssao_enabled_?sizeof(shaders::deferred_resolve_fragment_ssao_csm):
+                               sizeof(shaders::deferred_resolve_fragment_csm));
+            fs=shader(device_,code,bytes);
+        }
+        if(hdr_enabled_) {
+            vkDestroyShaderModule(device_,fs,nullptr);
+            fs=VK_NULL_HANDLE;
+            const std::uint32_t* words=nullptr;
+            std::size_t word_bytes=0;
+            if(gbuffer_v2_==false && ssao_enabled_==false && csm_enabled_==false) {
+                words=shaders::deferred_resolve_fragment_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_hdr);
+            }
+            else if(gbuffer_v2_==true && ssao_enabled_==false && csm_enabled_==false) {
+                words=shaders::deferred_resolve_fragment_v2_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_v2_hdr);
+            }
+            else if(gbuffer_v2_==false && ssao_enabled_==true && csm_enabled_==false) {
+                words=shaders::deferred_resolve_fragment_ssao_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_ssao_hdr);
+            }
+            else if(gbuffer_v2_==true && ssao_enabled_==true && csm_enabled_==false) {
+                words=shaders::deferred_resolve_fragment_v2_ssao_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_v2_ssao_hdr);
+            }
+            else if(gbuffer_v2_==false && ssao_enabled_==false && csm_enabled_==true) {
+                words=shaders::deferred_resolve_fragment_csm_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_csm_hdr);
+            }
+            else if(gbuffer_v2_==true && ssao_enabled_==false && csm_enabled_==true) {
+                words=shaders::deferred_resolve_fragment_v2_csm_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_v2_csm_hdr);
+            }
+            else if(gbuffer_v2_==false && ssao_enabled_==true && csm_enabled_==true) {
+                words=shaders::deferred_resolve_fragment_ssao_csm_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_ssao_csm_hdr);
+            }
+            else if(gbuffer_v2_==true && ssao_enabled_==true && csm_enabled_==true) {
+                words=shaders::deferred_resolve_fragment_v2_ssao_csm_hdr;
+                word_bytes=sizeof(shaders::deferred_resolve_fragment_v2_ssao_csm_hdr);
+            }
+            fs=shader(device_,words,word_bytes);
+        }
+        if(ssao_enabled_)
+            aofs=shader(device_,shaders::deferred_ssao_fragment,
+                        sizeof(shaders::deferred_ssao_fragment));
+        if(velocity_enabled_)
+            vfs=shader(device_,shaders::deferred_velocity_fragment,
+                       sizeof(shaders::deferred_velocity_fragment));
         std::array<VkPipelineShaderStageCreateInfo,2> stages{};
         auto assign_stages=[&](VkShaderModule vertex,VkShaderModule fragment) {
             for(unsigned i=0;i<2;++i) {
@@ -225,16 +359,17 @@ void Renderer::create_deferred_pipelines() {
                 stages[i].pName="main";
             }
         };
-        assign_stages(vertex_shader_,gfs);
+        assign_stages(gvs,gfs);
         VkVertexInputBindingDescription binding{
             0,sizeof(ColoredVertex),VK_VERTEX_INPUT_RATE_VERTEX};
-        std::array<VkVertexInputAttributeDescription,2> attrs{{
+        std::array<VkVertexInputAttributeDescription,3> attrs{{
             {0,0,VK_FORMAT_R32G32B32A32_SFLOAT,0},
-            {1,0,VK_FORMAT_R32G32B32A32_SFLOAT,16}}};
+            {1,0,VK_FORMAT_R32G32B32A32_SFLOAT,16},
+            {2,0,VK_FORMAT_R32G32B32A32_SFLOAT,32}}};
         VkPipelineVertexInputStateCreateInfo vi{
             VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         vi.vertexBindingDescriptionCount=1;vi.pVertexBindingDescriptions=&binding;
-        vi.vertexAttributeDescriptionCount=2;vi.pVertexAttributeDescriptions=attrs.data();
+        vi.vertexAttributeDescriptionCount=3;vi.pVertexAttributeDescriptions=attrs.data();
         VkPipelineInputAssemblyStateCreateInfo ia{
             VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
         ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -275,8 +410,7 @@ void Renderer::create_deferred_pipelines() {
         ci.pMultisampleState=&ms;ci.pDepthStencilState=&depth;
         ci.pColorBlendState=&cb;ci.pDynamicState=&dyn;
         ci.layout=pipeline_layout_;
-        ensure(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,
-               &ci,nullptr,&gbuffer_pipeline_),"vkCreateGraphicsPipelines(GBuffer)");
+        ensure(create_cached_graphics_pipelines(1,&ci,&gbuffer_pipeline_),"vkCreateGraphicsPipelines(GBuffer)");
         // Fullscreen triangle: no vertex input or depth attachment.
         assign_stages(vs,fs);
         vi.vertexBindingDescriptionCount=vi.vertexAttributeDescriptionCount=0;
@@ -284,7 +418,8 @@ void Renderer::create_deferred_pipelines() {
         depth.depthTestEnable=depth.depthWriteEnable=VK_FALSE;
         cb.attachmentCount=1;
         rendering.colorAttachmentCount=1;
-        rendering.pColorAttachmentFormats=&format_;
+        VkFormat resolve_format=hdr_enabled_?hdr_format_:format_;
+        rendering.pColorAttachmentFormats=&resolve_format;
         rendering.depthAttachmentFormat=VK_FORMAT_UNDEFINED;
         VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,128};
         VkPipelineLayoutCreateInfo pli{
@@ -294,18 +429,38 @@ void Renderer::create_deferred_pipelines() {
         ensure(vkCreatePipelineLayout(device_,&pli,nullptr,
                &deferred_resolve_layout_),"vkCreatePipelineLayout(Resolve)");
         ci.layout=deferred_resolve_layout_;
-        ensure(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,
-               &ci,nullptr,&deferred_resolve_pipeline_),
+        ensure(create_cached_graphics_pipelines(1,&ci,&deferred_resolve_pipeline_),
                "vkCreateGraphicsPipelines(Resolve)");
+        if(velocity_enabled_) {
+            assign_stages(vs,vfs);
+            VkFormat motion_format=VK_FORMAT_R16G16_SFLOAT;
+            rendering.pColorAttachmentFormats=&motion_format;
+            ensure(create_cached_graphics_pipelines(
+                1,&ci,&velocity_pipeline_),"vkCreateGraphicsPipelines(Velocity)");
+        }
+        if(ssao_enabled_) {
+            assign_stages(vs,aofs);
+            VkFormat ao_format=VK_FORMAT_R16G16_SFLOAT;
+            rendering.pColorAttachmentFormats=&ao_format;
+            ensure(create_cached_graphics_pipelines(1,&ci,&ssao_pipeline_),
+                   "vkCreateGraphicsPipelines(SSAO)");
+        }
     }catch(...) {
         if(gfs)vkDestroyShaderModule(device_,gfs,nullptr);
+        if(gvs)vkDestroyShaderModule(device_,gvs,nullptr);
         if(vs)vkDestroyShaderModule(device_,vs,nullptr);
         if(fs)vkDestroyShaderModule(device_,fs,nullptr);
+        if(aofs)vkDestroyShaderModule(device_,aofs,nullptr);
+        if(vfs)vkDestroyShaderModule(device_,vfs,nullptr);
         throw;
     }
     vkDestroyShaderModule(device_,gfs,nullptr);
+    vkDestroyShaderModule(device_,gvs,nullptr);
     vkDestroyShaderModule(device_,vs,nullptr);
     vkDestroyShaderModule(device_,fs,nullptr);
+    if(aofs)vkDestroyShaderModule(device_,aofs,nullptr);
+    if(vfs)vkDestroyShaderModule(device_,vfs,nullptr);
+    if(csm_enabled_)create_csm_pipelines();
 }
 void Renderer::update_deferred_tiles(NorthStarRenderFrame const& frame) {
     if(!deferred_enabled_)return;
@@ -407,7 +562,7 @@ void Renderer::record_gbuffer(VkCommandBuffer cmd,
 void Renderer::record_deferred_resolve(VkCommandBuffer cmd,std::uint32_t image) {
     VkRenderingAttachmentInfo color{
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    color.imageView=image_views_.at(image);
+    color.imageView=hdr_enabled_?hdr_scene_view_:image_views_.at(image);
     color.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;
     color.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
@@ -426,6 +581,10 @@ void Renderer::record_deferred_resolve(VkCommandBuffer cmd,std::uint32_t image) 
     } push{};
     static_assert(sizeof(Push)==128);
     for(unsigned i=0;i<4;++i)push.sky[i]=sky_clear_[i];
+    // The fourth sky push component was unused by the resolve shader.
+    // Reuse it for the optional fog density without exceeding the
+    // Vulkan guaranteed minimum 128-byte push constant limit.
+    push.sky[3]=height_fog_density_;
     push.camera[0]=pick_camera_.camera_x;
     push.camera[1]=pick_camera_.camera_y;
     push.camera[2]=pick_camera_.camera_z;
@@ -450,7 +609,8 @@ void Renderer::record_deferred_resolve(VkCommandBuffer cmd,std::uint32_t image) 
     push.film[3]=film_look_.saturation;
     push.film_extra[0]=film_look_.contrast;
     push.film_extra[1]=film_look_.exposure_ev;
-    push.film_extra[2]=0.f;
+    // Reuse the reserved push-constant slot; no renderer/provider ABI change.
+    push.film_extra[2]=contact_shadows_enabled_?1.f:0.f;
     push.film_extra[3]=float((film_frame_++)%4096u);
     push.ao[0]=ssao_enabled_?1.f:0.f;
     push.ao[1]=2.f; // world-space radius; modest default for editor QA
@@ -470,6 +630,11 @@ void Renderer::record_deferred_resolve(VkCommandBuffer cmd,std::uint32_t image) 
         else if(!std::strcmp(mode,"depth"))push.mode[0]=6;
         else if(!std::strcmp(mode,"ao"))push.mode[0]=7;
         else if(!std::strcmp(mode,"coverage"))push.mode[0]=8;
+        else if(!std::strcmp(mode,"material_ao"))push.mode[0]=9;
+        else if(!std::strcmp(mode,"clearcoat"))push.mode[0]=10;
+        else if(!std::strcmp(mode,"sheen"))push.mode[0]=11;
+        else if(!std::strcmp(mode,"contact_shadow"))push.mode[0]=12;
+        else if(!std::strcmp(mode,"sun_shadow"))push.mode[0]=13;
     }
     vkCmdPushConstants(cmd,deferred_resolve_layout_,
         VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(push),&push);
@@ -486,7 +651,7 @@ void Renderer::record_deferred_forward(VkCommandBuffer cmd,std::uint32_t image) 
     if(!any_translucent)return;
     VkRenderingAttachmentInfo color{
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    color.imageView=image_views_.at(image);
+    color.imageView=hdr_enabled_?hdr_scene_view_:image_views_.at(image);
     color.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
     color.storeOp=VK_ATTACHMENT_STORE_OP_STORE;

@@ -1,7 +1,94 @@
 // Inline Window host adapter: V8-to-native engine.vehicle and PhysicsScene contacts.
 // Intentionally no vehicle force calculation in this file.
+void forget_vehicle_seat_bindings(std::uint32_t vehicle) {
+    for(auto it=script_vehicle_occupant_seats.begin();
+        it!=script_vehicle_occupant_seats.end();) {
+        if(it->second.first==vehicle)
+            it=script_vehicle_occupant_seats.erase(it);
+        else ++it;
+    }
+}
+NorthStarVehicleSeatState snapshot_vehicle_seat(
+    std::uint32_t id,std::uint32_t ordinal) const {
+    if(!script_vehicle)
+        throw std::runtime_error("Vehicle seat service unavailable");
+    auto seat=script_vehicle->seat(id,ordinal);
+    if(script_vehicle_native.count(id)) {
+        if(!preview)throw std::runtime_error("Physics vehicle scene unavailable");
+        auto const pose=preview->native_vehicle_pose(id);
+        auto const& rig=script_vehicle_rigs.at(id);
+        if(ordinal>=rig.seats.size())
+            throw std::out_of_range("Vehicle seat index out of range");
+        auto const& local=rig.seats[ordinal];
+        auto const& xyz=local.position;
+        auto const half=preview->scene().objects.at(id).size*.5f;
+        auto const local_y=xyz[1]-half;
+        seat.world_position[0]=pose.x+xyz[0]*pose.rotation[0]+
+            local_y*pose.rotation[3]+xyz[2]*pose.rotation[6];
+        seat.world_position[1]=pose.y+half+xyz[0]*pose.rotation[1]+
+            local_y*pose.rotation[4]+xyz[2]*pose.rotation[7];
+        seat.world_position[2]=pose.z+xyz[0]*pose.rotation[2]+
+            local_y*pose.rotation[5]+xyz[2]*pose.rotation[8];
+        seat.world_yaw=std::atan2(pose.rotation[6],pose.rotation[8])+local.yaw;
+    }
+    return seat;
+}
+
+// Derived visual components are scoped to one frame and never written back
+// into Scene authoring data or the VehicleService provider.
+void sync_vehicle_seat_ik(Scene& visual) const {
+    if(!script_vehicle)return;
+    struct Binding{std::uint64_t entity;std::uint32_t vehicle,seat;};
+    std::vector<Binding> bindings;
+    bindings.reserve(16);
+    for(auto const& component:visual.components) {
+        if(component.type!="engine.model.vehicle_seat_binding")continue;
+        std::istringstream values(component.payload);
+        std::uint64_t vehicle=0,seat=0;
+        std::string extra;
+        if(!(values>>vehicle>>seat) ||(values>>extra)||
+           vehicle>UINT32_MAX||seat>UINT32_MAX||bindings.size()>=64)
+            continue;
+        bindings.push_back({component.entity_id,
+            static_cast<std::uint32_t>(vehicle),
+            static_cast<std::uint32_t>(seat)});
+    }
+    for(auto const& [entity,seat]:script_vehicle_occupant_seats) {
+        auto found=std::find_if(bindings.begin(),bindings.end(),
+            [entity](auto const& b){return b.entity==entity;});
+        if(found!=bindings.end()) {
+            found->vehicle=seat.first;
+            found->seat=seat.second;
+        } else if(bindings.size()<64)
+            bindings.push_back({entity,seat.first,seat.second});
+    }
+    for(auto const& binding:bindings) {
+        visual.components.erase(
+            std::remove_if(visual.components.begin(),visual.components.end(),
+                [&](auto const& item){
+                    return item.type=="engine.model.vehicle_seat_pose" &&
+                        item.entity_id==binding.entity;
+                }),visual.components.end());
+        try {
+            auto const seat=snapshot_vehicle_seat(binding.vehicle,binding.seat);
+            if(seat.occupant!=binding.entity)continue;
+            std::ostringstream result;
+            result<<std::setprecision(9)
+                <<seat.world_position[0]<<' '<<seat.world_position[1]<<' '
+                <<seat.world_position[2]<<' '<<seat.world_yaw<<' '
+                <<seat.occupant;
+            visual.components.push_back(
+                {binding.entity,"engine.model.vehicle_seat_pose",1,result.str()});
+        } catch(std::exception const&) {
+            // A detached, invalid or unconfigured vehicle never leaks an
+            // old seat pose into the next animation frame.
+            // Existing snapshots were invalidated before the lookup.
+        }
+    }
+}
+
 void configure_vehicle_bindings(ScriptRuntime& runtime) {
-    runtime.bind("engine.vehicle","attach",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.core","attach",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=3 || !preview || !script_vehicle)
             throw std::invalid_argument("vehicle.attach(index,wheelbase,maxSpeed)");
@@ -21,6 +108,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         if(script_vehicle_native.erase(d.entity_index))
             preview->destroy_native_vehicle(d.entity_index);
         script_vehicle_targets.erase(d.entity_index);
+        forget_vehicle_seat_bindings(d.entity_index);
         try {script_vehicle->detach(d.entity_index);}catch(std::exception const&){}
         script_vehicle_rigs.erase(d.entity_index);
         script_vehicle_visual_indices.erase(d.entity_index);
@@ -29,7 +117,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         script_vehicle->attach(d);
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","configureRig",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.drive","configureRig",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=2||!script_vehicle||!script_assets)
             throw std::invalid_argument("vehicle.configureRig(index,vehicle_xml)");
@@ -49,7 +137,18 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         auto rig=parse_vehicle_rig_xml(
             std::string_view(reinterpret_cast<char const*>(bytes.data()),bytes.size()));
         auto const entity=static_cast<std::uint32_t>(id);
+        if(rig.powertrain) {
+            if(rig.contact_mode=="physics")
+                throw std::invalid_argument(
+                    "Custom Powertrain v4 requires contact_mode=flat; "
+                    "Jolt powertrain integration is a separate physics provider");
+            if(!script_vehicle->supports_powertrain())
+                throw std::runtime_error(
+                    "Selected engine.vehicle provider lacks Powertrain ABI v4");
+        }
         script_vehicle->configure(entity,rig.view());
+        if(rig.powertrain)
+            script_vehicle->configure_powertrain(entity,*rig.powertrain);
         if(rig.contact_mode=="physics") {
             if(!preview||!preview->supports_native_vehicle())
                 throw std::runtime_error(
@@ -150,7 +249,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         script_vehicle_rigs.insert_or_assign(static_cast<std::uint32_t>(id),std::move(rig));
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","controls",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.drive","controls",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=4||!script_vehicle)
             throw std::invalid_argument("vehicle.controls(index,gas,steer,brake)");
@@ -159,7 +258,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             float(script_number(a[1])),float(script_number(a[2])),float(script_number(a[3])));
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","waypoint",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.navigation","waypoint",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=5||!script_vehicle)
             throw std::invalid_argument("vehicle.waypoint(index,x,z,speed,radius)");
@@ -170,7 +269,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         script_vehicle_targets.insert_or_assign(entity,VehicleTarget{x,z,speed,radius});
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","state",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.core","state",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)
             throw std::invalid_argument("vehicle.state(index)");
@@ -192,7 +291,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"speed\":"+std::to_string(v.speed)+
             ",\"waypointActive\":"+(v.waypoint_active?"true":"false")+"}";
     });
-    runtime.bind("engine.vehicle","motion",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.core","motion",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)
             throw std::invalid_argument("vehicle.motion(index)");
@@ -225,7 +324,31 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"distance\":"+std::to_string(v.travelled_distance)+
             ",\"groundedWheels\":"+std::to_string(v.grounded_wheels)+"}";
     });
-    runtime.bind("engine.vehicle","wheelState",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.drive","powertrainState",[this](std::string_view json) {
+        auto args=script_args(json);
+        if(args.size()!=1 || !script_vehicle)
+            throw std::invalid_argument("vehicle.powertrainState(index)");
+        auto const id=static_cast<std::uint32_t>(script_index(args[0]));
+        auto const v=script_vehicle->powertrain(id);
+        return std::string("{\"gear\":")+std::to_string(v.gear)+
+            ",\"rpm\":"+std::to_string(v.engine_rpm)+
+            ",\"torqueNm\":"+std::to_string(v.delivered_torque_nm)+
+            ",\"wheelForceN\":"+std::to_string(v.wheel_force_n)+
+            ",\"shiftingSeconds\":"+std::to_string(v.shift_remaining_s)+"}";
+    });
+    runtime.bind("engine.vehicle.drive","selectGear",[this](std::string_view json) {
+        auto args=script_args(json);
+        if(args.size()!=2 || !script_vehicle)
+            throw std::invalid_argument("vehicle.selectGear(index,gear)");
+        auto const gear=script_number(args[1]);
+        if(!std::isfinite(gear) || gear!=std::floor(gear) ||
+           gear< -1. || gear>8.)
+            throw std::invalid_argument("Vehicle gear must be an integer in -1..8");
+        script_vehicle->select_gear(
+            static_cast<std::uint32_t>(script_index(args[0])),int(gear));
+        return std::string("true");
+    });
+    runtime.bind("engine.vehicle.wheels","wheelState",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=2||!script_vehicle)
             throw std::invalid_argument("vehicle.wheelState(index,wheel)");
@@ -242,7 +365,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"slipAngle\":"+std::to_string(v.slip_angle)+
             ",\"inContact\":"+(v.in_contact?"true":"false")+"}";
     });
-    runtime.bind("engine.vehicle","wheelPose",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.wheels","wheelPose",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=2||!script_vehicle)
             throw std::invalid_argument("vehicle.wheelPose(index,wheel)");
@@ -285,39 +408,25 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"compression\":"+std::to_string(wheel.compression)+
             ",\"contact\":"+(wheel.in_contact?"true":"false")+"}";
     });
-    runtime.bind("engine.vehicle","wheelCount",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.wheels","wheelCount",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)throw std::invalid_argument("vehicle.wheelCount(index)");
         return std::to_string(script_vehicle->wheel_count(
             static_cast<std::uint32_t>(script_index(a[0]))));
     });
-    runtime.bind("engine.vehicle","seatCount",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.seats","seatCount",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)throw std::invalid_argument("vehicle.seatCount(index)");
         return std::to_string(script_vehicle->seat_count(
             static_cast<std::uint32_t>(script_index(a[0]))));
     });
-    runtime.bind("engine.vehicle","seatState",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.seats","seatState",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=2||!script_vehicle)
             throw std::invalid_argument("vehicle.seatState(index,seat)");
         auto const id=static_cast<std::uint32_t>(script_index(a[0]));
         auto const n=static_cast<std::uint32_t>(script_index(a[1]));
-        auto v=script_vehicle->seat(id,n);
-        if(script_vehicle_native.count(id)) {
-            auto const pose=preview->native_vehicle_pose(id);
-            auto const& local=script_vehicle_rigs.at(id).seats.at(n);
-            auto const& xyz=local.position;
-            auto const half=preview->scene().objects.at(id).size*.5f;
-            float const local_y=xyz[1]-half;
-            v.world_position[0]=pose.x+xyz[0]*pose.rotation[0]+
-                local_y*pose.rotation[3]+xyz[2]*pose.rotation[6];
-            v.world_position[1]=pose.y+half+xyz[0]*pose.rotation[1]+
-                local_y*pose.rotation[4]+xyz[2]*pose.rotation[7];
-            v.world_position[2]=pose.z+xyz[0]*pose.rotation[2]+
-                local_y*pose.rotation[5]+xyz[2]*pose.rotation[8];
-            v.world_yaw=std::atan2(pose.rotation[6],pose.rotation[8])+local.yaw;
-        }
+        auto v=snapshot_vehicle_seat(id,n);
         return std::string("{\"index\":")+std::to_string(v.index)+
             ",\"role\":"+std::to_string(v.role)+
             ",\"occupant\":"+script_json_quote(std::to_string(v.occupant))+
@@ -326,7 +435,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"z\":"+std::to_string(v.world_position[2])+
             ",\"yaw\":"+std::to_string(v.world_yaw)+"}";
     });
-    runtime.bind("engine.vehicle","occupy",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.seats","occupy",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=3||!script_vehicle)
             throw std::invalid_argument("vehicle.occupy(index,seat,entityStableId)");
@@ -335,26 +444,37 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             throw std::invalid_argument("Seat occupant is not a live scene entity");
         script_vehicle->occupy(static_cast<std::uint32_t>(script_index(a[0])),
             static_cast<std::uint32_t>(script_index(a[1])),occupant);
+        script_vehicle_occupant_seats[occupant]={
+            static_cast<std::uint32_t>(script_index(a[0])),
+            static_cast<std::uint32_t>(script_index(a[1]))};
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","release",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.seats","release",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=3||!script_vehicle)
             throw std::invalid_argument("vehicle.release(index,seat,entityStableId)");
         script_vehicle->release(static_cast<std::uint32_t>(script_index(a[0])),
             static_cast<std::uint32_t>(script_index(a[1])),
             static_cast<std::uint64_t>(script_index(a[2])));
+        auto const entity=static_cast<std::uint64_t>(script_index(a[2]));
+        auto const binding=script_vehicle_occupant_seats.find(entity);
+        if(binding!=script_vehicle_occupant_seats.end() &&
+           binding->second.first==script_index(a[0]) &&
+           binding->second.second==script_index(a[1]))
+            script_vehicle_occupant_seats.erase(binding);
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","setDoor",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.doors","setDoor",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=3||!script_vehicle)
             throw std::invalid_argument("vehicle.setDoor(index,door,open0or1)");
         auto const id=static_cast<std::uint32_t>(script_index(a[0]));
         auto const door=static_cast<std::uint32_t>(script_index(a[1]));
-        int const request=static_cast<int>(script_number(a[2]));
-        if(request!=0&&request!=1)
-            throw std::invalid_argument("Vehicle door open must be 0 or 1");
+        // V8 forwards JS booleans as true/false, not numeric literals.
+        // Preserve older 0/1 callers without calling stod() on booleans.
+        if(a[2]!="true" && a[2]!="false" && a[2]!="0" && a[2]!="1")
+            throw std::invalid_argument("Vehicle door open must be boolean or 0/1");
+        int const request=(a[2]=="true" || a[2]=="1")?1:0;
         if(request!=0 && script_vehicle_native.count(id)) {
             auto const pose=preview->native_vehicle_pose(id);
             float const linear=std::hypot(pose.linear_velocity[0],
@@ -365,14 +485,14 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         script_vehicle->set_door(id,door,request!=0);
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","doorCount",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.doors","doorCount",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)
             throw std::invalid_argument("vehicle.doorCount(index)");
         return std::to_string(script_vehicle->door_count(
             static_cast<std::uint32_t>(script_index(a[0]))));
     });
-    runtime.bind("engine.vehicle","doorState",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.doors","doorState",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=2||!script_vehicle)
             throw std::invalid_argument("vehicle.doorState(index,door)");
@@ -384,7 +504,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
             ",\"target\":"+std::to_string(state.target_fraction)+
             ",\"angle\":"+std::to_string(state.angle)+"}";
     });
-    runtime.bind("engine.vehicle","detach",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.core","detach",[this](std::string_view json) {
         auto a=script_args(json);
         if(a.size()!=1||!script_vehicle)
             throw std::invalid_argument("vehicle.detach(index)");
@@ -392,6 +512,7 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         if(script_vehicle_native.erase(id))
             preview->destroy_native_vehicle(id);
         script_vehicle->detach(id);
+        forget_vehicle_seat_bindings(id);
         script_vehicle_rigs.erase(id);
         script_vehicle_visual_indices.erase(id);
         script_vehicle_door_visual_indices.erase(id);
@@ -399,12 +520,12 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
         script_vehicle_targets.erase(id);
         return std::string("true");
     });
-    runtime.bind("engine.vehicle","provider",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.provider","provider",[this](std::string_view json) {
         if(!script_args(json).empty()||!script_vehicle)
             throw std::invalid_argument("vehicle.provider()");
         return script_json_quote(script_vehicle->provider_name());
     });
-    runtime.bind("engine.vehicle","count",[this](std::string_view json) {
+    runtime.bind("engine.vehicle.core","count",[this](std::string_view json) {
         if(!script_args(json).empty()||!script_vehicle)
             throw std::invalid_argument("vehicle.count()");
         return std::to_string(script_vehicle->count());
@@ -415,17 +536,31 @@ void configure_vehicle_bindings(ScriptRuntime& runtime) {
 void sample_vehicle_contacts(NorthStarVehicleState const& state) {
     auto const id=state.entity_index;
     auto it=script_vehicle_rigs.find(id);
-    if(it==script_vehicle_rigs.end()||it->second.contact_mode!="physics"||
+    if(it==script_vehicle_rigs.end()||
+       (it->second.contact_mode!="physics"&&it->second.contact_mode!="heightfield")||
        !script_vehicle||!preview)return;
     auto const& rig=it->second;
+    // Jolt-native wheels are handled by their VehicleConstraint, not here.
+    float const sn=std::sin(state.heading),cs=std::cos(state.heading);
     for(std::size_t n=0;n<rig.wheels.size();++n) {
         auto const& w=rig.wheels[n];
-        float const sn=std::sin(state.heading),cs=std::cos(state.heading);
         float const wx=state.position[0]+w.mount[0]*cs+w.mount[2]*sn;
         float const wz=state.position[2]+w.mount[2]*cs-w.mount[0]*sn;
         float const sy=state.position[1]+w.mount[1]+0.10f;
         float const depth=w.radius+w.rest_length+w.travel+0.20f;
         float const radius=std::max(0.12f,w.radius*.7f);
+        if(rig.contact_mode=="heightfield" && terrain_contact_provider) {
+            // Exactly the seed/height function used by both rendered
+            // TerrainChunks and their Jolt triangle collision meshes.
+            const float ground=static_cast<float>(
+                terrain_contact_provider->height(wx,wz));
+            NorthStarVehicleGroundContact contact{
+                sizeof(NorthStarVehicleGroundContact),
+                static_cast<std::uint32_t>(n),1u,
+                ground,rig.surface_friction};
+            script_vehicle->set_contact(id,contact);
+            continue;
+        }
         auto hit=preview->sweep_sphere({wx,sy,wz},
             {wx,sy-depth,wz},radius,id);
         bool const found=hit&&hit->normal.y>.45f;
@@ -444,7 +579,8 @@ void resolve_vehicle_obstacles(NorthStarVehicleState const& before,
     NorthStarVehicleState& after) {
     auto it=script_vehicle_rigs.find(after.entity_index);
     if(!preview||!script_vehicle||it==script_vehicle_rigs.end()||
-       it->second.contact_mode!="physics")return;
+       it->second.contact_mode!="physics"&&
+        it->second.contact_mode!="heightfield")return;
     auto const id=after.entity_index;
     float const dx=after.position[0]-before.position[0];
     float const dz=after.position[2]-before.position[2];
@@ -479,11 +615,22 @@ void resolve_vehicle_obstacles(NorthStarVehicleState const& before,
 void advance_vehicles(float dt) {
     if(!preview||!script_vehicle||script_paused||script_suspended||
        script_vehicle->count()==0||dt<=0.f)return;
-    auto const before=script_vehicle->states();
-    for(auto const& state:before)sample_vehicle_contacts(state);
+    // Never duplicate native Jolt wheel sweeps. Retain full sensor cadence
+    // and collision behavior for kinematic/fallback vehicles.
+    bool const has_fallback=script_vehicle_native.size()<script_vehicle->count();
+    auto& before=vehicle_before_scratch;
+    if(has_fallback) {
+        script_vehicle->states_into(before);
+        for(auto const& state:before)
+            if(!script_vehicle_native.count(state.entity_index))
+                sample_vehicle_contacts(state);
+    } else before.clear();
     script_vehicle->step(dt);
-    auto after=script_vehicle->states();
+    auto& after=vehicle_after_scratch;
+    script_vehicle->states_into(after);
+    std::size_t ordinal=0;
     for(auto& state:after) {
+        auto const previous_ordinal=ordinal++;
         auto const index=state.entity_index;
         if(index>=preview->scene().objects.size())continue;
         auto const& object=preview->scene().objects[index];
@@ -543,8 +690,13 @@ void advance_vehicles(float dt) {
             }
             continue; // Jolt exclusively owns the 6DOF rigid-body pose.
         }
-        auto previous=std::find_if(before.begin(),before.end(),
-            [index](auto const& b){return b.entity_index==index;});
+        // Fast path for native sorted ordinals, fallback for a replaceable
+        // external provider that changes entity enumeration order.
+        auto previous=previous_ordinal<before.size() &&
+                      before[previous_ordinal].entity_index==index?
+                      before.begin()+previous_ordinal:std::find_if(
+                          before.begin(),before.end(),
+                          [index](auto const& b){return b.entity_index==index;});
         if(previous!=before.end())resolve_vehicle_obstacles(*previous,state);
         Vector3 position{state.position[0],state.position[1],state.position[2]};
         preview->move_static(index,position);
@@ -558,7 +710,9 @@ void advance_vehicles(float dt) {
 void apply_vehicle_visuals(Scene& scene) {
     if(!script_vehicle||script_vehicle->count()==0)return;
     constexpr float to_degrees=57.29577951308232f;
-    for(auto const& state:script_vehicle->states()) {
+    auto& draw_states=vehicle_draw_states_scratch;
+    script_vehicle->states_into(draw_states);
+    for(auto const& state:draw_states) {
         auto const index=state.entity_index;
         if(index>=scene.objects.size())continue;
         auto& chassis=scene.objects[index];
@@ -575,6 +729,8 @@ void apply_vehicle_visuals(Scene& scene) {
         chassis.node.rotation.x=body_pitch*to_degrees;
         chassis.node.rotation.y=heading*to_degrees;
         chassis.node.rotation.z=body_roll*to_degrees;
+        float const sn=std::sin(heading),cs=std::cos(heading);
+        float const half=physical?preview->scene().objects[index].size*.5f:0.f;
         // Only the authored visible scene nodes move here. Collision and
         // dynamics are exclusively owned by Jolt (or the fallback provider).
         auto const visual=script_vehicle_visual_indices.find(index);
@@ -595,7 +751,6 @@ void apply_vehicle_visuals(Scene& scene) {
                 wheel_spec.travel*.5f-wheel.compression;
             float const ly=wheel_spec.mount[1]-suspension;
             if(physical) {
-                auto const half=preview->scene().objects.at(index).size*.5f;
                 target.position={
                     pose.x+lx*pose.rotation[0]+ly*pose.rotation[3]+
                         lz*pose.rotation[6],
@@ -604,7 +759,6 @@ void apply_vehicle_visuals(Scene& scene) {
                     pose.z+lx*pose.rotation[2]+ly*pose.rotation[5]+
                         lz*pose.rotation[8]};
             } else {
-                float const sn=std::sin(heading),cs=std::cos(heading);
                 target.position={state.position[0]+lx*cs+lz*sn,
                     state.position[1]+ly,state.position[2]+lz*cs-lx*sn};
             }
@@ -624,13 +778,11 @@ void apply_vehicle_visuals(Scene& scene) {
                 auto& target=scene.objects[i];
                 float const x=d.hinge[0],y=d.hinge[1],z=d.hinge[2];
                 if(physical) {
-                    float const half=preview->scene().objects.at(index).size*.5f;
                     target.position={
                         pose.x+x*pose.rotation[0]+y*pose.rotation[3]+z*pose.rotation[6],
                         pose.y+half+x*pose.rotation[1]+y*pose.rotation[4]+z*pose.rotation[7],
                         pose.z+x*pose.rotation[2]+y*pose.rotation[5]+z*pose.rotation[8]};
                 } else {
-                    float const sn=std::sin(heading),cs=std::cos(heading);
                     target.position={state.position[0]+x*cs+z*sn,
                         state.position[1]+y,state.position[2]+z*cs-x*sn};
                 }
@@ -643,6 +795,7 @@ void apply_vehicle_visuals(Scene& scene) {
         // spawning extra Jolt rigid bodies or per-frame asset lookups.
         auto const followers=script_vehicle_visual_followers.find(index);
         if(followers!=script_vehicle_visual_followers.end()) {
+            vehicle_parent_angles_scratch.clear();
             constexpr float to_radians=0.017453292519943295f;
             for(auto const& ref:followers->second) {
                 if(ref.child_index>=scene.objects.size() ||
@@ -651,12 +804,23 @@ void apply_vehicle_visuals(Scene& scene) {
                 auto& child=scene.objects[ref.child_index];
                 Vector3 offset=ref.local_offset;
                 if(offset.x!=0.f || offset.y!=0.f || offset.z!=0.f) {
-                    const float ax=base.node.rotation.x*to_radians;
-                    const float ay=base.node.rotation.y*to_radians;
-                    const float az=base.node.rotation.z*to_radians;
-                    const float sx=std::sin(ax),cx=std::cos(ax);
-                    const float sy=std::sin(ay),cy=std::cos(ay);
-                    const float sz=std::sin(az),cz=std::cos(az);
+                    auto& used=vehicle_parent_angles_scratch;
+                    auto cached=std::find_if(used.begin(),used.end(),
+                        [&](auto const& entry){return entry.first==ref.parent_index;});
+                    if(cached==used.end()) {
+                        const float ax=base.node.rotation.x*to_radians;
+                        const float ay=base.node.rotation.y*to_radians;
+                        const float az=base.node.rotation.z*to_radians;
+                        used.push_back({ref.parent_index,{
+                            std::sin(ax),std::cos(ax),
+                            std::sin(ay),std::cos(ay),
+                            std::sin(az),std::cos(az)}});
+                        cached=used.end()-1;
+                    }
+                    auto const& angles=cached->second;
+                    const float sx=angles[0],cx=angles[1];
+                    const float sy=angles[2],cy=angles[3];
+                    const float sz=angles[4],cz=angles[5];
                     const float x0=offset.x;
                     const float y0=offset.y*cx-offset.z*sx;
                     const float z0=offset.y*sx+offset.z*cx;

@@ -70,7 +70,7 @@ int main(int argc,char** argv) {
         player::Mesh mesh;
         mesh.offset={0.f,0.f,0.f};
         mesh.hide_in_first_person=false;
-        mesh.prefab="prefabs/abby.nprefab";
+        mesh.prefab="prefabs/characters/abby.nprefab";
         player::set_mesh(scene,visual.node.id,mesh);
         validate_scene(scene);
         save_scene(scene,argv[2]);
@@ -115,6 +115,74 @@ int main(int argc,char** argv) {
     check(!controller.possessed(),"Controller failed Unpossess");
     controller.possess(scene,created.pawn);
     check(controller.possessed(),"Controller failed re-possess");
+    check(controller.view_target()==created.pawn &&
+          !controller.has_view_target_override(),
+          "Camera must follow controlled Pawn by default");
+    controller.set_view_target(scene,created.camera);
+    check(controller.view_target()==created.camera &&
+          controller.view_target_index(scene)==cameraIndex &&
+          controller.controlled_entity()==created.pawn,
+          "Camera override must not change Pawn possession");
+    controller.unpossess();
+    check(!controller.possessed() && controller.view_target()==created.camera,
+          "Spectator camera must survive Pawn unpossession");
+    controller.possess(scene,created.pawn);
+    controller.reset_view_target();
+    check(controller.view_target()==created.pawn,
+          "Reset View Target must restore Pawn follow");
+    bool rejectedViewTarget=false;
+    try {controller.set_view_target(scene,UINT64_MAX);}
+    catch(std::invalid_argument const&) {rejectedViewTarget=true;}
+    check(rejectedViewTarget && controller.view_target()==created.pawn,
+          "Invalid View Target must not corrupt controller state");
+
+    auto choices=scene;
+    player::assign(choices,created.controller,player::controller_type,
+                   player::serialize_controller(created.pawn,false));
+    check(!controller.auto_possess(choices) &&
+          !scene_pawn::local_index(choices),
+          "Explicit controller opt-out was overridden by a legacy Pawn flag");
+    auto alternate=player::create(choices,"Alternate",{2,0,0},true);
+    check(controller.auto_possess(choices) &&
+          controller.controlled_entity()==alternate.pawn &&
+          scene_pawn::is_local(choices,alternate.pawn),
+          "Explicit controller and scene startup selection disagree");
+    scene_pawn::set_startup_pawn(choices,created.pawn,true);
+    check(controller.auto_possess(choices) &&
+          controller.controlled_entity()==created.pawn &&
+          !scene_pawn::is_local(choices,alternate.pawn),
+          "Switching startup Pawn must deactivate the previous controller");
+
+    choices.components.erase(std::remove_if(choices.components.begin(),
+        choices.components.end(),[](SceneComponentBlob const& record) {
+            return record.type==player::controller_type;
+        }),choices.components.end());
+    check(controller.auto_possess(choices) &&
+          controller.controlled_entity()==created.pawn,
+          "Controller-less scenes must still use the legacy startup Pawn flag");
+
+    // A surviving SceneObject is not sufficient for valid possession: the
+    // Pawn component may have been removed by an editor undo or hot reload.
+    controller.possess(scene,created.pawn);
+    controller.set_view_target(scene,created.camera);
+    auto removedPawn=scene;
+    removedPawn.components.erase(std::remove_if(
+        removedPawn.components.begin(),removedPawn.components.end(),
+        [id=created.pawn](SceneComponentBlob const& c) {
+            return c.entity_id==id && c.type==player_character::pawn_type;
+        }),removedPawn.components.end());
+    controller.reconcile(removedPawn);
+    check(!controller.possessed() && controller.view_target()==created.camera,
+          "Removing Pawn component must revoke possession but retain camera");
+    auto removedCamera=removedPawn;
+    removedCamera.objects.erase(std::remove_if(
+        removedCamera.objects.begin(),removedCamera.objects.end(),
+        [id=created.camera](SceneObject const& o){return o.node.id==id;}),
+        removedCamera.objects.end());
+    controller.reconcile(removedCamera);
+    check(controller.view_target()==0 &&
+          !controller.has_view_target_override(),
+          "Removed camera entity must clear stale view target");
 
     auto tune=gameplay::motor_settings(scene,created.pawn);
     check(tune.run_speed>tune.walk_speed &&
@@ -186,6 +254,23 @@ int main(int argc,char** argv) {
     animator.advance(.1f,8.f,false,false);
     check(animator.sample().state==player::AnimationState::Fall,
           "Animation Controller falling state missing");
+    auto sparse=animation;
+    sparse.jump.clear();
+    sparse.fall.clear();
+    player_animation::Controller sparseAnimator(sparse);
+    sparseAnimator.advance(.2f,2.f,true,false);
+    auto const lastPlayable=sparseAnimator.sample().clip;
+    sparseAnimator.advance(.1f,3.f,false,true);
+    check(!lastPlayable.empty() &&
+          sparseAnimator.sample().clip==lastPlayable &&
+          sparseAnimator.sample().state==player::AnimationState::Walk &&
+          sparseAnimator.sample().horizontal_speed==3.f,
+          "Unbound Jump must retain last playable animation and update telemetry");
+    auto startupSparse=animation;
+    startupSparse.idle.clear();
+    player_animation::Controller startupAnimator(startupSparse);
+    check(!startupAnimator.sample().clip.empty(),
+          "Missing Idle must select a valid startup clip, not bind pose");
 
     Scene sourceVisual;sourceVisual.version=3;sourceVisual.name="Visual";
     SceneObject rootVisual;

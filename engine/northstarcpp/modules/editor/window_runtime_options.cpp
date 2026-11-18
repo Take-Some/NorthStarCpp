@@ -1,3 +1,4 @@
+#include <northstarcpp/asset_roots.hpp>
 #include "window_runtime_options.hpp"
 #include <shellapi.h>
 #include <array>
@@ -118,26 +119,8 @@ fs::path discover_shared_assets(Options const& config, fs::path const& project_r
             throw std::runtime_error("Configured sharedAssets directory is missing");
         return fs::absolute(config.shared_asset_root);
     }
-    auto find_from=[](fs::path start) -> fs::path {
-        for (auto parent=std::move(start); !parent.empty();) {
-            auto const candidate=parent/"engine/northstarcpp/resources/sharedAssets";
-            if (fs::is_directory(candidate)) return candidate;
-            auto const next=parent.parent_path();
-            if (next==parent) break;
-            parent=next;
-        }
-        return {};
-    };
-    if (!project_root.empty()) {
-        auto project=find_from(fs::absolute(project_root));
-        if (!project.empty()) return project;
-    }
-    std::array<wchar_t,32768> exe{};
-    auto const length=GetModuleFileNameW(nullptr,exe.data(),
-        static_cast<DWORD>(exe.size()));
-    if (length && length<exe.size())
-        return find_from(fs::path(exe.data()).parent_path());
-    return {};
+    return asset_paths::locate_shared_root(project_root,
+        asset_paths::executable_dir());
 }
 
 } // namespace northstarcpp::runtime_options

@@ -4,6 +4,8 @@
 #include "renderer_private.hpp"
 #include "module_provider.hpp"
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_capture_api.h>
+#include <northstarcpp/render_sky_api.h>
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_materials_api.h>
@@ -48,6 +50,33 @@ int set_materials(void* instance,
         static_cast<Renderer*>(instance)->set_material_batches(batches,count);
     });
 }
+int capture_request(void* instance) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("Null Vulkan capture renderer");
+        static_cast<Renderer*>(instance)->request_capture();
+    });
+}
+int capture_read(void* instance,std::uint8_t* pixels,std::uint32_t capacity,
+    std::uint32_t* width,std::uint32_t* height) {
+    bool ready=false;
+    const int valid=guarded([&] {
+        if(!instance)throw std::invalid_argument("Null Vulkan capture renderer");
+        ready=static_cast<Renderer*>(instance)->read_capture(
+            pixels,capacity,width,height);
+    });
+    return valid&&ready;
+}
+int sky_uniforms(void* instance,const NorthStarGpuSkyUniforms* source) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("Null Vulkan GPU Sky renderer");
+        static_cast<Renderer*>(instance)->set_gpu_sky_uniforms(source);
+    });
+}
+const NorthStarRenderSkyApi sky_gpu_api{
+    NORTHSTARCPP_RENDER_SKY_ABI,sizeof(NorthStarRenderSkyApi),sky_uniforms};
+const NorthStarRenderCaptureApi capture_api{
+    NORTHSTARCPP_RENDER_CAPTURE_ABI,sizeof(NorthStarRenderCaptureApi),
+    capture_request,capture_read};
 const NorthStarRenderMaterialsApi materials_api{
     NORTHSTARCPP_RENDER_MATERIALS_ABI,set_materials};
 int set_materials_v2(void* instance,
@@ -68,6 +97,14 @@ int set_skinned_materials(void* instance,
 }
 const NorthStarRenderSkinnedMaterialsApi skinning_api{
     NORTHSTARCPP_RENDER_SKINNED_MATERIALS_ABI,set_skinned_materials};
+int set_temporal_instances(void* instance,const NorthStarRenderTemporalInstance* batches,std::uint32_t count) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("Vulkan temporal renderer missing");
+        static_cast<Renderer*>(instance)->set_temporal_instances(batches,count);
+    });
+}
+const NorthStarRenderTemporalInstancesApi temporal_instances_api{
+    NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_ABI,set_temporal_instances};
 int set_surface_texture(void* instance,const NorthStarSurfaceTexture* source) {
     return guarded([&]{
         if(!instance||!source)
@@ -285,6 +322,11 @@ const NorthStarModule skinning_module{
     NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
     NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI,
     sizeof(skinning_api),&skinning_api,last_error};
+const NorthStarModule temporal_instances_module{
+    sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+    NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+    NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_MODULE_ABI,
+    sizeof(temporal_instances_api),&temporal_instances_api,last_error};
 const NorthStarModule material_v2_module{
     sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
     NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
@@ -352,6 +394,22 @@ northstar_module_query(std::uint32_t host,const char* capability,std::uint32_t v
             sizeof(shader_reload_api),&shader_reload_api,last_error};
         return match(extension,host,capability,version);
     }
+    if(version==NORTHSTARCPP_RENDER_SKY_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_SKY_MODULE_ABI,
+            sizeof(sky_gpu_api),&sky_gpu_api,last_error};
+        return match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_CAPTURE_MODULE_ABI) {
+        static const NorthStarModule ext{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"vulkan",provider_version,
+            NORTHSTARCPP_RENDER_CAPTURE_MODULE_ABI,
+            sizeof(capture_api),&capture_api,last_error};
+        return match(ext,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI) {
         static const NorthStarModule ext{
             sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
@@ -402,6 +460,8 @@ northstar_module_query(std::uint32_t host,const char* capability,std::uint32_t v
         return match(light_module,host,capability,version);
     if(version==NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI)
         return match(surfaces_module,host,capability,version);
+    if(version==NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_MODULE_ABI)
+        return match(temporal_instances_module,host,capability,version);
     if(version==NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI)
         return match(skinning_module,host,capability,version);
     if(version==NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI)

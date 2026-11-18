@@ -67,13 +67,26 @@ void FpsArena::advance(float dt, Scene const& scene)
 {
     if (!std::isfinite(dt) || dt < 0.f || dt > 0.25f)
         throw std::runtime_error("Invalid FPS simulation delta");
-    if (scene.objects.size() != hit_.size())
+    if (scene.objects.size() < hit_.size())
         throw std::runtime_error("FPS scene topology changed");
     if (dt == 0.f) return;
     elapsed_ += dt;
     shot_timer_ = std::max(0.f, shot_timer_ - dt);
     damage_timer_ = std::max(0.f, damage_timer_ - dt);
-    recoil_ = std::max(0.f, recoil_ - dt * 4.5f);
+    // Recover to the true sight direction using critically damped springs.
+    // This is frame-rate independent even when the frame delta is clamped.
+    auto spring=[dt](float& displacement,float& speed,float omega) {
+        float const decay=std::exp(-omega*dt);
+        float const c=speed+omega*displacement;
+        speed=(speed-omega*c*dt)*decay;
+        displacement=(displacement+c*dt)*decay;
+        if(std::abs(displacement)<.00002f&&std::abs(speed)<.0002f)
+            displacement=speed=0.f;
+    };
+    spring(recoil_pitch_,recoil_pitch_speed_,22.f);
+    spring(recoil_yaw_,recoil_yaw_speed_,25.f);
+    recoil_*=std::exp(-13.f*dt);
+    if(recoil_<.0001f)recoil_=0.f;
     if (reload_timer_ > 0.f) {
         reload_timer_ = std::max(0.f, reload_timer_ - dt);
         if (reload_timer_ == 0.f) {
@@ -107,12 +120,13 @@ Vector3 FpsArena::moving_position(std::size_t index) const
 }
 Vector3 FpsArena::direction() const
 {
-    return {std::sin(yaw_) * std::cos(pitch_), std::sin(pitch_),
-            std::cos(yaw_) * std::cos(pitch_)};
+    auto const sight_yaw=yaw(),sight_pitch=pitch();
+    return {std::sin(sight_yaw) * std::cos(sight_pitch), std::sin(sight_pitch),
+            std::cos(sight_yaw) * std::cos(sight_pitch)};
 }
 Vector3 FpsArena::eye(Scene const& scene) const
 {
-    if (scene.objects.size() != hit_.size())
+    if (scene.objects.size() < hit_.size())
         throw std::runtime_error("FPS scene topology changed");
     auto const& p = scene.objects[player_].position;
     return {p.x, p.y + 1.45f, p.z};
@@ -129,36 +143,51 @@ Vector3 FpsArena::movement(float strafe, float forward) const
     return {(x * std::cos(yaw_) + z * std::sin(yaw_)) * scale, 0.f,
             (z * std::cos(yaw_) - x * std::sin(yaw_)) * scale};
 }
-bool FpsArena::fire(Scene const& scene)
+bool FpsArena::fire(Scene const& scene,std::optional<Vector3> muzzle)
 {
     if (!alive() || shot_timer_ > 0.f || reloading() || ammunition_ <= 0)
         return false;
-    if (scene.objects.size() != hit_.size())
+    if (scene.objects.size() < hit_.size())
         throw std::runtime_error("FPS scene topology changed");
+    // Snapshot before recoil. The actual muzzle is optional for the
+    // target-only legacy arena, but required for attached weapon VFX.
+    auto const ray=direction();
+    auto const origin=eye(scene);
+    auto const world_trace=[&](Vector3 start,Vector3 direction,
+                              float maximum)->std::optional<ballistics::TraceHit> {
+        std::optional<ballistics::TraceHit> closest;
+        for(std::size_t i=0;i<scene.objects.size();++i) {
+            if(i==player_ || scene.objects[i].node.layer=="Weapon debris")continue;
+            auto const& object=scene.objects[i];
+            const float half=object.size*.5f;
+            math::aabb box;
+            box.min={object.position.x-half,object.position.y,
+                     object.position.z-half};
+            box.max={object.position.x+half,object.position.y+object.size,
+                     object.position.z+half};
+            const auto hit=collision::ray_box_entry(box,start,direction,maximum);
+            if(hit && (!closest || *hit<closest->distance))
+                closest=ballistics::TraceHit{i,*hit};
+        }
+        return closest;
+    };
+    last_shot_=ballistics::solve(origin,ray,muzzle.value_or(origin),
+        tuning_.weapon_range,world_trace,muzzle.has_value());
+    if(!last_shot_)return false;
     --ammunition_;
     ++shots_;
     shot_timer_ = tuning_.fire_interval;
-    recoil_ = std::min(recoil_ + 0.75f, 1.6f);
-    pitch_ = std::clamp(pitch_ + 0.035f, -max_pitch, max_pitch);
-    // Occluders and untouched targets share the same nearest-ray test.
-    auto const ray = direction();
-    auto const origin = eye(scene);
-    std::size_t closest = scene.objects.size();
-    float distance = tuning_.weapon_range;
-    for (std::size_t i = 0; i < scene.objects.size(); ++i) {
-        if (i == player_) continue;
-        auto const& o = scene.objects[i];
-        float const half = o.size * 0.5f;
-        math::aabb bounds;
-        bounds.min = {o.position.x - half, o.position.y, o.position.z - half};
-        bounds.max = {o.position.x + half, o.position.y + o.size, o.position.z + half};
-        auto hit = collision::ray_box_entry(bounds, origin, ray, distance);
-        if (hit && *hit < distance) {
-            distance = *hit;
-            closest = i;
-        }
-    }
-    if (closest == scene.objects.size() || !target(scene.objects[closest]) || hit_[closest])
+    recoil_=std::min(recoil_+.96f,1.6f);
+    recoil_pitch_=std::min(recoil_pitch_+.031f,.13f);
+    recoil_pitch_speed_=std::min(recoil_pitch_speed_+.24f,1.0f);
+    recoil_yaw_+=((shots_%3)==0?-1.f:1.f)*.0035f;
+    recoil_yaw_speed_+=((shots_%2)==0?-1.f:1.f)*.038f;
+    // The final hit is authoritative from the real muzzle ray, never
+    // from the eye/sight probe. Both ray origins are retained for diagnostics.
+    auto const closest=last_shot_->hit?
+        last_shot_->hit->index:scene.objects.size();
+    if(last_shot_->blocked || closest>=hit_.size() ||
+       !target(scene.objects[closest]) || hit_[closest])
         return false;
     hit_[closest] = 1;
     ++hits_;
@@ -173,19 +202,22 @@ bool FpsArena::begin_reload()
 }
 void FpsArena::reset()
 {
+    last_shot_.reset();
     std::fill(hit_.begin(),hit_.end(),0);
     hits_ = shots_ = 0;
     health_ = 100;
     ammunition_ = tuning_.magazine;
     reserve_ = tuning_.reserve;
     shot_timer_ = reload_timer_ = recoil_ = damage_timer_ = elapsed_ = 0.f;
+    recoil_pitch_=recoil_pitch_speed_=0.f;
+    recoil_yaw_=recoil_yaw_speed_=0.f;
     yaw_ = pitch_ = 0.f;
 }
 void FpsArena::tint(Scene& scene) const
 {
-    if (scene.objects.size() != hit_.size())
+    if (scene.objects.size() < hit_.size())
         throw std::runtime_error("FPS scene topology changed");
-    for (std::size_t i = 0; i < scene.objects.size(); ++i)
+    for (std::size_t i = 0; i < hit_.size(); ++i)
         if (hit_[i]) scene.objects[i].color = tuning_.hit_color;
 }
 } // namespace northstarcpp

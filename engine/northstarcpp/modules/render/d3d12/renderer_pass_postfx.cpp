@@ -5,7 +5,14 @@ void RendererState::record_translucency_pass(FramePassContext& context) {
         // Transparent materials must be composited against the opaque
         // scene before bloom/FXAA. They continue to use their forward PSOs
         // with depth testing (but no G-buffer writes).
-        draw_translucent_materials();
+        if(context.has_deferred_geometry) {
+            auto readonly_dsv=dsvs->GetCPUDescriptorHandleForHeapStart();
+            readonly_dsv.ptr+=device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+            commands->OMSetRenderTargets(1,&context.scene_rtv,FALSE,
+                                         &readonly_dsv);
+        }
+        draw_translucent_materials(context.focus,context.camera_forward);
         if(timestamp_heap)commands->EndQuery(timestamp_heap.Get(),
             D3D12_QUERY_TYPE_TIMESTAMP,2);
         // Scene post-process (FXAA) runs after all 3D passes and before the

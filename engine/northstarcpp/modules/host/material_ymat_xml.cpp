@@ -1,10 +1,9 @@
 // Canonical YMAT serialization: NEF8 kind 4, XML material library.
-// Legacy kind 30 is decoded only for import/migration, never emitted.
+// JSON kind 30 has no runtime, authoring or migration compatibility path.
 #include <northstarcpp/material_ymat_authoring.hpp>
 #include <northstarcpp/shared_assets.hpp>
 #include "asset_list_file.hpp"
 #include "material_graph_xml.hpp"
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <blake3.h>
 #include <zlib.h>
@@ -26,127 +25,11 @@ void write16(std::vector<std::uint8_t>& data,std::size_t pos,std::uint16_t n) {
     data.at(pos)=std::uint8_t(n);
     data.at(pos+1)=std::uint8_t(n>>8);
 }
-std::string render_json(Tree const& tree) {
-    std::ostringstream o;boost::property_tree::write_json(o,tree,false);
-    return o.str();
-}
 std::string render_xml(Tree const& tree) {
     std::ostringstream o;
     boost::property_tree::write_xml(o,tree,
         boost::property_tree::xml_writer_make_settings<char>(' ',2));
     return o.str();
-}
-void appendParam(Tree& dst,MaterialParameter const& source) {
-    Tree item;
-    item.put("<xmlattr>.name",source.name);
-    item.put("<xmlattr>.type",source.type);
-    std::ostringstream nums;
-    nums.precision(9);
-    for(std::size_t i=0;i<source.values.size();++i) {
-        if(i)nums<<',';
-        nums<<source.values[i];
-    }
-    item.put("<xmlattr>.value",nums.str());
-    dst.add_child("Param",item);
-}
-Tree material_xml(Material const& source) {
-    Tree m;
-    m.put("<xmlattr>.name",source.name);
-    m.put("<xmlattr>.shader",source.shader);
-    m.put("Surface.<xmlattr>.blend",source.blend);
-    m.put("Surface.<xmlattr>.two_sided",source.two_sided?"True":"False");
-    m.put("Surface.<xmlattr>.alpha_cutoff",source.alpha_cutoff);
-    Tree textures;
-    for(auto const& texture:source.textures) {
-        Tree t;t.put("<xmlattr>.slot",texture.slot);
-        t.put("<xmlattr>.ref",texture.reference);
-        textures.add_child("Texture",t);
-    }
-    m.add_child("Textures",textures);
-    Tree params;
-    for(auto const& param:source.parameters)appendParam(params,param);
-    m.add_child("Params",params);
-    if(!source.vertex_shader_asset.empty())
-        m.put("Shaders.<xmlattr>.vertex",source.vertex_shader_asset);
-    if(!source.gbuffer_shader_asset.empty())
-        m.put("Shaders.<xmlattr>.gbuffer",source.gbuffer_shader_asset);
-    if(!source.vertex_hlsl_asset.empty())
-        m.put("Shaders.<xmlattr>.vertex_hlsl",source.vertex_hlsl_asset);
-    if(!source.fragment_hlsl_asset.empty())
-        m.put("Shaders.<xmlattr>.fragment_hlsl",source.fragment_hlsl_asset);
-    if(!source.gbuffer_hlsl_asset.empty())
-        m.put("Shaders.<xmlattr>.gbuffer_hlsl",source.gbuffer_hlsl_asset);
-    if(!source.fragment_shader_asset.empty())
-        m.put("Shaders.<xmlattr>.fragment",source.fragment_shader_asset);
-    if(!source.graph_source.empty())
-        m.add_child("Graph.Value",
-            detail::graph_xml_value_from_json(source.graph_source));
-    return m;
-}
-std::string to_xml(
-    std::vector<Material> const& materials,
-    std::vector<std::map<std::string,std::string>> const& extras) {
-    Tree result,library;
-    library.put("<xmlattr>.version",2);
-    library.put("<xmlattr>.schema","northstarcpp.ymat.material_library.v2");
-    for(std::size_t i=0;i<materials.size();++i) {
-        auto material=material_xml(materials[i]);
-        if(i<extras.size()&&!extras[i].empty()) {
-            Tree extensions;
-            for(auto const& [key,encoded]:extras[i]) {
-                // The first byte encodes whether the legacy source field was
-                // a scalar string (S) or a structured JSON value (C).
-                // It is never stored in the XML document.
-                if(encoded.empty())
-                    throw std::invalid_argument("Invalid migrated XML extension");
-                auto const data=encoded.substr(1);
-                if(key=="editor_source") {
-                    // Editor source is not an independent material definition:
-                    // PBR parameters and the typed Graph are authoritative.
-                    // Storing a second copy would create stale conflicting data.
-                    continue;
-                }
-                Tree item;item.put("<xmlattr>.name",key);
-                if(encoded[0]=='C')
-                    item.add_child("Value",
-                        detail::typed_xml_value_from_json(data));
-                else if(encoded[0]=='S')item.put_value(data);
-                else throw std::invalid_argument("Invalid XML extension encoding");
-                extensions.add_child("Property",item);
-            }
-            if(!extensions.empty())
-                material.add_child("Extensions",extensions);
-        }
-        library.add_child("Material",material);
-    }
-    result.add_child("YmatMaterialLibrary",library);
-    return render_xml(result);
-}
-// Material Graph source is a typed JSON AST in memory, not the persisted
-// YMAT library format. Copy its source text losslessly before PropertyTree
-// can turn numeric graph nodes into string values.
-std::string graph_from_editor_source(std::string const& source) {
-    auto const key=source.find("\"graph\"");
-    if(key==std::string::npos)return {};
-    auto const colon=source.find(':',key+7);
-    if(colon==std::string::npos)return {};
-    auto start=source.find_first_not_of(" \r\n\t",colon+1);
-    if(start==std::string::npos || source[start]!='{')return {};
-    bool quoted=false,escape=false;
-    int depth=0;
-    for(std::size_t i=start;i<source.size();++i) {
-        char const c=source[i];
-        if(quoted) {
-            if(escape)escape=false;
-            else if(c=='\\')escape=true;
-            else if(c=='"')quoted=false;
-            continue;
-        }
-        if(c=='"'){quoted=true;continue;}
-        if(c=='{')++depth;
-        if(c=='}' && --depth==0)return source.substr(start,i-start+1);
-    }
-    return {};
 }
 void verify_names(std::vector<Material> const& before,
                   std::vector<Material> const& after) {
@@ -297,39 +180,6 @@ std::vector<std::uint8_t> migrate_ymat_to_xml(
         verify_names(before,after);
         return result;
     }
-    if(file.kind!=30)
-        throw std::invalid_argument("Unsupported legacy YMAT kind for migration");
-    auto materials=detail::parse_materials(file,"Materials/Migrated.ymat");
-    Tree legacy=detail::parse_json(
-        std::string(file.body.begin(),file.body.end()));
-    std::vector<std::map<std::string,std::string>> extras;
-    std::size_t index=0;
-    auto const source_json=std::string(file.body.begin(),file.body.end());
-    for(auto const& item:legacy.get_child("materials")) {
-        // Graphs are reconstructed from the original typed source, not via
-        // PropertyTree's lossy number-to-string JSON serializer.
-        auto exact=detail::typed_material_graph_from_json_library(
-            source_json,index);
-        if(exact.empty())
-            if(auto editor=item.second.get_optional<std::string>("editor_source"))
-                exact=graph_from_editor_source(*editor);
-        if(!exact.empty())materials.at(index).graph_source=std::move(exact);
-        ++index;
-        std::map<std::string,std::string> attrs;
-        for(auto const& [field,value]:item.second) {
-            if(field=="name"||field=="shader"||field=="blend"||
-               field=="two_sided"||field=="alpha_cutoff"||
-               field=="textures"||field=="params"||field=="graph")continue;
-            if(value.empty())
-                attrs[field]="S"+value.get_value<std::string>();
-            else attrs[field]="C"+render_json(value);
-        }
-        extras.push_back(std::move(attrs));
-    }
-    auto xml=to_xml(materials,extras);
-    auto encoded=encode_xml_ymat(xml,materials.size());
-    auto after=load_materials_from_bytes(encoded,"Materials/Migrated.ymat");
-    verify_names(materials,after);
-    return encoded;
+    throw std::invalid_argument("Only XML NEF8 kind-4 YMAT is supported");
 }
 } // namespace northstarcpp::shared_assets

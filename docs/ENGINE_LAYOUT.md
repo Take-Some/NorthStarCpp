@@ -19,12 +19,9 @@ All source-root variables used by CMake are declared in
 tools/cmake/NorthStarPaths.cmake. The provider registry is implemented in
 tools/cmake/NorthStarModules.cmake.
 
-Run:
-
-    python tools/verify_architecture.py --json
-    cmake -S . -B out/layout-validation -G Ninja -DCMAKE_BUILD_TYPE=Release
-    cmake --build out/layout-validation --parallel 4
-    ctest --test-dir out/layout-validation --output-on-failure
+For the single maintained source-layout validation sequence, use
+[Repository Architecture — Acceptance commands](ARCHITECTURE.md#acceptance-commands).
+This file records layout and migration provenance, not a duplicate build recipe.
 
 The historical tools/organize_engine_layout.py was a one-time migration utility
 for an older layout. Do NOT call --apply again. The current SDK migration has

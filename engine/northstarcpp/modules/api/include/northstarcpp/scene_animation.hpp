@@ -75,6 +75,8 @@ public:
     void seek(std::uint64_t entity_id, float seconds);
     SceneAnimationStatus status(std::uint64_t entity_id) const;
     std::vector<SceneAnimationSample> advance(float seconds);
+    // Zero-allocation steady-state sampling into caller-owned frame storage.
+    void advance_into(float seconds,std::vector<SceneAnimationSample>& output);
     std::size_t count() const noexcept { return playing_.size(); }
 
 private:
@@ -92,6 +94,8 @@ private:
         bool finished = false;
     };
     std::unordered_map<std::uint64_t, Instance> playing_;
+    // Sorted only when instances change, not once per rendered frame.
+    std::vector<std::uint64_t> scene_order_;
 };
 
 } // namespace northstarcpp

@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "engine": "NorthStarCpp",
+  "name": "NightCity NPC animation QA",
+  "game_mode": "explore",
+  "startup_scene": "main.nscn",
+  "asset_root": "assets",
+  "providers": {
+    "engine.physics": "jolt",
+    "engine.render": "d3d12"
+  }
+}

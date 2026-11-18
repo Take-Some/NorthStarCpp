@@ -42,6 +42,10 @@ public:
     ~QtContentBrowser() override;
     void setContentRoot(QString const& path);
     void setProjectScene(QString const& scene);
+    void setSkySceneProvider(std::function<QString()> provider) {
+        sky_scene_provider_=std::move(provider);
+    }
+    void editSceneSky(QString const& selectedDrawable={});
     // Both VFS sources are displayed as persistent top-level tree roots.
     // Engine shared assets are previewable but not mutated by the browser.
     void setSharedContentRoot(QString const& path);
@@ -56,6 +60,10 @@ public:
         mutation_preflight_=std::move(callback);
     }
     QString contentRoot() const {return project_root_;}
+    // Stable navigation location across indexing and file mutations.
+    QString currentFolder() const {return folder_;}
+    bool catalogReady() const noexcept {return catalog_ready_;}
+    QString currentSelection() const {return selectedPath();}
     void focusSearch();
     // Browse to and highlight a project asset; deferred until indexing
     // completes when another scene has just been opened.
@@ -75,24 +83,30 @@ public:
     void openAssetPreview(QString const& virtualPath);
 signals:
     void assetActivated(QString virtualPath);
+    void sceneSkyChanged();
     void assetSelected(QString virtualPath);
     void textEditorRequested(QString absolutePath,bool sharedAsset);
+    void uiAssetEditorRequested(QString absolutePath,bool sharedAsset);
     // Keep additional dock instances on the same currently opened project.
     void contentRootsChanged(QString projectAssets,QString engineAssets);
     void assetReferencesRemapped(QMap<QString,QString> changes);
     // Double-click always requests the material editor, not a generic read-only card.
     void materialEditorRequested(QString materialReference);
+protected:
+    bool eventFilter(QObject* watched,QEvent* event) override;
 private:
     AssetCatalog project_catalog_,engine_catalog_;
     AssetCatalog const& activeCatalog() const noexcept {
         return engine_selected_?engine_catalog_:project_catalog_;
     }
-    QString root_,project_root_,engine_root_,folder_;
+    QString root_,project_root_,engine_root_,folder_,sky_scene_;
+    std::function<QString()> sky_scene_provider_;
     bool engine_selected_=false;
     quint64 thumbnail_generation_=0;
     QString pending_reveal_;
     bool editor_dock_mode_=false;
     bool catalog_ready_=false;
+    bool import_busy_=false;
     quint64 generation_=0;
     std::shared_ptr<AssetDependencyRegistry> registry_;
     std::function<bool()> mutation_preflight_;
@@ -147,6 +161,7 @@ private:
     void showMenu(QPoint pos);
     void createFolder();
     void importFiles();
+    void importSources(QStringList const& sources,QString const& folder);
     void createNativeModelPrefab();
     void renameSelected();
     void duplicateSelected();

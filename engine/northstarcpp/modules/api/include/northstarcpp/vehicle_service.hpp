@@ -3,6 +3,7 @@
 #pragma once
 #include <northstarcpp/vehicle_dynamics_plugin.h>
 #include <northstarcpp/vehicle_cabin_plugin.h>
+#include <northstarcpp/vehicle_powertrain_plugin.h>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -23,10 +24,17 @@ public:
     void step(float dt);
     NorthStarVehicleState state(std::uint32_t id) const;
     std::vector<NorthStarVehicleState> states() const;
+    // Allocation-stable polling for busy traffic worlds; preserves v1 ABI.
+    void states_into(std::vector<NorthStarVehicleState>& output) const;
     std::uint32_t count() const;
 
     bool supports_dynamics() const noexcept;
     bool supports_cabin() const noexcept;
+    bool supports_powertrain() const noexcept;
+    void configure_powertrain(std::uint32_t id,
+        NorthStarVehiclePowertrainConfig const& config);
+    NorthStarVehiclePowertrainState powertrain(std::uint32_t id) const;
+    void select_gear(std::uint32_t id,int gear);
     void configure_doors(std::uint32_t id,std::vector<NorthStarVehicleDoorConfig> const& doors);
     void set_door(std::uint32_t id,std::uint32_t index,bool open);
     NorthStarVehicleDoorState door(std::uint32_t id,std::uint32_t index) const;

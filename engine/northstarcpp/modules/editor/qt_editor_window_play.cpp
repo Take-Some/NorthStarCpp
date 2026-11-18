@@ -114,18 +114,6 @@
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
 using namespace window_detail;
-namespace {
-QString locateEngineSharedAssets(QDir from) {
-    for(int depth=0;depth<9;++depth) {
-        for(auto const* relative:{"sharedAssets","NorthStarCpp/sharedAssets"}) {
-            QFileInfo candidate(from.filePath(QString::fromLatin1(relative)));
-            if(candidate.isDir())return candidate.canonicalFilePath();
-        }
-        if(!from.cdUp())break;
-    }
-    return {};
-}
-}
 QString QtEditorWindow::playerExecutable() const {
     QString const env=qEnvironmentVariable("NORTHSTARCPP_PLAYER_EXECUTABLE");
     if(!env.isEmpty() && QFileInfo(env).isFile())
@@ -138,7 +126,10 @@ QString QtEditorWindow::playerExecutable() const {
         binary.filePath("northstarcpp_player.exe"),
         binary.filePath("../northstarcpp_player.exe"),
         binary.filePath("../bin/northstarcpp_player.exe"),
-        binary.filePath("../../bin/northstarcpp_player.exe")}) {
+        binary.filePath("../../bin/northstarcpp_player.exe"),
+        // Split distribution: Engine/bin/qt_tools beside GameClient/bin.
+        binary.filePath("../../../GameClient/bin/northstarcpp_player.exe"),
+        binary.filePath("../../GameClient/bin/northstarcpp_player.exe")}) {
         QFileInfo info(candidate);
         if(info.isFile())return info.canonicalFilePath();
     }
@@ -279,10 +270,9 @@ void QtEditorWindow::launchGame(bool embedded) {
     // project priority. NEVER pass it as --shared-assets: that option denotes
     // a separate low-priority engine-wide asset root. Passing the project
     // folder twice caused "Asset source already mounted" in engine.assets.
-    QString sharedRoot=locateEngineSharedAssets(
-        QDir(qpath(fs::absolute(file_).parent_path())));
+    QString sharedRoot=qpath(asset_paths::locate_shared_root(file_.parent_path()));
     if(sharedRoot.isEmpty())
-        sharedRoot=locateEngineSharedAssets(QDir(QFileInfo(executable).absolutePath()));
+        sharedRoot=qpath(asset_paths::locate_shared_root(native(executable)));
     if(!sharedRoot.isEmpty()) {
         QString const projectAssets=QFileInfo(folderRoot(file_)).canonicalFilePath();
         if(projectAssets.isEmpty() ||
@@ -457,8 +447,7 @@ bool QtEditorWindow::runEmbeddedRenderSmoke(QString const& executable,
         "0x"+QString::number(qulonglong(overlay->nativeParentHandle()),16)};
     playerProcess_->setProgram(executable);
     // Resolve shared engine resources using the same logic as Play.
-    QString const shared=locateEngineSharedAssets(
-        QDir(QFileInfo(executable).absolutePath()));
+    QString const shared=qpath(asset_paths::locate_shared_root(native(executable)));
     if(!shared.isEmpty())arguments<<"--shared-assets"<<shared;
     playerProcess_->setArguments(arguments);
     playerProcess_->setWorkingDirectory(QFileInfo(executable).absolutePath());

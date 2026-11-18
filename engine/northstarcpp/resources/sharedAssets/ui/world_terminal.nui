@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NorthStarUI version="3" target="world" layer="terminal"
+             width="512" height="256" worldWidth="1.8" worldHeight="1">
+  <Tokens>
+    <Token name="surface" type="color" value="#0d2739ee"/>
+    <Token name="accent" type="color" value="#e7bd61ff"/>
+  </Tokens>
+  <Styles>
+    <Style name="action">
+      <Property name="width_percent" type="number" value="82"/>
+      <Property name="height" type="number" value="48"/>
+      <Property name="color" token="accent"/>
+      <Property name="background" token="surface"/>
+    </Style>
+  </Styles>
+  <Elements>
+    <Panel id="screen">
+      <Property name="width_percent" type="number" value="100"/>
+      <Property name="height_percent" type="number" value="100"/>
+      <Property name="padding" type="number" value="18"/>
+      <Property name="gap" type="number" value="9"/>
+      <Property name="background" token="surface"/>
+    </Panel>
+    <Text id="title" parent="screen">
+      <Property name="text" type="string" value="NORTHSTAR TERMINAL"/>
+      <Property name="height" type="number" value="48"/>
+      <Property name="font_scale" type="number" value="2"/>
+      <Property name="color" token="accent"/>
+    </Text>
+    <Button id="confirm" parent="screen" style="action">
+      <Property name="text" type="string" value="CONFIRM"/>
+    </Button>
+  </Elements>
+</NorthStarUI>

@@ -1,6 +1,7 @@
 // Content Browser audio preview. Uses the SAME NAC decoder and replaceable
 // engine.audio provider as runtime; the inspector never edits imported assets.
 #include "qt_audio_preview_dialog.hpp"
+#include "../../../../tools/nac_pack_wave.hpp"
 #include <northstarcpp/audio.hpp>
 #include <northstarcpp/nac.hpp>
 #include <QComboBox>
@@ -18,7 +19,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -34,71 +34,23 @@
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
 namespace {
-std::uint16_t u16(std::uint8_t const* data) {
-    return std::uint16_t(data[0])|std::uint16_t(data[1])<<8;
-}
-std::uint32_t u32(std::uint8_t const* data) {
-    return std::uint32_t(data[0])|(std::uint32_t(data[1])<<8)|
-           (std::uint32_t(data[2])<<16)|(std::uint32_t(data[3])<<24);
-}
-std::vector<std::uint8_t> loadBounded(fs::path const& path) {
+void requirePhysicalAudio(fs::path const& path) {
     std::error_code ec;
     if(fs::is_symlink(fs::symlink_status(path,ec)) || ec)
         throw std::runtime_error("Symlink audio sources are not allowed");
-    auto const size=fs::file_size(path,ec);
-    if(ec || size<44 || size>64ull*1024ull*1024ull)
-        throw std::runtime_error("Audio file is missing or exceeds 64 MiB");
-    std::ifstream in(path,std::ios::binary);
-    if(!in)throw std::runtime_error("Cannot open audio source");
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if(!in.read(reinterpret_cast<char*>(bytes.data()),
-                static_cast<std::streamsize>(size)))
-        throw std::runtime_error("Truncated audio source");
-    return bytes;
 }
-nac::Track loadWave(std::vector<std::uint8_t> const& b, std::string name) {
-    if(b.size()<44 || std::memcmp(b.data(),"RIFF",4)!=0 ||
-       std::memcmp(b.data()+8,"WAVE",4)!=0 ||
-       std::uint64_t(u32(b.data()+4))+8>b.size())
-        throw std::runtime_error("Only RIFF/WAVE audio is supported");
-    auto const end=std::uint64_t(u32(b.data()+4))+8;
-    std::uint32_t rate=0;
-    std::uint16_t channels=0,format=0,bits=0;
-    std::size_t pcm_offset=0,pcm_length=0;
-    bool fmt=false,data=false;
-    for(std::uint64_t offset=12;offset+8<=end;) {
-        auto const block=std::uint64_t(u32(b.data()+offset+4));
-        auto const start=offset+8;
-        if(block>end-start)throw std::runtime_error("Truncated WAV chunk");
-        if(std::memcmp(b.data()+offset,"fmt ",4)==0) {
-            if(fmt || block<16)throw std::runtime_error("Invalid WAV format");
-            fmt=true;
-            format=u16(b.data()+start);
-            channels=u16(b.data()+start+2);
-            rate=u32(b.data()+start+4);
-            bits=u16(b.data()+start+14);
-            if(u16(b.data()+start+12)!=channels*2 ||
-               u32(b.data()+start+8)!=rate*channels*2)
-                throw std::runtime_error("Inconsistent WAV byte rate");
-        } else if(std::memcmp(b.data()+offset,"data",4)==0) {
-            if(data)throw std::runtime_error("Duplicate WAV data chunk");
-            data=true;pcm_offset=static_cast<std::size_t>(start);
-            pcm_length=static_cast<std::size_t>(block);
-        }
-        offset=start+block+(block&1);
-    }
-    if(!fmt || !data || !pcm_length || format!=1 || bits!=16 ||
-       (channels!=1 && channels!=2) || rate<8000 || rate>192000 ||
-       pcm_length%(channels*2))
-        throw std::runtime_error("WAV preview requires PCM16 mono/stereo (8-192 kHz)");
-    nac::Track result;
-    result.name=std::move(name);
-    result.channels=channels;result.sample_rate=rate;
-    result.samples.resize(pcm_length/2);
-    for(std::size_t i=0;i<result.samples.size();++i)
-        result.samples[i]=static_cast<std::int16_t>(
-            u16(b.data()+pcm_offset+i*2));
-    return result;
+
+std::vector<std::uint8_t> readNac(fs::path const& path) {
+    std::error_code ec;
+    auto const size=fs::file_size(path,ec);
+    if(ec || !size || size>nac::max_container_bytes)
+        throw std::runtime_error("Cannot read the NEF8 audio container");
+    std::ifstream in(path,std::ios::binary);
+    if(!in)throw std::runtime_error("Cannot open NAC source");
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    if(!in.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(size)))
+        throw std::runtime_error("Truncated NAC source");
+    return bytes;
 }
 QString clockText(double seconds) {
     int const ms=std::max(0,int(seconds*1000));
@@ -222,13 +174,14 @@ private:
     void load(std::string const& reference) {
         auto const ext=path_.extension().u8string();
         if(ext==".nac") {
-            auto const bytes=loadBounded(path_);
+            requirePhysicalAudio(path_);
+            auto const bytes=readNac(path_);
             std::string error;
             if(!nac::decode(bytes,tracks_,error))
                 throw std::runtime_error("Invalid NEF8/NAC: "+error);
         } else if(ext==".wav") {
-            tracks_.push_back(loadWave(loadBounded(path_),
-                                       path_.stem().u8string()));
+            requirePhysicalAudio(path_);
+            tracks_.push_back(nac::pack::load_wave(path_,path_.stem().u8string(),0));
         } else {
 #ifdef NORTHSTARCPP_QT_MULTIMEDIA
             // Qt Multimedia is optional. Use it only for compressed formats

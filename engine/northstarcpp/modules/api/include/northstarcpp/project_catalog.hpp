@@ -26,6 +26,8 @@ struct Project {
     std::string template_id;
     std::string engine_version;
     std::filesystem::path startup_scene;
+    // Default game UI asset. Resolved through the same project/shared VFS.
+    std::string ui_default;
     std::vector<std::wstring> tags;
     std::string last_opened;
     // Per-project explicit engine.<capability> -> provider ID.

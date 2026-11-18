@@ -5,7 +5,7 @@
 // Sealed engine infrastructure; projects compose UI roots instead of replacing this class.
 // This is a scripting convenience layer, NOT a native gameplay subsystem.
 //
-// Low-level native operation: engine.ui.apply({target:"screen",nodes:[...]})
+// Low-level native operation: engine.ui.documents.apply({target:"screen",nodes:[...]})
 // High-level API: UI.createRoot("hud").panel(...).text(...).mount()
 (() => {
     "use strict";
@@ -24,18 +24,129 @@
             throw new TypeError("UI element props must be an object");
         const result = {};
         const entries = Object.entries(input);
-        if (entries.length > 48)
+        if (entries.length > LIMITS.properties)
             throw new RangeError("UI node cannot have more than 48 properties");
         for (const [key, value] of entries) {
             if (!IDENTIFIER.test(key) ||
                 !(typeof value === "string" || typeof value === "boolean" ||
                   (typeof value === "number" && Number.isFinite(value))))
                 throw new TypeError("UI props must contain string/bool/finite number values");
-            if (typeof value === "string" && value.length > 2048)
+            if (typeof value === "string" && value.length > LIMITS.stringLength)
                 throw new RangeError("UI property string exceeds 2048 characters");
             result[key] = value;
         }
         return result;
+    }
+
+    // Single validation/compilation path shared by fluent and declarative
+    // authoring. Native engine.ui remains a provider-neutral document sink.
+    const LIMITS = Object.freeze({
+        nodes: 256, properties: 48, stringLength: 2048, depth: 32
+    });
+    const UI_EVENTS = Object.freeze([
+        "click", "change", "focus", "blur", "key", "pointer", "press"
+    ]);
+    const VALID_KEYS = new Set([
+        "id", "type", "parent", "props", "children", "text",
+        "caption", "source", "events"
+    ]);
+
+    function descriptor(type, id, props, parent, current, layer) {
+        if (!KINDS.includes(type) || typeof id !== "string" ||
+            !IDENTIFIER.test(id) ||
+            layer.length + 1 + id.length > 96 ||
+            current.has(id) ||
+            (parent !== "" && !current.has(parent)))
+            throw new TypeError("UI element type, id or parent is invalid");
+        if (current.size >= LIMITS.nodes)
+            throw new RangeError("UI root cannot contain more than " +
+                LIMITS.nodes + " elements");
+        return {id, type, parent, props:properties(props)};
+    }
+
+    // Pure compiler: no native calls, no scene state, no event subscriptions.
+    // Accepts one node, an array or {nodes:[...]}; children are nested.
+    // Normalizing the complete tree before mutation makes errors atomic.
+    function compileDocument(input, layer) {
+        const roots = Array.isArray(input) ? input :
+            input && typeof input === "object" && Array.isArray(input.nodes)
+                ? input.nodes : [input];
+        const elements = new Map();
+        const handlers = new Map();
+        const visiting = new Set();
+        const compile = (node, inheritedParent = "", depth = 0) => {
+            if (!node || typeof node !== "object" || Array.isArray(node))
+                throw new TypeError("UI declaration requires an element object");
+            if (depth > LIMITS.depth || visiting.has(node))
+                throw new RangeError("UI declaration exceeds nesting depth or contains a cycle");
+            for (const key of Object.keys(node)) {
+                if (!VALID_KEYS.has(key))
+                    throw new TypeError("Unknown UI declaration field: " + key);
+            }
+            const parent = node.parent ?? inheritedParent;
+            if (typeof parent !== "string" ||
+                (inheritedParent && parent !== inheritedParent))
+                throw new TypeError("UI child cannot override its nested parent");
+            const sourceProps = node.props ?? {};
+            if (!sourceProps || typeof sourceProps !== "object" ||
+                Array.isArray(sourceProps))
+                throw new TypeError("UI declaration props must be an object");
+            const props = {...sourceProps};
+            if (node.text !== undefined && node.caption !== undefined &&
+                node.text !== node.caption)
+                throw new TypeError("Conflicting UI text and caption");
+            const text = node.text ?? node.caption;
+            if (text !== undefined) {
+                if (node.type !== "text" && node.type !== "button" &&
+                    node.type !== "input")
+                    throw new TypeError("Only text, button or input nodes have captions");
+                if (typeof text !== "string" ||
+                    (Object.hasOwn(props,"text") && props.text !== text))
+                    throw new TypeError("Conflicting or invalid UI text property");
+                props.text = text;
+            }
+            if (node.source !== undefined) {
+                if (node.type !== "image" || typeof node.source !== "string" ||
+                    !node.source || node.source.includes("..") ||
+                    (Object.hasOwn(props,"source") && props.source !== node.source))
+                    throw new TypeError("UI image source requires a safe VFS path");
+                props.source = node.source;
+            }
+            const value = descriptor(node.type,node.id,props,parent,elements,layer);
+            elements.set(value.id,value);
+            const events = node.events ?? {};
+            if (!events || typeof events !== "object" || Array.isArray(events))
+                throw new TypeError("UI event declarations must be an object");
+            for (const [event,fn] of Object.entries(events)) {
+                if (!UI_EVENTS.includes(event) || typeof fn !== "function")
+                    throw new TypeError("Invalid declarative UI event: " + event);
+                handlers.set(event + ":" + value.id,fn);
+            }
+            if (node.children !== undefined && !Array.isArray(node.children))
+                throw new TypeError("UI children must be an array");
+            visiting.add(node);
+            for (const child of node.children ?? [])
+                compile(child,value.id,depth+1);
+            visiting.delete(node);
+        };
+        for (const node of roots) compile(node);
+        return {elements,handlers};
+    }
+
+    function equalTree(left,right) {
+        if (left.size !== right.size) return false;
+        const a=left.values(), b=right.values();
+        for (let item=a.next(),other=b.next();!item.done;
+             item=a.next(),other=b.next()) {
+            const x=item.value,y=other.value;
+            if (other.done || x.id!==y.id || x.type!==y.type ||
+                x.parent!==y.parent) return false;
+            const keys=Object.keys(x.props),otherKeys=Object.keys(y.props);
+            if (keys.length!==otherKeys.length ||
+                keys.some(key=>!Object.hasOwn(y.props,key) ||
+                    !Object.is(x.props[key],y.props[key]))) return false;
+        }
+        return true;
     }
 
     // Scoped authoring facade: a section's descendants inherit its parent.
@@ -79,8 +190,10 @@
         #batchDepth = 0;
         #batchDirty = false;
         #handlers = new Map();
+        #declarativeHandlers = new Map();
         #unsubscribe = null;
         #surface = null;
+        #runtimeOverrides = new Map();
 
         constructor(layer = "default", options = {}) {
             if (typeof layer !== "string" || !LAYER.test(layer))
@@ -99,7 +212,7 @@
         on(id, event, callback) {
             if (!this.#elements.has(id))
                 throw new RangeError("UI event target does not exist: " + id);
-            if (!["click","change","focus","blur","key","pointer","press"].includes(event))
+            if (!UI_EVENTS.includes(event))
                 throw new RangeError("Unsupported UI event type: " + event);
             if (typeof callback !== "function")
                 throw new TypeError("UI event callback must be a function");
@@ -120,12 +233,14 @@
             if (!listeners) return this;
             listeners.delete(callback);
             if (!listeners.size) this.#handlers.delete(key);
-            if (!this.#handlers.size) this.#stopListening();
+            if (!this.#handlers.size && !this.#declarativeHandlers.size)
+                this.#stopListening();
             return this;
         }
 
         #listen() {
-            if (!this.#mounted || this.#unsubscribe || !this.#handlers.size)
+            if (!this.#mounted || this.#unsubscribe ||
+                (!this.#handlers.size && !this.#declarativeHandlers.size))
                 return;
             if (!Events || typeof Events.on !== "function")
                 throw new Error("Events service unavailable for UI callbacks");
@@ -134,9 +249,16 @@
                     typeof message.id !== "string" ||
                     !message.id.startsWith(this.#layer + ".")) return;
                 const id=message.id.slice(this.#layer.length+1);
-                const handlers=this.#handlers.get(message.name + ":" + id);
-                if (!handlers) return;
-                for (const callback of [...handlers]) {
+                if (!this.#elements.has(id)) return;
+                const key=message.name + ":" + id;
+                const handlers=this.#handlers.get(key);
+                const declarative=this.#declarativeHandlers.get(key);
+                if (!handlers && !declarative) return;
+                const callbacks = [
+                    ...(handlers ? [...handlers] : []),
+                    ...(declarative ? [declarative] : [])
+                ];
+                for (const callback of callbacks) {
                     try { callback(message); }
                     catch(error) {
                         try { NorthStar.modules.engine.Logger.warn(
@@ -162,6 +284,55 @@
             }));
         }
 
+        /**
+         * Declarative source-of-truth UI tree with stable IDs.
+         * A nested tree can declare reusable JS-authored components by
+         * returning descriptor objects, including an events object.
+         * Identical nodes do not cause an engine.ui.documents.apply call.
+         */
+        render(document, options = {}) {
+            if (!options || typeof options !== "object" ||
+                Array.isArray(options))
+                throw new TypeError("Invalid UI render options");
+            const preserve = options.preserveRuntimeOverrides === true;
+            const compiled = compileDocument(document,this.#layer);
+            if (preserve) {
+                for (const [id,changes] of this.#runtimeOverrides) {
+                    const node=compiled.elements.get(id);
+                    if (node) node.props={...node.props,...properties(changes)};
+                }
+            }
+            const modified = !equalTree(this.#elements,compiled.elements);
+            const oldNodes=this.#elements;
+            const oldHandlers=this.#declarativeHandlers;
+            const oldImperative=this.#handlers;
+            const oldOverrides=this.#runtimeOverrides;
+            const oldRevision=this.#revision;
+            const oldDirty=this.#batchDirty;
+            this.#elements=compiled.elements;
+            this.#declarativeHandlers=compiled.handlers;
+            // Do not keep closures for removed controls. A stable ID still
+            // preserves its existing imperative subscriptions.
+            this.#handlers=new Map([...this.#handlers].filter(([key])=>
+                compiled.elements.has(key.slice(key.indexOf(":")+1))));
+            if (!preserve) this.#runtimeOverrides=new Map();
+            try {
+                if (modified) this.#sync();
+                if (this.#handlers.size || this.#declarativeHandlers.size)
+                    this.#listen();
+                else this.#stopListening();
+            } catch (error) {
+                this.#elements=oldNodes;
+                this.#declarativeHandlers=oldHandlers;
+                this.#handlers=oldImperative;
+                this.#runtimeOverrides=oldOverrides;
+                this.#revision=oldRevision;
+                this.#batchDirty=oldDirty;
+                throw error;
+            }
+            return this;
+        }
+
         /** Build a panel and its children without repeating parent IDs. */
         group(id, props = {}, build = null, parent = "") {
             if (build !== null && typeof build !== "function")
@@ -174,18 +345,8 @@
 
         // Generic primitives — do not add mission/HP/advertising semantics.
         add(type, id, props = {}, parent = "") {
-            if (!KINDS.includes(type) || typeof id !== "string" ||
-                !IDENTIFIER.test(id) ||
-                this.#layer.length + 1 + id.length > 96 ||
-                this.#elements.has(id) ||
-                (parent !== "" &&
-                    (typeof parent !== "string" || !this.#elements.has(parent))))
-                throw new TypeError("UI element type, id or parent is invalid");
-            if (this.#elements.size >= 256)
-                throw new RangeError("UI root cannot contain more than 256 elements");
-            this.#elements.set(id, {
-                id, type, parent, props: properties(props)
-            });
+            const node = descriptor(type,id,props,parent,this.#elements,this.#layer);
+            this.#elements.set(id,node);
             this.#sync();
             return this;
         }
@@ -245,10 +406,22 @@
             if (Object.entries(validated).every(
                 ([key,value]) => Object.is(item.props[key],value))) return this;
             item.props = {...item.props,...validated};
+            const prior=this.#runtimeOverrides.get(id) ?? {};
+            this.#runtimeOverrides.set(id,{...prior,...validated});
             this.#sync();
             return this;
         }
 
+        /** Transient animation values never persist as gameplay overrides. */
+        setTransient(id,changes) {
+            const previous=this.#runtimeOverrides.has(id)?
+                {...this.#runtimeOverrides.get(id)}:null;
+            try{return this.set(id,changes);}
+            finally{
+                if(previous===null)this.#runtimeOverrides.delete(id);
+                else this.#runtimeOverrides.set(id,previous);
+            }
+        }
         setText(id, value) {
             if (typeof value !== "string")
                 throw new TypeError("UI text content must be a string");
@@ -283,8 +456,16 @@
                     }
                 }
             }
-            for (const key of removed)
+            for (const key of removed) {
                 this.#elements.delete(key);
+                this.#runtimeOverrides.delete(key);
+                for (const event of UI_EVENTS) {
+                    this.#handlers.delete(event + ":" + key);
+                    this.#declarativeHandlers.delete(event + ":" + key);
+                }
+            }
+            if (!this.#handlers.size && !this.#declarativeHandlers.size)
+                this.#stopListening();
             this.#sync();
             return this;
         }
@@ -301,11 +482,16 @@
                 ([id,node]) => [id,{...node,props:{...node.props}}]));
             const revision = this.#revision;
             const dirty = this.#batchDirty;
+            const overrides = new Map(Array.from(this.#runtimeOverrides,
+                ([id,changes]) => [id,{...changes}]));
+            const handlers = new Map(this.#declarativeHandlers);
             this.#batchDepth++;
             try {
                 fn(this);
             } catch(error) {
                 this.#elements = snapshot;
+                this.#runtimeOverrides = overrides;
+                this.#declarativeHandlers = handlers;
                 this.#revision = revision;
                 this.#batchDirty = dirty;
                 throw error;
@@ -346,9 +532,19 @@
             return this;
         }
 
+        reloadFromAsset(nodes) {
+            if (!Array.isArray(nodes))
+                throw new TypeError("Invalid replacement UI document");
+            // Preserve runtime edits on stable IDs during NUI hot reload.
+            return this.render(nodes,{preserveRuntimeOverrides:true});
+        }
         clear() {
             if (this.#elements.size) {
                 this.#elements.clear();
+                this.#handlers.clear();
+                this.#declarativeHandlers.clear();
+                this.#runtimeOverrides.clear();
+                this.#stopListening();
                 this.#sync();
             }
             return this;
@@ -358,6 +554,9 @@
             this.unmount();
             this.#elements.clear();
             this.#handlers.clear();
+            this.#declarativeHandlers.clear();
+            this.#runtimeOverrides.clear();
+            UI.releaseAssetRoot?.(this);
         }
 
         #sync() {

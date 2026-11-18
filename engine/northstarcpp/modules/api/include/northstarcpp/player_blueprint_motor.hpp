@@ -4,8 +4,11 @@
 
 namespace northstarcpp::player_blueprint {
 struct Motor {
-    // Preserve PlayerController legacy defaults when no Motor is authored.
-    float walk_speed=4.f,run_speed=8.f,jump_speed=5.35f;
+    // Humanoid baseline measured from Abby's stance-foot YCD trajectories.
+    // Unmodified running is 2.95 m/s, Shift sprint is 4.44 m/s;
+    // scripted Ctrl precision movement scales running to 1.48 m/s.
+    // Project-specific CharacterMotor components always override defaults.
+    float walk_speed=2.95f,run_speed=4.44f,jump_speed=5.35f;
     float acceleration=18.f,air_control=.35f,gravity_scale=1.f;
 };
 inline std::string serialize_motor(Motor const& motor) {

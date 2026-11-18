@@ -17,22 +17,22 @@ SCRIPT = r"""import { Camera, Input, Events, Player } from "@northstar/engine";
         typeof NorthStar.camera.createViewController !== "function" ||
         typeof NorthStar.character.createController !== "function")
         throw new Error("Shared NorthStar API was not bootstrapped");
-    if (typeof engine.camera.available !== "function" ||
-        !engine.camera.available())
+    if (typeof engine.camera.views.available !== "function" ||
+        !engine.camera.views.available())
         throw new Error("Native camera API is unavailable");
-    if (typeof engine.input.wheelDelta !== "function" ||
-        typeof engine.camera.followDistance !== "function")
+    if (typeof engine.input.pointer.wheelDelta !== "function" ||
+        typeof engine.camera.views.followDistance !== "function")
         throw new Error("Camera/input VFS contract is unavailable");
     if (typeof Camera !== "function" || typeof Input !== "function" ||
         typeof Events !== "function" || typeof Player !== "function")
         throw new Error("Named @northstar/engine class imports did not link");
     let frames = 0;
-    const save = (slot, data) => engine.save.write(slot, JSON.stringify(data));
+    const save = (slot, data) => engine.storage.saves.write(slot, JSON.stringify(data));
     Events.on("start", () => {
         if (!["first_person", "third_person"].includes(Camera.mode()))
             throw new Error("Root player camera did not initialize");
         save("scripting_start", {
-            phase:"start", objects:engine.scene.objectCount(),
+            phase:"start", objects:engine.scene.entities.objectCount(),
             camera:Camera.mode(),
             playerEnabled:Player.enabled,
             playerIndex:Player.index
@@ -46,7 +46,7 @@ SCRIPT = r"""import { Camera, Input, Events, Player } from "@northstar/engine";
                 phase:"update", frames, dt, camera:Camera.mode(),
                 distance:Camera.followDistance()
             });
-            engine.session.quit();
+            engine.session.lifecycle.quit();
         }
     });
     Events.on("stop", () => save("scripting_stop", {phase:"stop", frames}));
@@ -64,12 +64,12 @@ def verify(player: Path) -> None:
         root = Path(temp)
         project = root / "project"
         shutil.copytree(ROOT / "Projects/NorthStarFirstPersonPlatform", project)
-        script = project / "scripts/main.js"
+        script = project / "assets/scripts/main.js"
         script.write_text(SCRIPT, encoding="utf-8")
         # Camera-only E2E must not accidentally instantiate the example Abby
         # when its author-defined playerConfig.js is copied with the project.
         # A disabled config still exercises the shared root-script loader.
-        (project / "scripts/playerConfig.js").write_text(
+        (project / "assets/scripts/playerConfig.js").write_text(
             "NorthStar.player.configure({enabled:false});\n", encoding="utf-8")
         scene = next((candidate for candidate in
                       (project / "main.nscn", project / "main.nscene")
@@ -86,7 +86,7 @@ def verify(player: Path) -> None:
                 "Engine default shared camera script did not load")
             print(f"Bundled V8 default camera {result['mode']}: PASS", flush=True)
 
-        override = project / "scripts/playerCamera.js"
+        override = project / "assets/scripts/playerCamera.js"
         override.write_text(PROJECT_CAMERA, encoding="utf-8")
         archive_override = root / "project-camera-override.db"
         generate(archive_override, scene.read_bytes(),
@@ -102,7 +102,7 @@ def verify(player: Path) -> None:
         # requiring a game-specific model, independent of source/archive VFS.
         override.unlink()
         # New grouped override path must replace the shared camera class.
-        grouped_camera = project / "scripts/camera/playerCamera.js"
+        grouped_camera = project / "assets/scripts/camera/playerCamera.js"
         grouped_camera.parent.mkdir(parents=True, exist_ok=True)
         grouped_camera.write_text(PROJECT_CAMERA, encoding="utf-8")
         grouped_result = run(player, None, project, None, seconds=40)
@@ -115,7 +115,7 @@ def verify(player: Path) -> None:
             "NorthStar.player.configure({enabled:true,eyeHeight:1.45,"
             "character:null,interaction:{enabled:false}});\n"
         )
-        config = project / "scripts/playerConfig.js"
+        config = project / "assets/scripts/playerConfig.js"
         config.write_text(definition, encoding="utf-8")
         config_archive = root / "project-player-config.db"
         generate(config_archive, scene.read_bytes(), script.read_bytes(),
@@ -128,10 +128,10 @@ def verify(player: Path) -> None:
             print(f"Bundled V8 declarative player {result['mode']}: PASS", flush=True)
 
         # When a source project provides both paths, grouped wins.
-        old_config = project / "scripts/playerConfig.js"
+        old_config = project / "assets/scripts/playerConfig.js"
         old_config.write_text("NorthStar.player.configure({enabled:false});\n",
                               encoding="utf-8")
-        grouped_config = project / "scripts/player/playerConfig.js"
+        grouped_config = project / "assets/scripts/player/playerConfig.js"
         grouped_config.parent.mkdir(parents=True, exist_ok=True)
         grouped_config.write_text(definition, encoding="utf-8")
         grouped_result = run(player, None, project, None, seconds=40)

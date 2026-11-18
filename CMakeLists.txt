@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 # NorthStarCpp GNU GCC project; staged modernization of the engine modules.
-project(NorthStarCpp VERSION 0.6.2 LANGUAGES C CXX)
+project(NorthStarCpp VERSION 0.7.1 LANGUAGES C CXX)
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(FATAL_ERROR "Use GNU GCC/G++ (MinGW-w64 on Windows) for this port.")
 endif()
@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(tools/cmake/NorthStarPaths.cmake)
+include(tools/cmake/NorthStarBuildLayout.cmake)
 include(CTest)
 include(tools/cmake/NorthStarModules.cmake)
 # Owned public ABI headers are a first-class engine module.
@@ -32,6 +33,22 @@ if(BUILD_TESTING)
                 "${PROJECT_SOURCE_DIR}/tools/verify_architecture.py" --json)
         set_tests_properties(northstarcpp_architecture_layout PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 30)
+        add_test(NAME northstarcpp_documentation_audit
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/docs_audit.py" --check)
+        set_tests_properties(northstarcpp_documentation_audit PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 40)
+        add_test(NAME northstarcpp_single_build_layout
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                -s tests -p test_build_layout.py -v)
+        set_tests_properties(northstarcpp_single_build_layout PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 35)
+        add_executable(northstarcpp_light_kinds_smoke
+            tests/render_light_kinds_smoke.cpp)
+        target_link_libraries(northstarcpp_light_kinds_smoke PRIVATE
+            northstarcpp_api northstarcpp_math)
+        add_test(NAME northstarcpp_light_kinds
+            COMMAND "$<TARGET_FILE:northstarcpp_light_kinds_smoke>")
         add_test(NAME northstarcpp_foundation_inventory
             COMMAND "${Python3_EXECUTABLE}"
                 "${PROJECT_SOURCE_DIR}/tools/verify_foundation_runtime.py" --json)
@@ -46,6 +63,10 @@ if(BUILD_TESTING)
             COMMAND "${Python3_EXECUTABLE}" -m unittest tests.test_game_dist -v)
         set_tests_properties(northstarcpp_game_distribution PROPERTIES
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 60)
+        add_test(NAME northstarcpp_split_distribution
+            COMMAND "${Python3_EXECUTABLE}" -m unittest tests.test_split_distribution -v)
+        set_tests_properties(northstarcpp_split_distribution PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 45)
         add_test(NAME northstarcpp_qt_distribution
             COMMAND "${Python3_EXECUTABLE}" -m unittest tests.test_qt_runtime -v)
         set_tests_properties(northstarcpp_qt_distribution PROPERTIES
@@ -155,6 +176,30 @@ if(WIN32)
         target_compile_definitions(northstarcpp_math_smoke PRIVATE
             NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
         add_test(NAME northstarcpp_math COMMAND northstarcpp_math_smoke)
+        add_executable(northstarcpp_gameplay_framework_smoke
+            tests/gameplay_framework_smoke.cpp)
+        target_link_libraries(northstarcpp_gameplay_framework_smoke PRIVATE
+            northstarcpp_math northstarcpp_core)
+        target_compile_definitions(northstarcpp_gameplay_framework_smoke PRIVATE
+            NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
+        add_executable(northstarcpp_navigation_navmesh_smoke
+            tests/navigation_navmesh_smoke.cpp)
+        target_link_libraries(northstarcpp_navigation_navmesh_smoke PRIVATE
+            northstarcpp_math northstarcpp_core)
+        target_compile_definitions(northstarcpp_navigation_navmesh_smoke PRIVATE
+            NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
+        add_executable(northstarcpp_navigation_crowd_smoke
+            tests/navigation_crowd_smoke.cpp)
+        target_link_libraries(northstarcpp_navigation_crowd_smoke PRIVATE
+            northstarcpp_math northstarcpp_core)
+        target_compile_definitions(northstarcpp_navigation_crowd_smoke PRIVATE
+            NORTHSTARCPP_STATIC_LIBRARIES NORTHSTARCPP_STANDALONE_MATH)
+        add_test(NAME northstarcpp_navigation_crowd
+            COMMAND northstarcpp_navigation_crowd_smoke)
+        add_test(NAME northstarcpp_navigation_navmesh
+            COMMAND northstarcpp_navigation_navmesh_smoke)
+        add_test(NAME northstarcpp_gameplay_framework
+            COMMAND northstarcpp_gameplay_framework_smoke)
     endif()
 
     set(FLECS_STATIC ON CACHE BOOL "" FORCE)
@@ -172,14 +217,35 @@ if(WIN32)
     set(NORTHSTARCPP_SHARED_ASSET_ROOT
         "${PROJECT_SOURCE_DIR}/engine/northstarcpp/resources/sharedAssets")
     set(NORTHSTARCPP_SHARED_NSP "${PROJECT_BINARY_DIR}/archive/northstar_shared.nsp")
+    # One source snapshot drives stable member IDs, dependency cook keys,
+    # DDC metadata and the deterministic runtime NSP package.
+    set(NORTHSTARCPP_SHARED_ASSET_REGISTRY
+        "${PROJECT_BINARY_DIR}/asset-registry/northstar_shared.json")
+    set(NORTHSTARCPP_SHARED_ASSET_DDC
+        "${PROJECT_BINARY_DIR}/derived-data/shared")
+    set(NORTHSTARCPP_SHARED_ASSET_COOK_MANIFEST
+        "${PROJECT_BINARY_DIR}/asset-registry/northstar_shared_cook.json")
     file(GLOB_RECURSE NORTHSTARCPP_SHARED_ASSET_INPUTS CONFIGURE_DEPENDS
         LIST_DIRECTORIES false "${NORTHSTARCPP_SHARED_ASSET_ROOT}/*")
+    # Align dependency tracking with pack_nsp.py's backup/tmp exclusion.
+    list(FILTER NORTHSTARCPP_SHARED_ASSET_INPUTS EXCLUDE REGEX "\\.bak")
+    list(FILTER NORTHSTARCPP_SHARED_ASSET_INPUTS EXCLUDE REGEX "(\\.tmp$|~$)")
     add_custom_command(
         OUTPUT "${NORTHSTARCPP_SHARED_NSP}"
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/asset_pipeline.py"
+            --root "${NORTHSTARCPP_SHARED_ASSET_ROOT}"
+            --state "${NORTHSTARCPP_SHARED_ASSET_REGISTRY}"
+            --namespace northstar-engine --target shared-nsp-v1
+            --apply --cache "${NORTHSTARCPP_SHARED_ASSET_DDC}"
+            --manifest "${NORTHSTARCPP_SHARED_ASSET_COOK_MANIFEST}"
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/pack_nsp.py"
             --root "${NORTHSTARCPP_SHARED_ASSET_ROOT}" --out "${NORTHSTARCPP_SHARED_NSP}"
             --qt-rcc "${NORTHSTARCPP_QT_RCC}"
-        DEPENDS "${PROJECT_SOURCE_DIR}/tools/pack_nsp.py" ${NORTHSTARCPP_SHARED_ASSET_INPUTS}
+            --asset-registry "${NORTHSTARCPP_SHARED_ASSET_REGISTRY}"
+        DEPENDS "${PROJECT_SOURCE_DIR}/tools/pack_nsp.py"
+                "${PROJECT_SOURCE_DIR}/tools/asset_pipeline.py"
+                "${PROJECT_SOURCE_DIR}/tools/repair_mt28_material_slots.py"
+                ${NORTHSTARCPP_SHARED_ASSET_INPUTS}
         COMMENT "Packing NorthStar shared engine resources -> northstar_shared.nsp"
         VERBATIM)
     add_custom_target(northstarcpp_shared_nsp ALL DEPENDS "${NORTHSTARCPP_SHARED_NSP}")
@@ -204,6 +270,10 @@ if(WIN32)
             COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/pack_nsp.py"
                 --verify "${NORTHSTARCPP_SHARED_NSP}")
         set_tests_properties(northstarcpp_nsp_verify PROPERTIES TIMEOUT 45)
+        add_test(NAME northstarcpp_asset_pipeline_identity
+            COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/asset_pipeline_smoke.py")
+        set_tests_properties(northstarcpp_asset_pipeline_identity PROPERTIES TIMEOUT 30)
         add_executable(northstarcpp_nsp_discovery_smoke tests/nsp_discovery_smoke.cpp)
         target_link_libraries(northstarcpp_nsp_discovery_smoke PRIVATE
             northstarcpp_runtime)
@@ -321,6 +391,7 @@ if(WIN32)
     install(FILES "${PROJECT_SOURCE_DIR}/docs/START_HERE.md"
                   "${PROJECT_SOURCE_DIR}/docs/GCC_DEVELOPMENT_SHELL.md"
                   "${PROJECT_SOURCE_DIR}/docs/DISTRIBUTION.md"
+                  "${PROJECT_SOURCE_DIR}/docs/ENGINE_CLIENT_SPLIT_0_7_0.md"
                   "${PROJECT_SOURCE_DIR}/docs/NSP_UI_RESOURCES.md"
                   "${PROJECT_SOURCE_DIR}/docs/MODULES.md"
                   "${PROJECT_SOURCE_DIR}/docs/JOLT_PHYSICS.md"

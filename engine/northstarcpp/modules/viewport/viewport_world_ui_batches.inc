@@ -53,6 +53,11 @@
             variant.opacity=1.f;
             gpu_materials.push_back(batch);
             gpu_materials_v2.push_back(variant);
+            // World-UI variants are material batches too. Shader reload ABI
+            // requires exactly one stable key per submitted batch. Borrow
+            // the scene-owned Entity ID string until synchronous submission
+            // completes; no per-frame material-name allocation.
+            material_keys.push_back(id.c_str());
             ++state->asset_stats.material_batches;
             ++state->asset_stats.textured_material_batches;
             material_vertex_total+=layer.vertices.size();

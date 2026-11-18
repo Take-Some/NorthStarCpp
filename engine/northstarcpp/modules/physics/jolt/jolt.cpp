@@ -16,6 +16,7 @@
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
@@ -26,6 +27,7 @@
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 
 #include <northstarcpp/physics_plugin.h>
+#include <northstarcpp/physics_terrain_streaming_api.h>
 #include <northstarcpp/physics_vehicle_plugin.h>
 #include "module_provider.hpp"
 #include "jolt_mesh.hpp"
@@ -34,12 +36,15 @@
 #include <Jolt/Physics/Collision/CastResult.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -48,7 +53,9 @@ namespace {
 using namespace northstarcpp::module_provider;
 namespace j = JPH;
 
-constexpr float player_speed = 4.f;
+// Native fallback for player bodies with no authored CharacterMotor.
+constexpr float player_speed = 2.95f;
+constexpr float player_sprint_speed = 4.44f;
 constexpr double fixed_step = 1.0 / 120.0;
 constexpr double max_frame_time = 0.1;
 
@@ -177,7 +184,10 @@ struct World {
                 j::Quat::sIdentity(),
                 input.mass > 0.f ? j::EMotionType::Dynamic : j::EMotionType::Static,
                 input.mass > 0.f ? layers::dynamic_body : layers::static_body);
-            setup.mFriction = input.initially_controlled ? 0.f : 0.65f;
+            setup.mFriction = input.initially_controlled ? 0.f : 0.85f;
+            // Static scenery can become a moving kinematic carrier without
+            // destroying its broadphase identity or collision metadata.
+            setup.mAllowDynamicOrKinematic = input.mass == 0.f;
             setup.mUserData=std::uint64_t(n)+1;
             if (input.mass > 0.f) {
                 setup.mMotionQuality = j::EMotionQuality::LinearCast;
@@ -204,8 +214,10 @@ struct World {
     ~World()
     {
         for(auto& entry:vehicles) {
-            physics.RemoveStepListener(entry.second.constraint);
-            physics.RemoveConstraint(entry.second.constraint);
+            if(entry.second.constraint) {
+                physics.RemoveStepListener(entry.second.constraint);
+                physics.RemoveConstraint(entry.second.constraint);
+            }
         }
         vehicles.clear();
         auto& iface = physics.GetBodyInterface();
@@ -215,12 +227,17 @@ struct World {
                 iface.RemoveBody(b.id);
             iface.DestroyBody(b.id);
         }
+        for(auto const& entry : terrain_bodies) {
+            iface.RemoveBody(entry.second);
+            iface.DestroyBody(entry.second);
+        }
+        terrain_bodies.clear();
         for (auto const id : static_meshes) {
             iface.RemoveBody(id);
             iface.DestroyBody(id);
         }
         if (!ground.IsInvalid()) {
-            iface.RemoveBody(ground);
+            if(!terrain_ground_suspended)iface.RemoveBody(ground);
             iface.DestroyBody(ground);
         }
     }
@@ -240,6 +257,8 @@ struct World {
         player=index==UINT32_MAX?j::BodyID():bodies[index].id;
         controlled_index=index;
         sprinting=false;
+        root_motion_x=root_motion_z=root_motion_duration=0.f;
+        root_motion_motor_active=false;
         if(!player.IsInvalid()) {
             auto const cfg=motors.find(index);
             iface.SetGravityFactor(player,cfg==motors.end()?1.f:
@@ -265,7 +284,44 @@ struct World {
         if(index==controlled_index && !player.IsInvalid())
             physics.GetBodyInterface().SetGravityFactor(player,cfg.gravity_scale);
     }
+    struct AiIntent {float x=0.f,z=0.f,speed=0.f;};
+    void set_ai_intent(std::uint32_t index,float x,float z,float speed) {
+        if(index>=bodies.size() || !bodies[index].alive ||
+           !bodies[index].resident || bodies[index].is_static ||
+           index==controlled_index || vehicles.count(index) ||
+           !std::isfinite(x)||!std::isfinite(z)||!std::isfinite(speed) ||
+           speed<0.f||speed>12.f||std::hypot(x,z)>1.001f)
+            throw std::invalid_argument("Invalid Jolt AI movement request");
+        ai_motor_intents[index]={x,z,speed};
+        physics.GetBodyInterface().ActivateBody(bodies[index].id);
+    }
+    void clear_ai_intent(std::uint32_t index) {
+        if(index>=bodies.size() || !bodies[index].alive)
+            throw std::invalid_argument("Invalid Jolt AI stop target");
+        ai_motor_intents.erase(index);
+        if(bodies[index].resident && !bodies[index].is_static) {
+            auto& iface=physics.GetBodyInterface();
+            auto const previous=iface.GetLinearVelocity(bodies[index].id);
+            iface.SetLinearVelocity(bodies[index].id,j::Vec3(0.f,previous.GetY(),0.f));
+        }
+    }
     void set_sprinting(bool enabled) noexcept {sprinting=enabled;}
+    // A displacement request becomes desired motor velocity, not a SetPosition
+    // teleport. Collision clipping is performed by PhysicsSystem::Update.
+    void queue_root_motion(std::uint32_t index,
+        float dx,float dy,float dz,float duration) {
+        if(index!=controlled_index ||player.IsInvalid()||
+           !std::isfinite(dx)||!std::isfinite(dy)||!std::isfinite(dz)||
+           !std::isfinite(duration)||duration<=0.f||duration>.25f||
+           std::abs(dy)>.00001f || // No unswept vertical root movement.
+           std::hypot(dx,dz)>duration*12.f||
+           std::hypot(root_motion_x+dx,root_motion_z+dz)>.6f||
+           root_motion_duration+duration>.25f)
+            throw std::invalid_argument("Invalid physics-authoritative root motion");
+        root_motion_x+=dx;
+        root_motion_z+=dz;
+        root_motion_duration+=duration;
+    }
 
     void step(float delta, float input_x, float input_z)
     {
@@ -275,33 +331,280 @@ struct World {
         float x = sanitized_input(input_x);
         float z = sanitized_input(input_z);
         auto const cfg=motors.find(controlled_index);
-        float const desired_speed=(cfg==motors.end()?player_speed:
+        float const desired_speed=(cfg==motors.end()?
+            (sprinting?player_sprint_speed:player_speed):
             sprinting?cfg->second.run_speed:cfg->second.walk_speed) /
             std::max(1.f,std::hypot(x,z));
-        elapsed += std::min(static_cast<double>(delta), max_frame_time);
+        auto const admitted=std::min(static_cast<double>(delta),max_frame_time);
+        elapsed += admitted;
+        moving_support_dt+=static_cast<float>(admitted);
         auto& iface = physics.GetBodyInterface();
+        auto const steps=static_cast<int>(std::floor((elapsed+1.e-9)/fixed_step));
+        float const physics_dt=float(steps*fixed_step);
+        // The body has not moved yet: this is precisely the timestep during
+        // which Jolt will integrate its Kinematic linear velocity.
+        if(steps>0) {
+            for(auto const index:kinematic_platforms) {
+                if(index>=bodies.size()||!bodies[index].alive||
+                   !bodies[index].resident)continue;
+                auto const& body=bodies[index];
+                auto const target=pending_platform_moves.find(index);
+                if(target!=pending_platform_moves.end())
+                    iface.MoveKinematic(body.id,target->second,
+                        j::Quat::sIdentity(),physics_dt);
+                else
+                    iface.SetLinearAndAngularVelocity(body.id,
+                        j::Vec3::sZero(),j::Vec3::sZero());
+            }
+        }
+        // Jolt receives authored static moves before this fixed physics step.
+        // Find the support directly under the possessed body; do not carry
+        // airborne players or actors walking on world terrain.
+        float support_vx=0.f,support_vz=0.f;
+        bool on_kinematic_support=false;
+        // A moving Jolt city is the Pawn's authoritative movement base,
+        // never a separate target followed via camera smoothing.
+        std::optional<std::uint32_t> current_city_base;
+        // City passengers ride the dynamic mass-bearing Jolt compound deck,
+        // not its independently rendered visual tiles. The character motor
+        // must preserve the carrier's velocity rather than braking it to zero.
+        if(steps>0 && !player.IsInvalid() && physics_dt>1.e-5f &&
+           iface.GetLinearVelocity(player).GetY()<1.f) {
+            auto const pos=iface.GetPosition(player);
+            auto const half=(controlled_index<bodies.size())?
+                bodies[controlled_index].half:.75f;
+            const float feet=float(pos.GetY())-half;
+            for(auto const& [index,vehicle]:vehicles) {
+                if(vehicle.deck_half_width<=0.f||index>=bodies.size())continue;
+                auto const center=iface.GetPosition(bodies[index].id);
+                const float deck_y=float(center.GetY())-
+                    bodies[index].half+vehicle.deck_top;
+                if(std::abs(feet-deck_y)>.32f ||
+                   std::abs(float(pos.GetX()-center.GetX()))>
+                     vehicle.deck_half_width+half ||
+                   std::abs(float(pos.GetZ()-center.GetZ()))>
+                     vehicle.deck_half_length+half)continue;
+                auto const v=iface.GetLinearVelocity(bodies[index].id);
+                support_vx=v.GetX();support_vz=v.GetZ();
+                on_kinematic_support=true;
+                current_city_base=index;
+                break;
+            }
+        }
+        // A single missed Jolt contact cannot turn base velocity off for
+        // one frame and double it on the next frame's reacquisition.
+        // Retain only the SAME CityRoot while the Pawn remains on its deck.
+        if(!on_kinematic_support && player_city_base &&
+           player_city_grace_seconds>0.f && steps>0 &&
+           !player.IsInvalid() &&
+           iface.GetLinearVelocity(player).GetY()<1.f) {
+            auto const ci=*player_city_base;
+            auto const v=vehicles.find(ci);
+            if(v!=vehicles.end() && ci<bodies.size() &&
+               bodies[ci].alive && bodies[ci].resident &&
+               v->second.deck_half_width>0.f) {
+                auto const p=iface.GetPosition(player);
+                auto const body=iface.GetPosition(bodies[ci].id);
+                float const half=controlled_index<bodies.size()?
+                    bodies[controlled_index].half:.75f;
+                float const foot=float(p.GetY())-half;
+                float const deck=float(body.GetY())-
+                    bodies[ci].half+v->second.deck_top;
+                if(std::abs(foot-deck)<.70f &&
+                   std::abs(float(p.GetX()-body.GetX()))<
+                     v->second.deck_half_width+half &&
+                   std::abs(float(p.GetZ()-body.GetZ()))<
+                     v->second.deck_half_length+half) {
+                    auto const velocity=iface.GetLinearVelocity(bodies[ci].id);
+                    support_vx=velocity.GetX();
+                    support_vz=velocity.GetZ();
+                    current_city_base=ci;
+                    on_kinematic_support=true;
+                }
+            }
+        }
+        if(current_city_base) {
+            player_city_base=current_city_base;
+            player_city_grace_seconds=.15f;
+        } else if(player_city_grace_seconds>0.f) {
+            player_city_grace_seconds=std::max(
+                0.f,player_city_grace_seconds-physics_dt);
+            if(player_city_grace_seconds<=0.f)player_city_base.reset();
+        }
+        if(on_kinematic_support && !player.IsInvalid() &&
+           std::hypot(support_vx,support_vz)>.001f)
+            iface.ActivateBody(player);
+        if(steps>0 && !on_kinematic_support && !player.IsInvalid() &&
+           !kinematic_platforms.empty() &&
+           physics_dt>1.e-5f &&
+           iface.GetLinearVelocity(player).GetY()<1.f) {
+            auto const p=iface.GetPosition(player);
+            float const player_half=(controlled_index<bodies.size())
+                ? bodies[controlled_index].half:.75f;
+            float const foot=static_cast<float>(p.GetY())-player_half;
+            float best=std::numeric_limits<float>::max();
+            for(auto const index:kinematic_platforms) {
+                if(index>=bodies.size())continue;
+                auto const& body=bodies[index];
+                if(!body.alive || !body.resident || !body.is_static ||
+                   !body.collision_enabled)continue;
+                auto const o=iface.GetPosition(body.id);
+                float const top=static_cast<float>(o.GetY())+body.half;
+                if(std::abs(foot-top)>.21f)continue;
+                float const dx=static_cast<float>(p.GetX()-o.GetX());
+                float const dz=static_cast<float>(p.GetZ()-o.GetZ());
+                // Include swept motion to retain support at tile seams.
+                auto const moved=moved_static_deltas.find(index);
+                float const sx=moved==moved_static_deltas.end()?0.f:moved->second[0];
+                float const sz=moved==moved_static_deltas.end()?0.f:moved->second[1];
+                if(std::abs(dx)>body.half+player_half+std::abs(sx)+.04f ||
+                   std::abs(dz)>body.half+player_half+std::abs(sz)+.04f)
+                    continue;
+                auto const score=dx*dx+dz*dz;
+                if(score>=best)continue;
+                best=score;
+                on_kinematic_support=true;
+                support_vx=sx/physics_dt;
+                support_vz=sz/physics_dt;
+            }
+            // Guard against accidental transport from high-speed teleports.
+            if(std::hypot(support_vx,support_vz)>45.f)
+                support_vx=support_vz=0.f;
+            if(on_kinematic_support &&
+               std::hypot(support_vx,support_vz)>1.e-4f)
+                iface.ActivateBody(player);
+        }
+        float remaining_root_seconds=root_motion_duration;
+        float remaining_root_x=root_motion_x,remaining_root_z=root_motion_z;
+        bool stepped=false;
         while (elapsed + 1.0e-9 >= fixed_step) {
+            stepped=true;
+            float root_vx=0.f,root_vz=0.f;
+            if(remaining_root_seconds>1.e-7f) {
+                // A single render frame may advance multiple fixed steps.
+                // Consume each submitted animation displacement exactly
+                // once, not once *per* physics substep.
+                auto const consumed=std::min(remaining_root_seconds,
+                    static_cast<float>(fixed_step));
+                auto const fraction=consumed/remaining_root_seconds;
+                auto const step_x=remaining_root_x*fraction;
+                auto const step_z=remaining_root_z*fraction;
+                root_vx=step_x/static_cast<float>(fixed_step);
+                root_vz=step_z/static_cast<float>(fixed_step);
+                remaining_root_x-=step_x;
+                remaining_root_z-=step_z;
+                remaining_root_seconds-=consumed;
+            }
             if (!player.IsInvalid()) {
-                if (x != 0.f || z != 0.f)
+                if (x != 0.f || z != 0.f || root_vx!=0.f || root_vz!=0.f)
                     iface.ActivateBody(player);
                 if (physics.GetBodyInterface().IsActive(player)) {
                     float vertical = iface.GetLinearVelocity(player).GetY();
                     auto velocity=iface.GetLinearVelocity(player);
-                    float const accel=cfg==motors.end()?1.f:
+                    // An airborne pawn must retain its launch/platform
+                    // velocity when there is no steering input. Do not erase
+                    // inertia the first frame after leaving a moving deck.
+                    bool const airborne=std::abs(vertical)>.65f;
+                    // Root motion is a sampled displacement command, not an
+                    // acceleration target. Braking the root-driven motor once
+                    // after consumption prevents extra substeps from replaying
+                    // a displacement via residual linear velocity.
+                    bool const root_active=std::abs(root_vx)+std::abs(root_vz)>1.e-6f;
+                    bool const root_stopping=!root_active && root_motion_motor_active &&
+                        std::abs(x)+std::abs(z)<1.e-6f && !airborne;
+                    float const accel=(root_active || root_stopping)?1.f:
+                        cfg==motors.end()?
+                        (airborne?(std::abs(x)+std::abs(z)>.001f?.07f:0.f):1.f):
                         std::clamp(cfg->second.acceleration*float(fixed_step)*
                             (std::abs(vertical)>.65f?cfg->second.air_control:1.f),
                             0.f,1.f);
+                    // Grounded: subtract the previous carrier contribution
+                    // before applying this step's support velocity. Airborne:
+                    // retain actual world inertia, including takeoff speed.
+                    auto const previous_vx=on_kinematic_support?last_support_vx:0.f;
+                    auto const previous_vz=on_kinematic_support?last_support_vz:0.f;
+                    auto const relative_x=velocity.GetX()-previous_vx;
+                    auto const relative_z=velocity.GetZ()-previous_vz;
                     iface.SetLinearVelocity(player,j::Vec3(
-                        velocity.GetX()+(x*desired_speed-velocity.GetX())*accel,
+                         support_vx+relative_x+
+                             (x*desired_speed+root_vx-relative_x)*accel,
                         vertical,
-                        velocity.GetZ()+(z*desired_speed-velocity.GetZ())*accel));
+                         support_vz+relative_z+
+                             (z*desired_speed+root_vz-relative_z)*accel));
+                    root_motion_motor_active=root_active;
                 }
             }
+            // Every AI Pawn owns an independent velocity command. Jolt
+            // integrates these dynamic bodies in the SAME collision step.
+            // Collision constraints, gravity and contact forces remain active.
+            for(auto const& [ai_index,intent]:ai_motor_intents) {
+                if(ai_index>=bodies.size() || ai_index==controlled_index ||
+                   !bodies[ai_index].alive || !bodies[ai_index].resident ||
+                   bodies[ai_index].is_static)continue;
+                auto const id=bodies[ai_index].id;
+                iface.ActivateBody(id);
+                auto const velocity=iface.GetLinearVelocity(id);
+                auto const cfg=motors.find(ai_index);
+                const float acceleration=cfg==motors.end()?14.f:cfg->second.acceleration;
+                const float alpha=std::clamp(
+                    acceleration*float(fixed_step),0.f,1.f);
+                iface.SetLinearVelocity(id,j::Vec3(
+                    velocity.GetX()+(intent.x*intent.speed-velocity.GetX())*alpha,
+                    velocity.GetY(),
+                    velocity.GetZ()+(intent.z*intent.speed-velocity.GetZ())*alpha));
+                iface.SetAngularVelocity(id,j::Vec3::sZero());
+            }
+            // An attached Pawn is expressed in the moving city's frame.
+            // Record both transforms BEFORE the SAME physics substep:
+            // after integration, correct only tiny solver slip in X/Z.
+            // This removes one-frame chasing while preserving gravity and
+            // physical player/deck collision in Y.
+            bool const lock_local_frame=current_city_base.has_value() &&
+                !player.IsInvalid() &&
+                std::abs(x)+std::abs(z)+std::abs(root_vx)+
+                std::abs(root_vz)<.0001f &&
+                std::abs(iface.GetLinearVelocity(player).GetY())<.65f;
+            j::RVec3 city_before{},pawn_before{};
+            if(lock_local_frame) {
+                city_before=iface.GetPosition(
+                    bodies[*current_city_base].id);
+                pawn_before=iface.GetPosition(player);
+            }
+            // Apply project-native massive tracked city suspension and drive
+            // forces at each fixed physics step, not once per render frame.
+            advance_city_vehicles(static_cast<float>(fixed_step));
             auto error = physics.Update(static_cast<float>(fixed_step), 1,
                 &temporary_allocator, &jobs);
+            if(error==j::EPhysicsUpdateError::None && lock_local_frame) {
+                auto const city_after=iface.GetPosition(
+                    bodies[*current_city_base].id);
+                auto const pawn_after=iface.GetPosition(player);
+                double const target_x=pawn_before.GetX()+
+                    city_after.GetX()-city_before.GetX();
+                double const target_z=pawn_before.GetZ()+
+                    city_after.GetZ()-city_before.GetZ();
+                double const dx=target_x-pawn_after.GetX();
+                double const dz=target_z-pawn_after.GetZ();
+                double const error_sq=dx*dx+dz*dz;
+                // Never reel a knocked-back or teleported person back onto
+                // the deck. The supported player is stable to sub-centimetres.
+                if(error_sq>1.e-8 && error_sq<.09) {
+                    iface.SetPosition(player,j::RVec3(
+                        target_x,pawn_after.GetY(),target_z),
+                        j::EActivation::Activate);
+                }
+            }
             if (error != j::EPhysicsUpdateError::None)
                 throw std::runtime_error("Jolt Physics Update reported an error");
             elapsed -= fixed_step;
+        }
+        if(stepped) {
+            root_motion_x=root_motion_z=root_motion_duration=0.f;
+            last_support_vx=on_kinematic_support?support_vx:0.f;
+            last_support_vz=on_kinematic_support?support_vz:0.f;
+            moved_static_deltas.clear();
+            pending_platform_moves.clear();
+            moving_support_dt=0.f;
         }
     }
 
@@ -317,6 +620,23 @@ struct World {
             if (body.id == player) { half = body.half; break; }
         float const bottom = static_cast<float>(p.GetY()) - half;
         if (std::abs(bottom) < 0.13f) return true;
+        // Jolt's moving compound deck is a valid ground contact even
+        // though its CityRoot mass makes it a DYNAMIC body. Without this,
+        // boarding works but jumping from a moving city is impossible.
+        for(auto const& [index,vehicle]:vehicles) {
+            if(vehicle.deck_half_width<=0.f||index>=bodies.size())continue;
+            auto const& city=bodies[index];
+            if(!city.alive || !city.resident)continue;
+            auto const center=iface.GetPosition(city.id);
+            float const deck_y=static_cast<float>(center.GetY())-
+                city.half+vehicle.deck_top;
+            if(std::abs(bottom-deck_y)>.22f)continue;
+            if(std::abs(static_cast<float>(p.GetX()-center.GetX()))>
+                vehicle.deck_half_width+half ||
+               std::abs(static_cast<float>(p.GetZ()-center.GetZ()))>
+                vehicle.deck_half_length+half)continue;
+            return true;
+        }
         for (auto const& body : bodies) {
             if (!body.resident || body.id == player || !body.is_static) continue;
             if (std::abs(bottom -
@@ -333,6 +653,10 @@ struct World {
     void jump()
     {
         if (!grounded()) return;
+        // Explicit jump detaches from the moving base; world-space takeoff
+        // velocity is retained by the existing Jolt motor.
+        player_city_base.reset();
+        player_city_grace_seconds=0.f;
         auto& iface = physics.GetBodyInterface();
         auto v = iface.GetLinearVelocity(player);
         iface.ActivateBody(player);
@@ -358,8 +682,50 @@ struct World {
             !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
             throw std::runtime_error("Invalid Jolt static relocation");
         auto& iface = physics.GetBodyInterface();
-        iface.SetPosition(bodies[index].id, j::RVec3(x, y + bodies[index].half, z),
-            j::EActivation::DontActivate);
+        auto const& body = bodies[index];
+        j::RVec3 const target(x, y+body.half, z);
+        // The existing physics pose is authoritative until the next fixed step.
+        auto const old=iface.GetPosition(body.id);
+        float const dx=x-static_cast<float>(old.GetX());
+        float const dy=y+body.half-static_cast<float>(old.GetY());
+        float const dz=z-static_cast<float>(old.GetZ());
+        float const horizontal=std::hypot(dx,dz);
+        if(horizontal<1.e-6f && std::abs(dy)<1.e-6f) {
+            pending_platform_moves.erase(index);
+            moved_static_deltas.erase(index);
+            return;
+        }
+        const bool driven=body.resident && body.collision_enabled &&
+            horizontal<=6.f && std::abs(dy)<.12f;
+        if(driven) {
+            if(!kinematic_platforms.count(index)) {
+                // A true kinematic is simulated by Jolt with world velocity,
+                // so *all* grounded dynamic items receive friction/impulses.
+                iface.SetMotionType(body.id,j::EMotionType::Kinematic,
+                    j::EActivation::Activate);
+                // Preserve per-project Collision Channels and Response Matrix.
+                // Only change the broadphase dynamic/kinematic bit.
+                auto const old_layer=iface.GetObjectLayer(body.id);
+                auto const profile=registry.get(old_layer);
+                iface.SetObjectLayer(body.id,registry.assign(true,
+                    profile.type,profile.responses.data(),16));
+                iface.SetFriction(body.id,.95f);
+                kinematic_platforms.insert(index);
+            }
+            pending_platform_moves.insert_or_assign(index,target);
+            // Overwrite, don't accumulate: repeated authoring writes before
+            // a physics step describe one final target, not stacked motion.
+            moved_static_deltas[index]={dx,dz};
+            return;
+        }
+        // True teleport (world streaming / editor reposition / noncolliding
+        // visual) never transfers momentum to passengers.
+        pending_platform_moves.erase(index);
+        moved_static_deltas.erase(index);
+        if(kinematic_platforms.count(index))
+            iface.SetLinearAndAngularVelocity(body.id,
+                j::Vec3::sZero(),j::Vec3::sZero());
+        iface.SetPosition(body.id,target,j::EActivation::DontActivate);
     }
 
     uint32_t add_runtime_body(NorthStarRigidBody const& input)
@@ -376,7 +742,8 @@ struct World {
             j::RVec3(input.x, input.y + half, input.z), j::Quat::sIdentity(),
             input.mass > 0.f ? j::EMotionType::Dynamic : j::EMotionType::Static,
             input.mass > 0.f ? layers::dynamic_body : layers::static_body);
-        setup.mFriction = 0.65f;
+        setup.mFriction = 0.85f;
+        setup.mAllowDynamicOrKinematic = input.mass == 0.f;
         setup.mUserData=std::uint64_t(bodies.size())+1;
         if (input.mass > 0.f) {
             setup.mMotionQuality = j::EMotionQuality::LinearCast;
@@ -396,6 +763,18 @@ struct World {
             throw;
         }
         return static_cast<uint32_t>(bodies.size() - 1);
+    }
+
+    void configure_body_material(uint32_t index,float friction,float restitution) {
+        if(index>=bodies.size() || !bodies[index].alive ||
+           bodies[index].is_static || !std::isfinite(friction) ||
+           !std::isfinite(restitution) || friction<0.f || friction>1.f ||
+           restitution<0.f || restitution>1.f)
+            throw std::invalid_argument("Invalid Jolt body material");
+        auto& iface=physics.GetBodyInterface();
+        iface.SetFriction(bodies[index].id,friction);
+        iface.SetRestitution(bodies[index].id,restitution);
+        iface.ActivateBody(bodies[index].id);
     }
 
     void remove_runtime_body(uint32_t index)
@@ -584,6 +963,82 @@ struct World {
         return bodies[index].resident ? 1 : 0;
     }
 
+    // Continuous height collision tiles are replaceable; scene bodies retain
+    // their original indices and legacy static meshes remain unaffected.
+    static std::uint64_t terrain_key(std::int32_t x,std::int32_t z) noexcept {
+        return (std::uint64_t(std::uint32_t(x))<<32)|std::uint32_t(z);
+    }
+    void upsert_terrain(std::int32_t cx,std::int32_t cz,
+        float const* xyz,std::uint32_t vertices,
+        std::uint32_t const* indices,std::uint32_t index_count) {
+        if(!xyz||!indices||vertices<4||vertices>16384u||
+           index_count<6||index_count>98304u||index_count%3||
+           std::abs(std::int64_t(cx))>50000||
+           std::abs(std::int64_t(cz))>50000)
+            throw std::invalid_argument("Invalid streamed terrain chunk topology");
+        auto const key=terrain_key(cx,cz);
+        if(!terrain_bodies.count(key)&&terrain_bodies.size()>=256)
+            throw std::length_error("Jolt terrain residency budget exceeded");
+        for(std::uint32_t i=0;i<vertices*3;i++)
+            if(!std::isfinite(xyz[i])||std::abs(xyz[i])>1e7f)
+                throw std::invalid_argument("Invalid terrain mesh vertex");
+        j::TriangleList faces;
+        faces.reserve(index_count/3);
+        for(std::uint32_t i=0;i<index_count;i+=3) {
+            j::Vec3 p[3];
+            for(std::uint32_t k=0;k<3;k++){
+                auto const index=indices[i+k];
+                if(index>=vertices)
+                    throw std::invalid_argument("Terrain triangle index outside buffer");
+                p[k]=j::Vec3(xyz[3*index],xyz[3*index+1],xyz[3*index+2]);
+            }
+            faces.emplace_back(p[0],p[1],p[2],0u,i/3);
+        }
+        j::MeshShapeSettings mesh(faces);
+        mesh.mPerTriangleUserData=true;
+        auto created=mesh.Create();
+        if(created.HasError())throw std::runtime_error("Cannot cook Jolt terrain mesh");
+        j::RefConst<j::Shape> shape=created.Get();
+        j::BodyCreationSettings cfg(shape,j::RVec3::sZero(),
+            j::Quat::sIdentity(),j::EMotionType::Static,layers::static_body);
+        auto& iface=physics.GetBodyInterface();
+        // Create first. An invalid new mesh must not destroy the old collider.
+        auto fresh=iface.CreateAndAddBody(cfg,j::EActivation::DontActivate);
+        if(fresh.IsInvalid())throw std::runtime_error("Jolt terrain body allocation failed");
+        auto old=terrain_bodies.find(key);
+        if(old!=terrain_bodies.end()){
+            iface.RemoveBody(old->second);
+            iface.DestroyBody(old->second);
+            old->second=fresh;
+        }else{
+            terrain_bodies.emplace(key,fresh);
+            if(!terrain_ground_suspended){
+                iface.RemoveBody(ground);
+                terrain_ground_suspended=true;
+            }
+        }
+        terrain_broadphase_dirty=true;
+    }
+    void remove_terrain(std::int32_t cx,std::int32_t cz) {
+        auto it=terrain_bodies.find(terrain_key(cx,cz));
+        if(it==terrain_bodies.end())return;
+        auto& iface=physics.GetBodyInterface();
+        iface.RemoveBody(it->second);
+        iface.DestroyBody(it->second);
+        terrain_bodies.erase(it);
+        if(terrain_bodies.empty() && terrain_ground_suspended){
+            iface.AddBody(ground,j::EActivation::DontActivate);
+            terrain_ground_suspended=false;
+        }
+        terrain_broadphase_dirty=true;
+    }
+
+
+    void commit_terrain() {
+        if(!terrain_broadphase_dirty)return;
+        physics.OptimizeBroadPhase();
+        terrain_broadphase_dirty=false;
+    }
     void add_mesh(float const* vertices,uint32_t vertex_count,
                   uint32_t const* indices,uint32_t index_count)
     {
@@ -785,9 +1240,26 @@ struct World {
     std::uint32_t controlled_index=UINT32_MAX;
     std::unordered_map<std::uint32_t,NorthStarPhysicsCharacterMotor> motors;
     bool sprinting=false;
+    float root_motion_x=0.f,root_motion_z=0.f,root_motion_duration=0.f;
+    bool root_motion_motor_active=false;
+    std::unordered_map<std::uint32_t,AiIntent> ai_motor_intents;
     std::vector<Body> bodies;
+    // A true Kinematic platform drives all Jolt dynamic objects by contact.
+    // Targets are applied once per real fixed physics step, never as teleports.
+    std::unordered_map<std::uint32_t,j::RVec3> pending_platform_moves;
+    std::unordered_set<std::uint32_t> kinematic_platforms;
+    // Player controller independently accounts for support motion because its
+    // friction is intentionally zero; it must retain inertia when airborne.
+    std::unordered_map<std::uint32_t,std::array<float,2>> moved_static_deltas;
+    float moving_support_dt=0.f;
+    float last_support_vx=0.f, last_support_vz=0.f;
+    std::optional<std::uint32_t> player_city_base;
+    float player_city_grace_seconds=0.f;
     uint32_t initial_body_count = 0;
     std::vector<j::BodyID> static_meshes;
+    std::map<std::uint64_t,j::BodyID> terrain_bodies;
+    bool terrain_ground_suspended=false;
+    bool terrain_broadphase_dirty=false;
     std::vector<std::vector<std::uint32_t>> static_mesh_materials;
     double elapsed = 0.0;
 };
@@ -845,6 +1317,33 @@ int sweep_sphere(void* state,float sx,float sy,float sz,
         *result=static_cast<World const*>(state)->sweep(sx,sy,sz,ex,ey,ez,radius,ignored);
     });
 }
+int upsert_streamed_terrain(void* world,int32_t cx,int32_t cz,
+    const float* xyz,uint32_t vertices,const uint32_t* indices,uint32_t count) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null terrain world");
+        static_cast<World*>(world)->upsert_terrain(cx,cz,xyz,vertices,indices,count);
+    });
+}
+int remove_streamed_terrain(void* world,int32_t cx,int32_t cz) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null terrain world");
+        static_cast<World*>(world)->remove_terrain(cx,cz);
+    });
+}
+uint32_t streamed_terrain_resident_count(void* world) {
+    return world?uint32_t(static_cast<World*>(world)->terrain_bodies.size()):0u;
+}
+int commit_streamed_terrain(void* world) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null terrain world");
+        static_cast<World*>(world)->commit_terrain();
+    });
+}
+const NorthStarPhysicsTerrainApi terrain_api{
+    NORTHSTARCPP_PHYSICS_TERRAIN_ABI,upsert_streamed_terrain,
+    remove_streamed_terrain,streamed_terrain_resident_count,commit_streamed_terrain
+};
+
 int add_static_mesh(void* state,const float* vertices,uint32_t count,
     const uint32_t* indices,uint32_t index_count)
 {
@@ -1008,6 +1507,16 @@ const NorthStarPhysicsCookedHullsApi cooked_hulls_api{
 const NorthStarPhysicsResponseApi response_api{
     NORTHSTARCPP_PHYSICS_RESPONSE_ABI,
     configure_responses,query_responses,drain_contacts};
+int configure_body_material(void* world,uint32_t index,float friction,float restitution) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null body material world");
+        static_cast<World*>(world)->configure_body_material(
+            index,friction,restitution);
+    });
+}
+const NorthStarPhysicsBodyMaterialApi body_material_api{
+    NORTHSTARCPP_PHYSICS_BODY_MATERIAL_ABI,configure_body_material};
+
 const NorthStarPhysicsRuntimeApi runtime_api{
     NORTHSTARCPP_PHYSICS_RUNTIME_ABI, add_runtime_body, remove_runtime_body};
 
@@ -1078,6 +1587,30 @@ int set_character_sprint(void* world,std::uint32_t active) {
         static_cast<World*>(world)->set_sprinting(active!=0);
     });
 }
+int submit_root_motion(void* world,std::uint32_t index,
+    float dx,float dy,float dz,float seconds) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null Root Motion world");
+        static_cast<World*>(world)->queue_root_motion(index,dx,dy,dz,seconds);
+    });
+}
+int set_ai_move_intent(void* world,std::uint32_t index,
+                       float x,float z,float speed) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null AI motor world");
+        static_cast<World*>(world)->set_ai_intent(index,x,z,speed);
+    });
+}
+int clear_ai_move_intent(void* world,std::uint32_t index) {
+    return guarded([&] {
+        if(!world)throw std::invalid_argument("Null AI motor world");
+        static_cast<World*>(world)->clear_ai_intent(index);
+    });
+}
+const NorthStarPhysicsAiMotorApi ai_motor_api{
+    NORTHSTARCPP_PHYSICS_AI_MOTOR_ABI,set_ai_move_intent,clear_ai_move_intent};
+const NorthStarPhysicsRootMotionApi root_motion_api{
+    NORTHSTARCPP_PHYSICS_ROOT_MOTION_ABI,submit_root_motion};
 const NorthStarPhysicsCharacterApi character_api{
     NORTHSTARCPP_PHYSICS_CHARACTER_ABI,possess_character_body,
     set_character_sprint,configure_character_motor};
@@ -1091,6 +1624,28 @@ const NorthStarModule module{sizeof(NorthStarModule), NORTHSTARCPP_MODULE_ABI,
 extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     char const* capability, uint32_t version)
 {
+    if(version==NORTHSTARCPP_PHYSICS_TERRAIN_MODULE_ABI) {
+        static NorthStarModule const ext{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_PHYSICS,
+            "Jolt","5.6.0",NORTHSTARCPP_PHYSICS_TERRAIN_MODULE_ABI,
+            sizeof(terrain_api),&terrain_api,last_error};
+        return northstarcpp::module_provider::match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_PHYSICS_AI_MOTOR_MODULE_ABI) {
+        static NorthStarModule const ext{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_PHYSICS,
+            "Jolt","5.6.0",NORTHSTARCPP_PHYSICS_AI_MOTOR_MODULE_ABI,
+            sizeof(ai_motor_api),&ai_motor_api,last_error};
+        return northstarcpp::module_provider::match(ext,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_PHYSICS_ROOT_MOTION_MODULE_ABI) {
+        static NorthStarModule const extension{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_PHYSICS,
+            "Jolt","5.6.0",NORTHSTARCPP_PHYSICS_ROOT_MOTION_MODULE_ABI,
+            sizeof(root_motion_api),&root_motion_api,last_error};
+        return northstarcpp::module_provider::match(
+            extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_PHYSICS_CHARACTER_MODULE_ABI) {
         static NorthStarModule const extension{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_PHYSICS,
@@ -1125,6 +1680,13 @@ extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
             NORTHSTARCPP_CAPABILITY_PHYSICS,"Jolt","5.6.0",
             NORTHSTARCPP_PHYSICS_COOKED_HULLS_MODULE_ABI,
             sizeof(cooked_hulls_api),&cooked_hulls_api,last_error};
+        return northstarcpp::module_provider::match(ext,host,capability,version);
+    }
+    if (version == NORTHSTARCPP_PHYSICS_BODY_MATERIAL_MODULE_ABI) {
+        static NorthStarModule const ext{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_PHYSICS,
+            "Jolt","5.6.0",NORTHSTARCPP_PHYSICS_BODY_MATERIAL_MODULE_ABI,
+            sizeof(body_material_api),&body_material_api,last_error};
         return northstarcpp::module_provider::match(ext,host,capability,version);
     }
     if (version == NORTHSTARCPP_PHYSICS_RESPONSE_MODULE_ABI) {
@@ -1162,6 +1724,11 @@ extern "C" const NorthStarModule* northstar_module_query(uint32_t host,
     return northstarcpp::module_provider::match(module, host, capability, version);
 }
 
+extern "C" NORTHSTARCPP_MODULE_EXPORT
+NorthStarPhysicsTerrainApi const* northstar_physics_get_terrain_api(
+    uint32_t version) {
+    return version==NORTHSTARCPP_PHYSICS_TERRAIN_ABI?&terrain_api:nullptr;
+}
 extern "C" NORTHSTARCPP_MODULE_EXPORT
 NorthStarPhysicsSurfaceApi const* northstar_physics_get_surface_api(
     uint32_t version)

@@ -1,0 +1,56 @@
+<?xml version='1.0' encoding='utf-8'?>
+<NorthStarUI version="3" target="screen" layer="fpspause">
+  <Tokens>
+    <Token name="panel" type="color" value="#111c30f2" />
+    <Token name="accent" type="color" value="#f4c761ff" />
+    <Token name="button" type="color" value="#233c51f4" />
+    <Token name="text" type="color" value="#e9f2ffff" />
+  </Tokens>
+  <Styles>
+    <Style name="action">
+      <Property name="width" type="number" value="330" />
+      <Property name="height" type="number" value="54" />
+      <Property name="font_scale" type="number" value="2" />
+      <Property name="background" token="button" />
+      <Property name="color" token="text" />
+      <Property name="style" type="string" value="cyberpunk" />
+    </Style>
+  </Styles>
+  <Elements>
+    <Panel id="overlay">
+      <Property name="position" type="string" value="absolute" />
+      <Property name="x" type="number" value="0" />
+      <Property name="y" type="number" value="0" />
+      <Property name="width" type="number" value="4096" />
+      <Property name="height" type="number" value="2160" />
+      <Property name="background" type="color" value="#060c17bd" />
+    </Panel>
+    <Panel id="card" parent="overlay">
+      <Property name="position" type="string" value="absolute" />
+      <Property name="x" type="number" value="0" />
+      <Property name="y" type="number" value="0" />
+      <Property name="width" type="number" value="620" />
+      <Property name="height" type="number" value="485" />
+      <Property name="padding" type="number" value="26" />
+      <Property name="gap" type="number" value="13" />
+      <Property name="background" token="panel" />
+      <Property name="anchor_center_x" type="bool" value="true" />
+      <Property name="anchor_center_y" type="bool" value="true" />
+    </Panel>
+    <Text id="caption" parent="card">
+      <Property name="text" type="string" value="NORTHSTAR FPS / PAUSED" />
+      <Property name="height" type="number" value="70" />
+      <Property name="font_scale" type="number" value="3" />
+      <Property name="color" token="accent" />
+    </Text>
+    <Button id="resume" parent="card" style="action">
+      <Property name="text" type="string" value="RESUME" />
+    </Button>
+    <Button id="restart" parent="card" style="action">
+      <Property name="text" type="string" value="RESTART" />
+    </Button>
+    <Button id="exit" parent="card" style="action">
+      <Property name="text" type="string" value="EXIT GAME" />
+    </Button>
+  </Elements>
+</NorthStarUI>

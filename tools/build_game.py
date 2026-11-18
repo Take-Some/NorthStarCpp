@@ -28,6 +28,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.build_dist import V8_SIDECAR_FILES, parse_registry, verify_manifest as verify_engine
+from tools.split_distribution import verify_component
 from tools.dev.scene_binary import validate_nef8_scene, scene_entity_references
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -156,10 +157,33 @@ def scene_obj_refs(scene_file: Path) -> set[str]:
 
 
 def copy_game_assets(project: Path, target: Path, scene: Path) -> int:
-    # Copy the validated startup scene and project assets. Project scripts
-    # are separately staged and require a real scripting provider.
-    (target / ("main" + scene.suffix.lower())).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(scene, target / ("main" + scene.suffix.lower()))
+    # Copy the validated startup scene and all project assets, including
+    # assets/scripts. Executable script assets are validated separately.
+    destination = target / ("main" + scene.suffix.lower())
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(scene, destination)
+
+    profile = scene.with_name(scene.name + ".sky.json")
+    if is_link(profile):
+        raise GameBuildError("Redirected scene sky profile: " + str(profile))
+    if profile.exists():
+        if not profile.is_file() or profile.stat().st_size > 128 * 1024:
+            raise GameBuildError("Invalid scene sky profile: " + str(profile))
+        try:
+            settings = json.loads(profile.read_text(encoding="utf-8"))["sky"]
+        except (TypeError, ValueError, KeyError) as error:
+            raise GameBuildError("Invalid scene sky profile: " + str(profile)) from error
+        if not isinstance(settings, dict):
+            raise GameBuildError("Scene sky settings must be an object")
+    else:
+        # Keep the authored startup sky when the export renames the scene.
+        manifest = project / "northstarcpp.project.json"
+        settings = (json.loads(manifest.read_text(encoding="utf-8")).get("sky")
+                    if manifest.is_file() else None)
+    if settings is not None:
+        destination.with_name(destination.name + ".sky.json").write_text(
+            json.dumps({"sky": settings}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
     # Model resources are referenced by VFS-relative path, never absolute paths.
     # Fail before packaging if a prefab/scene references a missing OBJ.
     for model_path in scene_obj_refs(scene):
@@ -180,6 +204,10 @@ def copy_game_assets(project: Path, target: Path, scene: Path) -> int:
             continue
         if not entry.is_file():
             raise GameBuildError("Non-file asset encountered: " + str(entry))
+        # Backups created by authoring tools are preserved in the source
+        # project but must never become VFS assets in a shipped game.
+        if ".bak" in entry.name.lower():
+            continue
         size = entry.stat().st_size
         total += size
         if size > MAX_FILE or total > MAX_ASSETS:
@@ -233,39 +261,60 @@ def scene_script_refs(scene_file: Path) -> set[str]:
 
 
 def copy_game_scripts(project: Path, target: Path, scene: Path) -> int:
-    root = project / "scripts"
+    """Validate project script assets and stage legacy sources canonically.
+
+    assets/scripts is the only authored location for new projects. Virtual
+    script references remain scripts/main.js because assets is the VFS root.
+    Older project/scripts directories can still be exported as assets/scripts.
+    """
+    canonical = project / "assets" / "scripts"
+    legacy = project / "scripts"
+    root = canonical if canonical.is_dir() else legacy
     refs = scene_script_refs(scene)
     if not root.exists():
         if refs:
-            raise GameBuildError("Scene scripts missing from project scripts directory")
+            raise GameBuildError("Scene scripts missing from assets/scripts")
         return 0
     if not root.is_dir() or is_link(root):
-        raise GameBuildError("Invalid or redirected scripts directory")
+        raise GameBuildError("Invalid or redirected project scripts directory")
     count = 0
     total = 0
-    copied: set[str] = set()
+    packaged: set[str] = set()
     for entry in sorted(root.rglob("*")):
         if is_link(entry):
-            raise GameBuildError("Redirected file in project scripts")
+            raise GameBuildError("Redirected file in project script assets")
         if entry.is_dir():
             continue
-        if not entry.is_file() or entry.suffix.lower() not in (".js", ".mjs"):
-            raise GameBuildError("Project scripts directory may contain only .js/.mjs files")
+        if not entry.is_file():
+            raise GameBuildError("Invalid script asset")
+        # TypeScript and authoring descriptions are project assets, but are
+        # not directly executable by the V8 JavaScript runtime.
+        if entry.suffix.lower() not in (".js", ".mjs"):
+            continue
         size = entry.stat().st_size
         total += size
-        if size > 1024*1024 or total > 16*1024*1024 or count >= 1024:
-            raise GameBuildError("Project scripting source exceeds package limits")
-        relative = entry.relative_to(project).as_posix()
-        if not checked_relative(project, relative).is_file():
-            raise GameBuildError("Project script cannot be safely packaged")
-        dst = target / relative
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(entry, dst)
-        copied.add(relative)
+        if size > 1024 * 1024 or total > 16 * 1024 * 1024 or count >= 1024:
+            raise GameBuildError("Project script assets exceed package limits")
+        virtual = (Path("scripts") / entry.relative_to(root)).as_posix()
+        if virtual.startswith("/") or ".." in Path(virtual).parts:
+            raise GameBuildError("Invalid project script path")
+        source = checked_relative(project, entry.relative_to(project).as_posix())
+        if not source.is_file():
+            raise GameBuildError("Project script asset cannot be safely packaged")
+        destination = target / "assets" / virtual
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            # copy_game_assets already staged canonical source.
+            if destination.read_bytes() != entry.read_bytes():
+                raise GameBuildError("Packaged script differs from its source")
+        else:
+            shutil.copy2(entry, destination)
+        packaged.add(virtual)
         count += 1
-    missing=refs-copied
+    missing = refs - packaged
     if missing:
-        raise GameBuildError("Missing scene script files: " + ", ".join(sorted(missing)))
+        raise GameBuildError("Missing scene script assets: " +
+                             ", ".join(sorted(missing)))
     return count
 
 
@@ -339,8 +388,18 @@ def copy_game_animations(project: Path, target: Path) -> int:
 
 
 def selected_plugins(engine: Path, physics: str) -> tuple[dict, list[dict]]:
-    info = verify_engine(engine)
-    registry, _ = parse_registry(engine)
+    # GameClient is independently distributable and contains no Qt SDK.
+    # Legacy monolithic releases are still accepted.
+    manifest = engine / "manifest.json"
+    role = json.loads(manifest.read_text(encoding="utf-8")).get("distribution_role")
+    if role == "GameClient":
+        info = verify_component(engine, role="GameClient")
+        registry = json.loads((engine / "northstarcpp.plugins.json").read_text("utf-8"))
+    elif role is None:
+        info = verify_engine(engine)
+        registry, _ = parse_registry(engine)
+    else:
+        raise GameBuildError("Pass the GameClient runtime, not the Engine SDK")
     plugins = [item for item in registry["plugins"]
                if (item["capability"] == "engine.physics" and item["provider"].casefold() == physics)
                or (item["capability"] != "engine.physics" and item["default"])]
@@ -424,7 +483,7 @@ def verify_game(folder: Path) -> dict:
     if not CAPABILITIES.issubset(available) or len(available) != len(plugins):
         raise GameBuildError("Required game capabilities are missing or duplicated")
     script_files=[path for path in expected
-                  if path.startswith("game/scripts/") and
+                  if path.startswith("game/assets/scripts/") and
                   path.endswith((".js", ".mjs"))]
     declared_scripts=data.get("script_files",0)
     if (type(declared_scripts) is not int or declared_scripts != len(script_files) or
@@ -534,9 +593,12 @@ def release(project: Path, engine: Path, output: Path, physics: str, zip_package
     mode = game_mode(project)
     engine = engine.resolve(strict=True)
     engine_manifest, plugins = selected_plugins(engine, physics)
-    source_scripts=(project / "scripts").is_dir() and any(
+    script_root=project/"assets"/"scripts"
+    if not script_root.is_dir():
+        script_root=project/"scripts"
+    source_scripts=script_root.is_dir() and any(
         f.is_file() and f.suffix.lower() in (".js", ".mjs")
-        for f in (project / "scripts").rglob("*"))
+        for f in script_root.rglob("*"))
     scripted = bool(source_scripts or scene_script_refs(scene))
     if scripted and not any(
         p["capability"] == "engine.scripting" and
@@ -569,6 +631,18 @@ def release(project: Path, engine: Path, output: Path, physics: str, zip_package
                 src = engine / item["path"]
                 shutil.copy2(src, bindir / src.name)
         copy_bundled_runtime(engine, bindir, engine_manifest, plugins)
+        # Carry all verified engine resource dictionaries into standalone games.
+        # This works with both the legacy package and the split GameClient.
+        for relative in engine_manifest["files"]:
+            if relative.startswith("bin/archive/") and relative.endswith(".nsp"):
+                part = Path(relative)
+                if part.is_absolute() or ".." in part.parts:
+                    raise GameBuildError("Unsafe engine resource path")
+                target = stage / part
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(engine / part, target)
+        if "bin/bootstrap.json" in engine_manifest["files"]:
+            shutil.copy2(engine / "bin/bootstrap.json", bindir / "bootstrap.json")
         if any(p.get("path") == "bin/scripting_v8_sidecar.dll" for p in plugins):
             for relative in V8_SIDECAR_FILES:
                 if relative not in engine_manifest["files"]:
@@ -626,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--project", type=Path, help="Folder containing northstarcpp.project.json")
     cli.add_argument("--engine-package", type=Path, help="Verified NorthStarCpp engine distribution")
-    cli.add_argument("--output-dir", type=Path, default=ROOT / "dist" / "games")
+    cli.add_argument("--output-dir", type=Path, default=ROOT / "out" / "package" / "games")
     cli.add_argument("--physics", choices=("bullet", "jolt"), default="jolt")
     cli.add_argument("--allow-debug", action="store_true")
     cli.add_argument("--no-zip", action="store_true")

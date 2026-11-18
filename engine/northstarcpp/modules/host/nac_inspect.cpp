@@ -18,7 +18,7 @@ bool inspect_file(std::filesystem::path const& path,
         namespace fs=std::filesystem;
         std::error_code ec;
         auto const size=fs::file_size(path,ec);
-        if(ec || size<schema::nef8_header || size>256ull*1024*1024)
+        if(ec || size<schema::nef8_header || size>max_container_bytes)
             throw std::runtime_error("NAC NEF8: unreadable container size");
         std::ifstream input(path,std::ios::binary);
         std::array<std::uint8_t,schema::nef8_header> head{};

@@ -65,6 +65,9 @@ void RendererState::apply_graph_resource_states(
                     transient_alias.activate(command,request.resource);
             }
             break;
+        case FrameResource::Velocity:
+            if(velocity_enabled)target=motion_surface.Get();
+            break;
         case FrameResource::Exposure:
             if(hdr_enabled)
                 target=hdr_exposure[exposure_frame_index&1u].Get();

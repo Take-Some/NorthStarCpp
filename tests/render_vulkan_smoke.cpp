@@ -4,6 +4,7 @@
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_postfx_api.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -126,6 +127,38 @@ int main(int argc,char** argv) {
             std::swap(depth_triangles[i],depth_triangles[i+3]);
         REQUIRE(geometry->set_triangles(backend,depth_triangles,6));
         REQUIRE(render->draw(backend,&frame)); // near then far
+        // Near-plane regression: two vertices are in front of the camera,
+        // one lies behind it. Vulkan must clip the visible polygon instead
+        // of dropping all three vertices (the old floor-blinking bug).
+        NorthStarRenderTriangleVertex crossing[]{
+            {-2.f,-2.f,2.f,0x00ff00u},
+            { 2.f,-2.f,2.f,0x00ff00u},
+            { 0.f, 2.f,-.5f,0x00ff00u}};
+        REQUIRE(geometry->set_triangles(backend,crossing,3));
+        frame.verify_pixels=9;
+        REQUIRE(render->draw(backend,&frame));
+        // Test exactly the authored 50x50m bottom-anchored Jolt platform.
+        // A steep-down camera necessarily crosses its top face at z=0.1.
+        REQUIRE(geometry->set_triangles(backend,nullptr,0));
+        NorthStarRenderCube floor{};
+        floor.x=0.f;floor.y=-50.f;floor.z=0.f;
+        floor.size=50.f;floor.rgb=0x00ff00u;
+        floor.rotation[0]=floor.rotation[4]=floor.rotation[8]=1.f;
+        frame.cubes=&floor;frame.count=1;
+        frame.selected=-1; // No editor-selection yellow tint on floor.
+        frame.camera_y=1.6f;frame.camera_pitch=-.30f;
+        REQUIRE(render->draw(backend,&frame));
+        // Walk across the slab for 120 GPU frames. The center pixel must
+        // never flicker back to sky, even when the near plane cuts a different
+        // pair of triangle edges in consecutive frames.
+        for(unsigned step=0;step<120;++step) {
+            frame.camera_x=-4.f+8.f*float(step)/119.f;
+            frame.camera_z=-6.f+12.f*float(step)/119.f;
+            frame.camera_yaw=std::sin(float(step)*.04f)*.12f;
+            REQUIRE(render->draw(backend,&frame));
+        }
+        frame.camera_x=frame.camera_z=frame.camera_yaw=0.f;
+        frame.camera_y=0.f;frame.camera_pitch=0.f;
         REQUIRE(geometry->set_triangles(backend,v,3));
         frame.cubes=&cube;frame.count=1;
         frame.verify_pixels=2;
@@ -134,6 +167,30 @@ int main(int argc,char** argv) {
         REQUIRE(render->set_sky(backend,nullptr));
         SetWindowPos(window,nullptr,100,100,460,320,SWP_NOZORDER|SWP_NOACTIVATE);
         REQUIRE(render->draw(backend,&frame)); // Resize + recreate swapchain.
+        // Exercise non-neutral scene Filmic grading before drawing the HUD.
+        char hdr_flag[8]{};
+        const bool test_hdr=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_HDR",
+            hdr_flag,sizeof(hdr_flag))>0 && hdr_flag[0]=='1';
+        if(test_hdr) {
+            auto* extension=query(NORTHSTARCPP_MODULE_ABI,
+                NORTHSTARCPP_CAPABILITY_RENDER,
+                NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI);
+            REQUIRE(extension && extension->api_size>=
+                    sizeof(NorthStarRenderPostFxApi));
+            const auto* api=static_cast<const NorthStarRenderPostFxApi*>(
+                extension->api);
+            REQUIRE(api&&api->set_settings&&api->get_settings);
+            NorthStarRenderPostFxSettings settings{
+                sizeof(NorthStarRenderPostFxSettings),.65f,1.05f,
+                .93f,.12f,1.5f,.015f,0u};
+            REQUIRE(api->set_settings(backend,&settings));
+            NorthStarRenderPostFxSettings roundtrip{};
+            roundtrip.struct_size=sizeof(roundtrip);
+            REQUIRE(api->get_settings(backend,&roundtrip));
+            REQUIRE(roundtrip.chromatic_pixels==settings.chromatic_pixels);
+            REQUIRE(roundtrip.exposure_ev==settings.exposure_ev);
+        }
         auto* ui_module=query(NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_RENDER,NORTHSTARCPP_RENDER_UI_MODULE_ABI);
         REQUIRE(ui_module && ui_module->api_size>=sizeof(NorthStarRenderUiApi));

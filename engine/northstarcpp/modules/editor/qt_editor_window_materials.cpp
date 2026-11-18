@@ -12,6 +12,7 @@
 #endif
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
+#include <northstarcpp/sky_project_config.hpp>
 #include "qt_camera_studio.hpp"
 #include "qt_asset_preview_dialog.hpp"
 #include "qt_material_asset_dialog.hpp"
@@ -318,7 +319,7 @@ void QtEditorWindow::openMaterialEditor(QString const& reference) {
             if(material_authoring::edit_material_instance_dialog(
                 this,root,reference)) {
                 browser_->refresh();
-                viewport_->setAssetSources(file_.parent_path());
+                viewport_->setAssetSources(project_sky::find_root(file_),file_);
                 refreshMaterialChoices(true);
                 updateInspector();
                 viewport_->update();
@@ -340,7 +341,7 @@ void QtEditorWindow::openMaterialEditor(QString const& reference) {
             auto const base=std::filesystem::is_regular_file(local)?root:shared;
             (void)openMaterialAssetDialog(this,base,utf8(reference));
             browser_->refresh();
-            viewport_->setAssetSources(file_.parent_path());
+            viewport_->setAssetSources(project_sky::find_root(file_),file_);
             refreshMaterialChoices(true);
             updateInspector();
             viewport_->update();
@@ -349,8 +350,7 @@ void QtEditorWindow::openMaterialEditor(QString const& reference) {
         }
         return;
     }
-    if(!reference.endsWith(".ymat",Qt::CaseInsensitive) &&
-       !reference.endsWith(".material.json",Qt::CaseInsensitive)) {
+    if(!reference.endsWith(".ymat",Qt::CaseInsensitive)) {
         openAssetPreviewModal(this,native(folderRoot(file_)),
             utf8(reference),AssetKind::material);
         return;
@@ -595,7 +595,7 @@ void QtEditorWindow::openMaterialEditor(QString const& reference) {
             // Re-resolve the VFS and invalidate cached material texels and
             // GPU draws. The next editor frame uses the newly saved PBR
             // factors/textures rather than the old cached material.
-            viewport_->setAssetSources(file_.parent_path());
+            viewport_->setAssetSources(project_sky::find_root(file_),file_);
             refreshMaterialChoices(true);
             updateInspector();
             viewport_->update();
@@ -625,27 +625,25 @@ void QtEditorWindow::createMaterial() {
     if(!dir.mkpath("Materials")) {
         log("Failed to create Materials directory");return;
     }
-    auto material=dir.filePath("Materials/"+name+".material.json");
+    auto material=dir.filePath("Materials/"+name+".ymat");
     if(QFileInfo::exists(material)) {
         QMessageBox::warning(this,"Existing Material","A material with that name exists.");
         return;
     }
-    // Explicit authoring descriptor. Native NEF8/YMAT compilation is a separate
-    // pipeline, so this JSON file is never passed off as an encoded YMAT.
     QJsonObject attributes{
         {"schema",1},{"name",name},{"shader","standard_lit"},
         {"base_color","#d4dbe5"},{"metallic",0.0},
         {"roughness",0.65},{"base_color_texture",""}};
-    QSaveFile output(material);
-    if(!output.open(QIODevice::WriteOnly) ||
-       output.write(QJsonDocument(attributes).toJson(QJsonDocument::Indented))<0 ||
-       !output.commit()) {
-        log("Cannot create material descriptor");return;
+    try {
+        material_authoring::save_descriptor(native(folderRoot(file_)),
+            "Materials/"+name+".ymat",attributes);
+    }catch(std::exception const& e) {
+        QMessageBox::warning(this,"Create Material",from8(e.what()));
+        return;
     }
     browser_->refresh();
     refreshMaterialChoices(true);
     updateInspector();
-    log("Created project material: "+material+
-        " (native renderer material compilation remains a separate step)");
+    log("Created native XML YMAT: "+material);
 }
 }

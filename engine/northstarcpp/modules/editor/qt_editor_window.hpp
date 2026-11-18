@@ -17,6 +17,7 @@
 #include <unordered_set>
 #include <cstddef>
 class QDockWidget;
+class QGroupBox;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QLineEdit;
@@ -27,6 +28,7 @@ class QSpinBox;
 class QCheckBox;
 class QPlainTextEdit;
 class QAction;
+class QMenu;
 class QProcess;
 class QDialog;
 namespace northstarcpp::editor {
@@ -41,6 +43,8 @@ public:
     explicit QtEditorWindow(QWidget* parent=nullptr);
     bool openScene(QString const& file);
     bool saveScene(QString file={});
+    // Store a real viewport GPU frame beside the project's manifest.
+    bool captureProjectThumbnail(QString* diagnostic=nullptr);
     bool runSmoke(QString const& root);
     bool runPlaceActorsSmoke();
     bool runGpuSmoke(QString const& root);
@@ -85,9 +89,12 @@ private:
     QElapsedTimer gizmoInspectorTimer_;
     QtEditorViewport* viewport_{};
     QtContentBrowser* browser_{};
-    QtTextAssetWorkspace* textWorkspace_{};
+
     class QtContentDrawer* contentDrawer_{};
     QTreeWidget* outliner_{};
+    std::uint64_t outlinerContentHash_=0;
+    bool outlinerContentValid_=false;
+    QHash<quint64,QTreeWidgetItem*> outlinerItemsById_;
     QTreeWidget* dependencies_{};
     QTreeWidget* providers_{};
     QTreeWidget* components_{};
@@ -107,6 +114,12 @@ private:
     QDoubleSpinBox *px_{},*py_{},*pz_{},*size_{},*mass_{};
     QDoubleSpinBox *rx_{},*ry_{},*rz_{},*sx_{},*sy_{},*sz_{};
     QCheckBox *visible_{},*collision_{};
+    QGroupBox* lightSettings_{};
+    QComboBox* lightType_{};
+    QDoubleSpinBox *lightIntensity_{},*lightRange_{},*lightCone_{};
+    QDoubleSpinBox *lightR_{},*lightG_{},*lightB_{};
+    QDoubleSpinBox *lightDirX_{},*lightDirY_{},*lightDirZ_{};
+    QPushButton* lightApply_{};
     QComboBox* colliderShape_{};
     QComboBox* colliderObjectType_{};
     QSpinBox* colliderSplits_{};
@@ -127,6 +140,8 @@ private:
     QAction *pauseAction_{},*resumeAction_{},*stepAction_{},*ejectAction_{};
     QProcess* playerProcess_{};
     QtPlaySurface* playSurface_{};
+    QByteArray immersiveWorkspaceBefore_{};
+    bool immersiveViewport_=false;
     QByteArray playWorkspaceBefore_{};
     bool playMenuWasVisible_=false;
     bool playStatusWasVisible_=false;
@@ -136,6 +151,8 @@ private:
     QString configuredPlayerPath_;
     QAction* exploreModeAction_{};
     QAction* fpsModeAction_{};
+    QLineEdit* detailsSearch_{};
+    std::function<void()> updateDetailsFilter_;
 
     void wireAssetMutation(QtContentBrowser* browser);
     QtContentBrowser* createContentBrowserTab(QString const& dockId,
@@ -146,7 +163,13 @@ private:
     void restoreEditorChromeAfterPlay(bool clearSnapshot);
     QtPlaySurface* beginPlayOverlay();
     void endPlayOverlay();
+    void applyDefaultEditorLayout();
+    void applyAssetEditorLayout();
+    void toggleImmersiveViewport();
     void setupUi();
+    void setupOutlinerPanel(std::function<QMenu*(QWidget*)> const& makePlaceActorMenu);
+    void setupInspectorAndWorkspace(QMenu* viewMenu,QMenu* assetMenu,QAction* configureCharacter);
+    void wireWorkspaceSignals(QPushButton* apply);
     void updateAll();
     void updateOutliner();
     void updateInspector();
@@ -156,8 +179,13 @@ private:
     void updateDependencies();
     void refreshProviderInspector();
     void chooseObject(int index,bool preserveMulti=false);
+    std::uint64_t selectedPlayerBlueprintPawn() const;
+    void editSelectedPlayerBlueprint();
     void renameSelected();
     void duplicateSelected();
+    void setSelectedVisibility(bool visible);
+    void moveSelectedToLayer(QString const& layer);
+    void selectChildren();
     void deleteSelected();
     void editScene(std::function<void(Scene&)> change,int selectedAfter=-2);
     void createActor(QString const& asset,QVector3D position);
@@ -172,6 +200,7 @@ private:
     void assignMaterial(int actor,QString const& reference);
     void openMaterialEditor(QString const& reference);
     void openTextAsset(QString const& physical,bool sharedAsset);
+    void openUiAsset(QString const& physical,bool sharedAsset);
     void handleAssetDrop(QString const& reference,QVector3D position,int hitActor);
     void undo();
     void redo();

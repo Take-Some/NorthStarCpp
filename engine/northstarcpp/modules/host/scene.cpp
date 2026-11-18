@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <fstream>
@@ -46,6 +47,28 @@ void fail_windows(char const* operation)
 
 void write_scene_file(std::filesystem::path const& path, std::string const& bytes)
 {
+    // Deterministic NEF8 bytes allow idempotent saves. Avoid re-writing an
+    // unchanged scene: preserves asset timestamps and prevents unnecessary
+    // Content Browser reloads, watchers and downstream cache invalidation.
+    // Compare in bounded chunks instead of making a second full file copy.
+    std::ifstream existing(path, std::ios::binary | std::ios::ate);
+    if (existing && existing.tellg() == static_cast<std::streamoff>(bytes.size())) {
+        existing.seekg(0);
+        std::array<char, 16384> buffer{};
+        std::size_t matched=0;
+        while (matched < bytes.size()) {
+            auto const count=std::min(buffer.size(),bytes.size()-matched);
+            existing.read(buffer.data(),static_cast<std::streamsize>(count));
+            if (existing.gcount()!=static_cast<std::streamsize>(count) ||
+                !std::equal(buffer.data(),buffer.data()+count,bytes.data()+matched))
+                break;
+            matched+=count;
+        }
+        if (matched==bytes.size() && !existing.bad()) return;
+    }
+
+    // Close the read handle before Windows' atomic replace operation.
+    existing.close();
     static std::atomic<unsigned long> sequence{0};
     auto temp = path;
     temp += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +

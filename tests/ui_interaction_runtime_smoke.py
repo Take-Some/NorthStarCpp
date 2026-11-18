@@ -18,6 +18,7 @@ user32.PostMessageW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintyp
 SCRIPT=r"""
 import { UI, Events, Session } from "@northstar/engine";
 let root;
+let clickActivationRemaining=null;
 Events.on("start",()=>{
     root=UI.createRoot("clicktest");
     root.image("backdrop","textures/menu.ytd@bg",{
@@ -54,6 +55,9 @@ Events.on("start",()=>{
         engine.save.write("ui_click",JSON.stringify({
             id:event.id,type:event.name,value:event.value
         }));
+        // Same 185ms model as KaylaNightCity, tested with the actual
+        // Win32 UI provider and paused-independent runtime UI tick.
+        clickActivationRemaining=0.185;
     })
     .onChange("field",event=>{
         engine.save.write("ui_change",JSON.stringify({
@@ -67,8 +71,27 @@ Events.on("start",()=>{
         mounted:root.mounted,size:root.size
     }));
     engine.save.write("engine_version",JSON.stringify({
-        value:engine.rendering.engineVersion()
+        value:engine.render.provider.engineVersion()
     }));
+});
+let uiTicks=0;
+Events.on("ui.update",dt=>{
+    if (clickActivationRemaining!==null && Number.isFinite(dt) && dt>0) {
+        clickActivationRemaining-=Math.min(dt,0.10);
+        if(clickActivationRemaining<=0) {
+            clickActivationRemaining=null;
+            engine.save.write("ui_delayed_activation",JSON.stringify({
+                finished:true,action:"open_settings"
+            }));
+        }
+    }
+    // This must run even though the title fixture pauses gameplay.
+    // Standard engine "update" is intentionally suppressed while paused.
+    if (++uiTicks===3) {
+        engine.save.write("ui_tick_while_paused",JSON.stringify({
+            frames:uiTicks,seconds:dt,valueType:typeof dt
+        }));
+    }
 });
 Events.on("stop",()=>root?.dispose());
 """
@@ -106,8 +129,8 @@ def verify(player:Path):
         # material import can block pointer/render acceptance.
         project.mkdir()
         shutil.copy2(ROOT/"Projects/KaylaNightCity/menu.nscn",project/"menu.nscn")
-        (project/"scripts").mkdir()
-        (project/"scripts/main.js").write_text(SCRIPT,encoding="utf-8")
+        (project/"assets"/"scripts").mkdir(parents=True)
+        (project/"assets/scripts/main.js").write_text(SCRIPT,encoding="utf-8")
         src=ROOT/"Projects/KaylaNightCity/assets"
         (project/"assets/textures").mkdir(parents=True)
         shutil.copy2(src/"textures/menu.ytd",project/"assets/textures/menu.ytd")
@@ -124,7 +147,7 @@ def verify(player:Path):
             env["NORTHSTARCPP_RENDER_PROVIDER"]=="d3d12" else [])+[
             "--explore","--scene",
             str((project/"menu.nscn").resolve()),"--shared-assets",
-            str((ROOT/"sharedAssets").resolve())]
+            str((ROOT/"engine/northstarcpp/resources/sharedAssets").resolve())]
         with (path/"out.log").open("wb") as out,(path/"err.log").open("wb") as err:
             proc=subprocess.Popen(cmd,cwd=player.parent,env=env,
                 stdout=out,stderr=err)
@@ -143,15 +166,50 @@ def verify(player:Path):
                 if not window:
                     raise RuntimeError("UI viewport did not appear")
                 time.sleep(.6) # ensure raster context created on the first draw
+                # Optional pixel-level press acceptance (not a hard
+                # requirement if PrintWindow cannot capture this GPU path).
+                visual=None
+                capture_fn=None
+                folder=ROOT.parent/"cache"/"northstar_press_visual"
                 try:
-                    from editor_workspace_visual_smoke import capture
-                    image=ROOT.parent/"cache"/"northstar_ui_visual_2026-11-16.png"
-                    image.parent.mkdir(parents=True,exist_ok=True)
-                    capture(window,image)
-                    print("UI visual capture:",image)
+                    from editor_workspace_visual_smoke import capture as capture_fn
+                    folder.mkdir(parents=True,exist_ok=True)
+                    visual=capture_fn(window,folder/"idle.png")
+                    print("UI idle reference:",folder/"idle.png")
                 except Exception as capture_error:
+                    capture_fn=None
                     print("UI visual capture unavailable:",capture_error)
-                click(window,40,40)
+                if capture_fn:
+                    pt=((40&65535)<<16)|(40&65535)
+                    user32.SendMessageW(window,0x201,1,pt)
+                    try:
+                        time.sleep(.075)
+                        pressed=capture_fn(window,folder/"held.png")
+                    except Exception as capture_error:
+                        pressed=None
+                        print("Held-key visual capture unavailable:",capture_error)
+                    finally:
+                        user32.SendMessageW(window,0x202,0,pt)
+                    try:
+                        time.sleep(.055)
+                        released=capture_fn(window,folder/"release.png")
+                        if pressed and visual and visual[:2]==pressed[:2]:
+                            width,height,original=visual
+                            active=pressed[2]
+                            # Check the on-screen button's actual pixel
+                            # response, not only shader compilation success.
+                            diff=0
+                            for y in range(17,min(59,height)):
+                                for x in range(18,min(220,width)):
+                                    idx=(y*width+x)*4
+                                    diff+=sum(abs(original[idx+c]-active[idx+c])
+                                              for c in range(3))
+                            print("GPU held-button pixel difference:",diff,
+                                  "captures:",folder)
+                    except Exception as capture_error:
+                        print("Release capture unavailable:",capture_error)
+                else:
+                    click(window,40,40)
                 try:
                     button=read_marker(appdata,"ui_click")
                 except Exception:
@@ -159,6 +217,7 @@ def verify(player:Path):
                     click(window,40,40)
                     time.sleep(.2)
                     button=read_marker(appdata,"ui_click")
+                time.sleep(.28) # complete 185ms game-menu activation
                 click(window,40,85)
                 user32.SendMessageW(window,0x102,ord("Z"),0)
                 proc.wait(timeout=13)
@@ -169,8 +228,13 @@ def verify(player:Path):
                 confirm_sound=read_marker(appdata,"ui_sound_confirm")
                 for sound in (hover_sound,press_sound,confirm_sound):
                     assert isinstance(sound["voice"],int) and sound["voice"]>=0,sound
+                delayed=read_marker(appdata,"ui_delayed_activation")
+                assert delayed=={"finished":True,"action":"open_settings"},delayed
                 input_event=read_marker(appdata,"ui_change")
                 version_event=read_marker(appdata,"engine_version")
+                ui_tick=read_marker(appdata,"ui_tick_while_paused")
+                assert ui_tick["frames"]==3 and ui_tick["seconds"]>=0,ui_tick
+                print("UI tick runtime payload:",ui_tick)
                 import re
                 match=re.search(r"project\(NorthStarCpp VERSION ([0-9]+\.[0-9]+\.[0-9]+)",
                                 (ROOT/"CMakeLists.txt").read_text(encoding="utf-8"))

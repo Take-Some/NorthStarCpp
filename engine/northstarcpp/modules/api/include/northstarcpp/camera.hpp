@@ -151,6 +151,10 @@ public:
     bool has_track() const noexcept { return bool(track_); }
     float track_time() const noexcept { return track_time_; }
     void shake(float amplitude_metres, float duration_seconds);
+    // Angular recoil (radians), distinct from positional camera shake.
+    // Transient render-camera tilt decays automatically without rewriting
+    // the player's input yaw/pitch or moving the weapon's fire origin.
+    void recoil(float pitch_radians,float yaw_radians,float recovery_seconds);
     // Arbitration: higher priority wins; most recently updated wins ties.
     // A source is updated in-place, never duplicated. At most 16 active
     // requests, regardless of which JS/plugin subsystem owns the source.
@@ -212,6 +216,9 @@ private:
     float shake_remaining_ = 0.f;
     float shake_duration_ = 0.f;
     float shake_amplitude_ = 0.f;
+    float recoil_pitch_ = 0.f;
+    float recoil_yaw_ = 0.f;
+    float recoil_decay_ = 18.f;
     struct SequencedShot {
         CameraShot shot;
         std::uint64_t order=0;

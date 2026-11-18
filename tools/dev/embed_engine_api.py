@@ -10,10 +10,21 @@ import argparse
 import pathlib
 import hashlib
 
+from compose_northstar_bootstrap import compose
+
 EXTENSIONS = (".js", ".d.ts")
 LIMIT_BYTES = 1024 * 1024
 
 def resources(root: pathlib.Path):
+    # Compose authored, bounded subsystems into the single sealed V8 entry.
+    # Module fragments are build inputs, never individually executable API.
+    compose(root, verify=False)
+    import json
+    # Only manifest-selected class source units are concatenated.
+    # Default game roots in these directories remain independent entries.
+    manifest = root / "manifest.json"
+    names = json.loads(manifest.read_text("utf-8"))["modules"]
+    authored_modules = set(names)
     result = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.is_symlink():
@@ -21,6 +32,8 @@ def resources(root: pathlib.Path):
         if not path.name.endswith(EXTENSIONS):
             continue
         rel = path.relative_to(root).as_posix()
+        if rel in authored_modules:
+            continue  # already in northstar/bootstrap.js
         if any(part.startswith(".") or part == ".." for part in pathlib.PurePosixPath(rel).parts):
             raise ValueError(f"Invalid script path: {rel}")
         data = path.read_bytes()
@@ -34,7 +47,7 @@ def resources(root: pathlib.Path):
 
 def generate(values: list[tuple[str, bytes]]) -> str:
     out = [
-        "// Generated; DO NOT EDIT. Source: engine/northstarcpp/resources/api/.",
+        "// Generated; DO NOT EDIT. Source: engine/northstarcpp/resources/sharedAssets/api/.",
         "#include <northstarcpp/embedded_script_api.hpp>",
         "#include <algorithm>",
         "#include <iterator>",

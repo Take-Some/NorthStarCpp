@@ -110,7 +110,6 @@ Tree parse_json(std::string const& text)
 namespace {
 
 constexpr std::uint64_t fixed_header_size = 128;
-constexpr std::uint64_t maximum_body_size = 64u * 1024u * 1024u;
 
 std::string hex(std::uint8_t const* bytes, std::size_t size)
 {
@@ -182,7 +181,7 @@ static ListFile parse_list_file_v2(Bytes const& file, bool include_metadata)
     auto const compressed = file.integer(16, 8);
     auto const expanded = file.integer(24, 8);
     auto const prefix = minor >= 6 ? 64u : 32u;
-    auto const limit = (kind == 1 || kind == 5) ? 256ull * 1024 * 1024 : maximum_body_size;
+    auto const limit = list_body_limit(kind,true);
     require((minor == 5 || minor == 6 || minor == 8) && (flags & 1u) != 0 &&
         (flags & ~(minor >= 6 ? 7u : 3u)) == 0 &&
         schema > 0 && entries <= 65536 &&
@@ -205,7 +204,11 @@ static ListFile parse_list_file_v2(Bytes const& file, bool include_metadata)
             "NEF8 v2 body hash does not match");
     }
     if (include_metadata && metadata_size)
-        result.metadata = parse_json(file.string(prefix, metadata_size));
+        result.metadata = parse_json(
+            (kind==36 && minor==8 && metadata_size>=192 &&
+             file.magic(prefix+16,"NEF16"))
+                ? file.string(prefix+192,metadata_size-192)
+                : file.string(prefix,metadata_size));
     return result;
 }
 
@@ -233,7 +236,7 @@ ListFile parse_list_file(std::vector<std::uint8_t> const& bytes, bool include_me
     auto const metadata_offset = file.integer(48, 8);
     auto const metadata_size = file.integer(56, 8);
     require(offset >= header_size && offset <= file.size() && compressed > 0 &&
-        compressed == file.size() - offset && expanded > 0 && expanded <= maximum_body_size &&
+        compressed == file.size() - offset && expanded > 0 && expanded <= list_body_limit(kind) &&
         entries <= 65536, "Invalid NEF8 body range or entry count");
     require((metadata_size == 0 && metadata_offset == 0) ||
         (metadata_offset >= header_size && metadata_offset <= offset &&
@@ -251,7 +254,10 @@ ListFile parse_list_file(std::vector<std::uint8_t> const& bytes, bool include_me
 
 ListFile read_list_file(AssetStore const& assets, std::string const& path)
 {
-    require(assets.size(path) <= maximum_body_size, "NEF8 file is too large");
+    auto const ext=extension(path);
+    auto const limit=ext==".nac"?nac::max_container_bytes:
+        ext==".ytd"?256ull*1024*1024:standard_list_body_bytes;
+    require(assets.size(path) <= limit, "NEF8 file is too large");
     auto bytes=assets.read(path);
     return parse_list_file(bytes);
 }

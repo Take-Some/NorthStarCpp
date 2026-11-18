@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8"?>
+<YmatMaterialLibrary version="2" schema="northstarcpp.ymat.material_library.v2">
+  <Material name="ground_dry" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/dry_ground_01.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/dry_ground_01.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/dry_ground_01.ytd@rough" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value="1,1,1,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.91" />
+      <Param name="metallic" type="float" value="0.0" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="ground_gravel" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/gravelly_sand.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/gravelly_sand.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/gravelly_sand.ytd@rough" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value="1,1,1,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.94" />
+      <Param name="metallic" type="float" value="0.0" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="steel_corroded" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".68,.62,.57,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.83" />
+      <Param name="metallic" type="float" value="0.62" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="steel_grate" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_grid.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_grid.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_grid.ytd@rough" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".55,.55,.51,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.79" />
+      <Param name="metallic" type="float" value="0.68" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="hull_dark" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".24,.27,.29,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.91" />
+      <Param name="metallic" type="float" value="0.55" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="hull_armor" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".45,.36,.30,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.85" />
+      <Param name="metallic" type="float" value="0.64" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="deck_worn" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_grid.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_grid.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_grid.ytd@rough" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".34,.35,.34,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.94" />
+      <Param name="metallic" type="float" value="0.58" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="tread_dark" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".15,.16,.16,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.94" />
+      <Param name="metallic" type="float" value="0.36" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="city_cladding" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".52,.45,.38,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.86" />
+      <Param name="metallic" type="float" value="0.48" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="warning_amber" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".85,.50,.20,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.75" />
+      <Param name="metallic" type="float" value="0.38" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="glass_dark" shader="pbr.default">
+    <Surface blend="opaque" two_sided="false" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/rusty_metal_04.ytd@diff" />
+      <Texture slot="normal" ref="textures/rustsea/rusty_metal_04.ytd@nor_dx" />
+      <Texture slot="roughness" ref="textures/rustsea/rusty_metal_04.ytd@rough" />
+      <Texture slot="metallic" ref="textures/rustsea/rusty_metal_04.ytd@metal" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".08,.16,.20,1" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="0.42" />
+      <Param name="metallic" type="float" value="0.1" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+  <Material name="dust_translucent" shader="pbr.default">
+    <Surface blend="alpha" two_sided="true" alpha_cutoff="0" />
+    <Textures>
+      <Texture slot="base_color" ref="textures/rustsea/dust_cloud.ytd@diff" />
+    </Textures>
+    <Params>
+      <Param name="base_color" type="color" value=".80,.70,.57,.75" />
+      <Param name="normal_scale" type="float" value="1" />
+      <Param name="roughness" type="float" value="1.0" />
+      <Param name="metallic" type="float" value="0.0" />
+    </Params>
+    <Extensions>
+      <Property name="shading_model">pbr</Property>
+      <Property name="surface_domain">surface</Property>
+    </Extensions>
+  </Material>
+</YmatMaterialLibrary>

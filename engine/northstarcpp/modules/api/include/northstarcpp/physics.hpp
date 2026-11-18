@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/gameplay_possession_state.hpp>
 #include <northstarcpp/physics_vehicle_plugin.h>
 
 namespace northstarcpp {
@@ -26,6 +27,15 @@ struct PhysicsCastHit {
     std::uint32_t response=2; // Block=2, Overlap=1
 };
 
+// Deferred simulation-tick ground probes. Caller enqueues at animation time,
+// PhysicsScene executes up to 96 rays after a physics step, and the next
+// animation frame consumes an immutable result. No concurrent Jolt access.
+struct PhysicsGroundProbe {
+    bool hit=false;
+    Vector3 point{}, normal{0.f,1.f,0.f};
+    std::uint32_t object_index=UINT32_MAX;
+    float fraction=1.f;
+};
 struct PlayerAnimationFrame {
     std::uint64_t pawn_id=0;
     std::uint64_t mesh_id=0;
@@ -56,6 +66,10 @@ public:
     std::string provider_name() const;
     std::string provider_version() const;
     northstarcpp::math::float4x4 orientation(std::size_t object_index) const;
+    // Current collision-body transform in world space; used to attach a
+    // planted foot anchor to a moving support object.
+    std::optional<northstarcpp::math::float4x4> body_transform(
+        std::size_t object_index) const;
 
     // Elapsed seconds and requested horizontal movement on X and Z in [-1, 1].
     void step(float seconds, float input_x = 0.f, float input_z = 0.f);
@@ -66,8 +80,27 @@ public:
     void unpossess();
     std::uint64_t controlled_entity() const noexcept;
     std::optional<std::size_t> controlled_index() const noexcept;
+    // Explicit OnPossess/OnUnPossess stream, drained on the gameplay thread.
+    std::optional<gameplay::PossessionEvent> poll_controller_event() noexcept;
+    std::uint64_t dropped_controller_events() const noexcept;
+    // Gameplay view is decoupled from physical possession: an authored camera
+    // or spectator can be selected without transferring the controlled Pawn.
+    void set_view_target(std::uint64_t entity_id);
+    void reset_view_target() noexcept;
+    std::uint64_t view_target() const noexcept;
+    std::optional<std::size_t> view_target_index() const noexcept;
+    // Optional provider-owned NPC motors; may be absent in Bullet/older Jolt.
+    bool supports_ai_motor() const noexcept;
+    void set_ai_move_intent(std::uint64_t pawn_id,float input_x,float input_z,float speed);
+    void clear_ai_move_intent(std::uint64_t pawn_id);
     void set_sprinting(bool active);
     std::optional<PlayerAnimationFrame> player_animation() const;
+    bool supports_root_motion() const noexcept;
+    // Enqueue a bounded world-space displacement for the next physics tick.
+    // Jolt applies it as motor velocity under collision response, never
+    // by setting world position from the animation/render thread.
+    bool enqueue_root_motion(std::uint64_t animated_entity,Vector3 delta_world,
+        float seconds) const;
     void move_static(std::size_t index, Vector3 position);
     // Authored, non-colliding visual rotation does not change Pawn or rigidbody.
     void rotate_authored_visual(std::size_t index, Vector3 euler_degrees);
@@ -93,6 +126,9 @@ public:
     bool supports_scene_residency() const;
     bool supports_collision_response_matrix() const;
     std::vector<PhysicsContactEvent> poll_collision_events(std::size_t max_events=1024);
+    // Generic optional rigid-body surface material: shell and ball gameplay
+    // are configured by asset/profile, not inferred from mass or size.
+    bool set_body_material(std::size_t index,float friction,float restitution);
     std::size_t ecs_resident_entity_count() const;
 
     // Provider-neutral convex camera collision query and static triangle mesh
@@ -101,6 +137,15 @@ public:
         float radius, std::size_t ignore_index=static_cast<std::size_t>(-1)) const;
     void add_static_mesh(std::vector<Vector3> const& vertices,
                          std::vector<std::uint32_t> const& triangle_indices);
+    // Optional physics extension for replacing and evicting collision height
+    // chunks without changing legacy Physics ABI 4 or authored scene indices.
+    bool supports_streamed_terrain() const noexcept;
+    void upsert_terrain_chunk(std::int32_t chunk_x,std::int32_t chunk_z,
+                              std::vector<Vector3> const& vertices,
+                              std::vector<std::uint32_t> const& triangle_indices);
+    void remove_terrain_chunk(std::int32_t chunk_x,std::int32_t chunk_z);
+    void commit_streamed_terrain();
+    std::uint32_t terrain_resident_count() const noexcept;
 
     // Queries use a 0..15 project collision channel and respect Block/Overlap/Ignore.
     std::optional<PhysicsCastHit> sweep_sphere_channel(
@@ -111,6 +156,15 @@ public:
         Vector3 start,Vector3 end,std::uint32_t query_channel,
         bool include_overlaps=false,
         std::size_t ignore_index=static_cast<std::size_t>(-1)) const;
+
+    // Bounded, one-physics-step-latency ground probe API. Only the physics
+    // simulation thread executes provider queries. A zero ticket is invalid;
+    // a ready result with hit=false represents a ray miss.
+    std::uint64_t enqueue_ground_probe(Vector3 start,Vector3 end,
+        std::uint32_t query_channel=2u,
+        std::size_t ignore_index=static_cast<std::size_t>(-1)) const;
+    std::optional<PhysicsGroundProbe> consume_ground_probe(
+        std::uint64_t ticket) const;
 
     // Optional Jolt physics surface material extension.
     bool supports_surface_materials() const;

@@ -57,6 +57,7 @@ void RendererState::record_shadow_pass(FramePassContext& context) {
                         commands->DrawInstanced(draw.count,1,draw.first,0);
                     }
                 }
+                if(!rigid_draws.empty())record_rigid_shadow(cascade);
             }
             commands->RSSetViewports(1,&viewport);
             commands->RSSetScissorRects(1,&scissors);

@@ -1,0 +1,6 @@
+NorthStarCpp.Scene 3
+scene "Pistol"
+streaming 150 220 1
+stream_budget 64 64
+layer "Default" 1
+entity 1 0 "Pistol" "Default" "" "" "models/weapon/pistol/pistol.ydd" 0 0 0 1.00 424954 0 0.65 0 0 0 1 1 1 0 1000000 1 1

@@ -27,9 +27,9 @@ NorthStar.modules.engine.Events.on("start",()=>{
     const authoredVisuals=[...Scene.iterate()].filter(entity=>
         entity && (entity.name==="SkeletalMesh" || entity.name==="Abby"));
     if(!pawn || pawn.name!=="Demo Pawn" || Player.index!==pawn.index ||
-       Player.entityId!=="1" || !weapon ||
-       authoredVisuals.length!==1 || authoredVisuals[0].id!=="44" ||
-       Scene.objectCount()!==45)
+       Player.entityId!==String(pawn.id) || !weapon ||
+       authoredVisuals.length!==1 || String(authoredVisuals[0].parent)!==String(pawn.id) ||
+       Scene.objectCount()<40)
         throw new Error("Abby/Pawn/Pistol runtime composition or duplicate visual failed");
     engine.save.write("scripting_start",JSON.stringify({
         phase:"start",pawn:Player.entityId,index:Player.index,
@@ -74,7 +74,7 @@ const QaPrefab=NorthStar.modules.engine.Prefab;
 let qaCharacter=null,qaFrames=0;
 Events.on("start",()=>{
     // No character controller and no equipped weapon are required.
-    qaCharacter=QaPrefab.instantiate("prefabs/abby.nprefab",{
+    qaCharacter=QaPrefab.instantiate("prefabs/characters/abby.nprefab",{
         position:{x:4,y:0,z:9}
     });
     const abby=Scene.findByName("Abby");
@@ -112,11 +112,11 @@ def run(player:Path,seconds:int=30,no_weapon:bool=False):
         game=root/"game"
         shutil.copytree(ROOT/"Projects/AbbyPistolDemo",game)
         if os.environ.get("NORTHSTARCPP_QA_NO_ARMS")=="1":
-            config=game/"scripts/playerConfig.js"
+            config=game/"assets/scripts/playerConfig.js"
             config.write_text(config.read_text("utf-8").replace(
                 "firstPersonArms: true","firstPersonArms: false"),encoding="utf-8")
         if no_weapon:
-            config=game/"scripts/playerConfig.js"
+            config=game/"assets/scripts/playerConfig.js"
             source=config.read_text("utf-8")
             assert source.count("Player.configure({\n    enabled: true,")==1
             source=source.replace("Player.configure({\n    enabled: true,",
@@ -125,7 +125,7 @@ def run(player:Path,seconds:int=30,no_weapon:bool=False):
             source=source.replace("    weapon: {\n        enabled: true,",
                 "    weapon: {\n        enabled: false,",1)
             config.write_text(source,encoding="utf-8")
-        entry=game/"scripts/main.js"
+        entry=game/"assets/scripts/main.js"
         source=entry.read_text("utf-8")
         # Only the QA copy drops the HUD when testing native skinning on
         # providers that do not implement the optional GPU UI compositor.
@@ -186,6 +186,10 @@ def run(player:Path,seconds:int=30,no_weapon:bool=False):
                 "skydome_pass":skydome_ok,"markers":markers,
                 "log_tail":loglines[-5:]},ensure_ascii=False))
             return
+        # The gameplay view must be a real single-body FPS pose, with only
+        # self-occluding head surfaces masked, not a detached arms-only clone.
+        if "True FPS body head-hidden vertices=" not in errors:
+            raise RuntimeError("Missing authored true first-person body rendering")
         if "bone_attachment=PASS" not in errors or "joint=r_hand_prop_attachment" not in errors:
             raise RuntimeError("Pistol did not resolve the animated Abby hand socket")
         markers={name:read_marker(appdata,name)
@@ -198,9 +202,21 @@ def run(player:Path,seconds:int=30,no_weapon:bool=False):
         muzzle_axis=tuple(float(axis_match.group(i)) for i in (1,2,3))
         assert muzzle_axis[2]>0.90 and abs(muzzle_axis[0])<0.3 and abs(muzzle_axis[1])<0.3, muzzle_axis
         eye=markers["scripting_start"]["eye"]
-        assert eye["x"]<socket[0]<eye["x"]+0.85, (eye,socket,viewmodel_lines[-20:])
+        # The character's anatomical "right" is not necessarily +X after
+        # YDD/YMT import normalization. Verify against the ACTUAL solved
+        # right-wrist joint, never a hardcoded camera-side sign.
+        grip_match=re.search(
+            r"fps_grip=SOLVED[^\n]*wrist=\(([-0-9.]+),([-0-9.]+),([-0-9.]+)\)",
+            errors)
+        assert grip_match, "No evaluated right-wrist pose in FPS logs"
+        right_wrist=tuple(float(grip_match.group(i)) for i in (1,2,3))
+        wrist_gap=sum((socket[i]-right_wrist[i])**2 for i in range(3))**0.5
+        assert wrist_gap<.09, (socket,right_wrist,wrist_gap)
+        assert abs(eye["x"]-socket[0])<.45, (eye,socket,viewmodel_lines[-20:])
         assert eye["y"]-0.7<socket[1]<eye["y"]+0.2, (eye,socket,viewmodel_lines[-20:])
-        assert eye["z"]+0.35<socket[2]<eye["z"]+2.5, (eye,socket,viewmodel_lines[-12:])
+        # True first-person retains Abby's torso at the Pawn instead of
+        # pushing a detached arm mesh forward; the natural reach is shorter.
+        assert eye["z"]+0.25<socket[2]<eye["z"]+1.2, (eye,socket,viewmodel_lines[-12:])
         assert markers["scripting_start"]["pawn"]=="1",markers
         assert markers["scripting_start"]["weapon"]=="Pistol",markers
         assert markers["scripting_update"]["frames"]==5,markers

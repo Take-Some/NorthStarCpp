@@ -59,15 +59,29 @@ int main(int argc,char** argv) {
         QTemporaryDir temporary("northstar-ymat-edit-XXXXXX");
         check(temporary.isValid(),"Cannot create isolated YMAT test root");
         fs::path root=fs::u8path(temporary.path().toUtf8().toStdString());
-        fs::path jsonSource=repo/"tests/fixtures/materials/MultiMaterialDemo.ymat";
+        fs::path demoSource=repo/"tests/fixtures/materials/MultiMaterialDemo.ymat";
         fs::path xmlSource=repo/"Projects/NorthStarFirstPersonPlatform/assets/materials/skydome.ymat";
-        fs::path jsonTarget=root/"materials/TwoMaterials.ymat";
+        fs::path demoTarget=root/"materials/TwoMaterials.ymat";
         fs::path xmlTarget=root/"materials/Skydome.ymat";
-        copyFixture(jsonSource,jsonTarget);
+        copyFixture(demoSource,demoTarget);
         copyFixture(xmlSource,xmlTarget);
 
         auto demo=bytes(repo/
             "Projects/NorthStarFirstPersonPlatform/assets/materials/SoftTintDemo.ymat");
+        // A pre-migration kind-30 header must be rejected everywhere.
+        auto obsolete=demo;
+        obsolete.at(8)=30;
+        obsolete.at(9)=0;
+        bool rejectedLegacy=false;
+        try {
+            (void)native::read_ymat_library(obsolete);
+        }catch(std::exception const&){rejectedLegacy=true;}
+        check(rejectedLegacy,"Legacy JSON YMAT kind 30 was accepted by editor");
+        rejectedLegacy=false;
+        try {
+            (void)native::load_materials_from_bytes(obsolete,"materials/obsolete.ymat");
+        }catch(std::exception const&){rejectedLegacy=true;}
+        check(rejectedLegacy,"Legacy kind 30 was accepted by runtime loader");
         auto normalized=native::migrate_ymat_to_xml(demo);
         auto xmlBody=native::read_ymat_library(normalized);
         check(xmlBody.kind==4 &&
@@ -78,13 +92,13 @@ int main(int argc,char** argv) {
               "Canonical XML YMAT must use one authoritative Graph and no duplicate editor data");
         check(native::migrate_ymat_to_xml(normalized)==normalized,
               "Canonical XML YMAT normalization is not idempotent");
-        auto const originalJson=bytes(jsonTarget);
-        auto const jsonMeta=native::read_ymat_library(originalJson);
-        check(jsonMeta.kind==30 && jsonMeta.count==2,
-              "Expected two materials in kind-30 YMAT");
-        auto beforeJson=native::load_materials_from_bytes(
-            originalJson,"materials/TwoMaterials.ymat");
-        check(beforeJson[0].name=="Copper Panel" && beforeJson[1].name=="Blue Ceramic",
+        auto const originalDemo=bytes(demoTarget);
+        auto const demoMeta=native::read_ymat_library(originalDemo);
+        check(demoMeta.kind==4 && demoMeta.count==2,
+              "Expected two materials in canonical XML YMAT");
+        auto beforeDemo=native::load_materials_from_bytes(
+            originalDemo,"materials/TwoMaterials.ymat");
+        check(beforeDemo[0].name=="Copper Panel" && beforeDemo[1].name=="Blue Ceramic",
               "Fixture order unexpectedly changed");
         auto blue=ma::load_descriptor(root,"materials/TwoMaterials.ymat@Blue Ceramic");
         check(blue.value("name").toString()=="Blue Ceramic",
@@ -100,33 +114,33 @@ int main(int argc,char** argv) {
                 {"ref","textures/masks.ytd@perlin"}});
         blue["textures"]=textures;
         ma::save_descriptor(root,"materials/TwoMaterials.ymat@Blue Ceramic",blue);
-        auto updatedJson=bytes(jsonTarget);
-        auto afterJson=native::load_materials_from_bytes(
-            updatedJson,"materials/TwoMaterials.ymat");
-        check(afterJson.size()==2 && equivalent(beforeJson[0],afterJson[0]),
+        auto updatedDemo=bytes(demoTarget);
+        auto afterDemo=native::load_materials_from_bytes(
+            updatedDemo,"materials/TwoMaterials.ymat");
+        check(afterDemo.size()==2 && equivalent(beforeDemo[0],afterDemo[0]),
               "Editing second material damaged first material");
-        check(!equivalent(beforeJson[1],afterJson[1]),
+        check(!equivalent(beforeDemo[1],afterDemo[1]),
               "Second material did not change");
         auto baseParameter=[](auto const& material) {
             for(auto const& param:material.parameters)
                 if(param.name=="base_color")return param.values;
             return std::vector<float>{};
         };
-        check(baseParameter(afterJson[1]).size()==4 &&
-              std::abs(baseParameter(afterJson[1])[3]-.37f)<.00001f,
+        check(baseParameter(afterDemo[1]).size()==4 &&
+              std::abs(baseParameter(afterDemo[1])[3]-.37f)<.00001f,
               "Changing YMAT Base Color discarded existing alpha");
-        check(afterJson[1].name=="Blue Ceramic" &&
-              afterJson[1].parameters.size()>beforeJson[1].parameters.size(),
+        check(afterDemo[1].name=="Blue Ceramic" &&
+              afterDemo[1].parameters.size()>beforeDemo[1].parameters.size(),
               "Custom YMAT parameters did not persist");
-        check(afterJson[1].textures.size()==1 &&
-              afterJson[1].textures[0].slot=="custom_mask",
+        check(afterDemo[1].textures.size()==1 &&
+              afterDemo[1].textures[0].slot=="custom_mask",
               "Custom YMAT texture slot was not saved");
         auto reloadedBlue=ma::load_descriptor(root,"materials/TwoMaterials.ymat@Blue Ceramic");
         check(std::abs(reloadedBlue.value("roughness").toDouble()-.37)<.00001,
               "Edited YMAT roughness did not survive reload");
-        check(native::read_ymat_library(updatedJson).kind==4 &&
-              native::read_ymat_library(updatedJson).count==jsonMeta.count,
-              "Legacy kind-30 YMAT was not migrated into canonical kind-4 XML");
+        check(native::read_ymat_library(updatedDemo).kind==4 &&
+              native::read_ymat_library(updatedDemo).count==demoMeta.count,
+              "Edited multi-material XML YMAT must remain NEF8 kind-4");
         // Delete only custom fields from the selected material; every other
         // record and the mandatory PBR parameters must remain available.
         QJsonArray onlyStandard;
@@ -138,10 +152,10 @@ int main(int argc,char** argv) {
         ma::save_descriptor(root,"materials/TwoMaterials.ymat@Blue Ceramic",
                             reloadedBlue);
         auto trimmed=native::load_materials_from_bytes(
-            bytes(jsonTarget),"materials/TwoMaterials.ymat");
+            bytes(demoTarget),"materials/TwoMaterials.ymat");
         check(trimmed[1].textures.empty() &&
-              trimmed[1].parameters.size()==beforeJson[1].parameters.size() &&
-              equivalent(beforeJson[0],trimmed[0]),
+              trimmed[1].parameters.size()==beforeDemo[1].parameters.size() &&
+              equivalent(beforeDemo[0],trimmed[0]),
               "Removing custom fields modified unrelated YMAT entries");
 
         auto originalXml=bytes(xmlTarget);

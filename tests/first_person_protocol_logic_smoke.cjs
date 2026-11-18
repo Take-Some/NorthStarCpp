@@ -37,8 +37,27 @@ const context={
     Keys:{T:84},
     UI:{
         setTitle:()=>{},
-        mount:(layer,nodes)=>hud.push({layer,nodes}),
-        unmount:(layer)=>{assert.equal(layer,"mission");cleared=true;}
+        loadAsset(asset,{layer}) {
+            assert.equal(asset,"ui/mission_hud.nui");
+            assert.equal(layer,"mission");
+            const raw=require("../tools/dev/nui_test_bridge.cjs").decode(fs.readFileSync(path.join(__dirname,"..",
+                "Projects/NorthStarFirstPersonPlatform/assets",asset),"utf8"));
+            const nodes=raw.nodes.map(n=>({...n,props:{...n.props}}));
+            return {
+                batch(fn){fn();return this;},
+                setText(id,value){
+                    const item=nodes.find(n=>n.id===id);
+                    assert.ok(item);
+                    item.props.text=value;
+                    return this;
+                },
+                mount(){
+                    hud.push({layer,nodes:nodes.map(n=>({...n,props:{...n.props}}))});
+                    return this;
+                },
+                dispose(){cleared=true;}
+            };
+        }
     },
     Audio:{playWav:src=>cues.push(src)},
     Session:{restart:()=>{restart=true;}},

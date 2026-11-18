@@ -2,6 +2,7 @@
 // Author: Kayla Verner
 // Updated: 2026
 #include <northstarcpp/assets.hpp>
+#include <northstarcpp/asset_roots.hpp>
 #include "module_loader.hpp"
 #include "asset_streaming.hpp"
 #include "asset_streaming_sizes.hpp"
@@ -59,6 +60,79 @@ char const* key(std::string const& value)
 }
 
 } // namespace
+namespace asset_paths {
+namespace fs=std::filesystem;
+
+fs::path executable_dir()
+{
+#ifdef _WIN32
+    std::array<wchar_t,32768> name{};
+    auto const length=GetModuleFileNameW(nullptr,name.data(),
+        static_cast<DWORD>(name.size()));
+    if(length && length<name.size())
+        return fs::path(name.data()).parent_path();
+#endif
+    std::error_code ec;
+    return fs::current_path(ec);
+}
+
+namespace {
+bool is_engine_content_root(fs::path const& root)
+{
+    std::error_code ec;
+    if(root.filename()!="sharedAssets" ||
+       !fs::is_directory(root,ec) || ec ||
+       fs::is_symlink(root,ec) || ec)return false;
+    ec.clear();
+    return fs::is_directory(root/"models",ec) ||
+           fs::is_directory(root/"api",ec) ||
+           fs::is_directory(root/"materials",ec);
+}
+
+fs::path from_anchor(fs::path const& start)
+{
+    if(start.empty())return {};
+    std::error_code ec;
+    auto parent=fs::absolute(start,ec);
+    if(ec)return {};
+    if(!fs::is_directory(parent,ec))parent=parent.parent_path();
+    // Prefer the canonical engine source before legacy/installed layouts.
+    // All consumers use this order, with no Qt, Player or prefab exceptions.
+    constexpr std::array<char const*,5> layouts{{
+        "engine/northstarcpp/resources/sharedAssets",
+        "sharedAssets",
+        "resources/sharedAssets",
+        "share/northstarcpp/sharedAssets",
+        "NorthStarCpp/engine/northstarcpp/resources/sharedAssets"
+    }};
+    for(unsigned depth=0;depth<16 && !parent.empty();++depth) {
+        if(is_engine_content_root(parent)) {
+            auto resolved=fs::weakly_canonical(parent,ec);
+            if(!ec)return resolved;
+        }
+        for(auto const* relative:layouts) {
+            auto const candidate=parent/fs::u8path(relative);
+            if(!is_engine_content_root(candidate))continue;
+            ec.clear();
+            auto resolved=fs::weakly_canonical(candidate,ec);
+            if(!ec)return resolved;
+        }
+        auto const next=parent.parent_path();
+        if(next==parent)break;
+        parent=next;
+    }
+    return {};
+}
+} // namespace
+
+fs::path locate_shared_root(fs::path const& preferred,
+                            fs::path const& fallback)
+{
+    auto first=from_anchor(preferred);
+    return first.empty()?from_anchor(fallback):first;
+}
+} // namespace asset_paths
+
 struct AssetStore::State {
     Module module{NORTHSTARCPP_CAPABILITY_ASSETS};
     NorthStarAssetsApi const& api = *module.query<NorthStarAssetsApi>(NORTHSTARCPP_ASSETS_ABI);
@@ -91,36 +165,57 @@ struct AssetStore::State {
 AssetStore::AssetStore() : state(std::make_unique<State>()) {}
 AssetStore::~AssetStore() { state->streaming.stop(); }
 std::string AssetStore::provider_name() const { return state->module.provider(); }
+void AssetStore::mount_base_assets(std::filesystem::path const& anchor,
+                                  std::filesystem::path const& shared_root)
+{
+    namespace fs=std::filesystem;
+    mount_runtime_archives();
+    auto const common=shared_root.empty()?
+        asset_paths::locate_shared_root(anchor,asset_paths::executable_dir()):
+        shared_root;
+    if(common.empty())return;
+
+    if(fs::is_regular_file(common) && common.extension()==".nsp") {
+        // An explicit NSP must never be mounted twice under different
+        // priorities when it already lives in the runtime archive folder.
+        std::error_code ec;
+        auto const discovered=runtime_archives_path()/common.filename();
+        if(!fs::equivalent(common,discovered,ec) || ec)
+            mount_archive("",common,common,-90);
+        return;
+    }
+    if(!fs::is_directory(common))
+        throw std::invalid_argument("Engine sharedAssets source is not a directory");
+
+    std::error_code ec;
+    if(fs::equivalent(common,anchor,ec) && !ec)return;
+    ec.clear();
+    if(fs::is_directory(anchor/"assets",ec)) {
+        ec.clear();
+        if(fs::equivalent(common,anchor/"assets",ec) && !ec)return;
+    }
+    mount_shared_assets(common);
+}
 void AssetStore::mount_project_assets(std::filesystem::path const& project_root,
                                       std::filesystem::path const& shared_root)
 {
-    namespace fs = std::filesystem;
-    if (!fs::is_directory(project_root))
+    namespace fs=std::filesystem;
+    if(!fs::is_directory(project_root))
         throw std::invalid_argument("Project VFS root is not a directory");
-    auto const assets = project_root / "assets";
-    auto const has_assets = fs::is_directory(assets);
-    mount_runtime_archives();
-    if(!shared_root.empty()) {
-        if(fs::is_regular_file(shared_root) && shared_root.extension()==".nsp") {
-            // Compatibility for explicit pack mounts; avoid a second mount.
-            auto const discovered=runtime_archives_path()/shared_root.filename();
-            std::error_code ec;
-            bool const duplicate=fs::equivalent(shared_root,discovered,ec) && !ec;
-            if(!duplicate)mount_archive("",shared_root,shared_root,-90);
-        } else {
-            if(!fs::is_directory(shared_root))
-                throw std::invalid_argument("Engine sharedAssets source is not a directory");
-            std::error_code ec;
-            bool const is_project=fs::equivalent(project_root,shared_root,ec) && !ec;
-            ec.clear();
-            bool const is_assets=has_assets && fs::equivalent(assets,shared_root,ec) && !ec;
-            if(!is_project && !is_assets)
-                mount_directory("",shared_root,-80); // editable development overlay
-        }
-    }
-    mount_directory("", project_root, 0); // scripts/, project metadata, scenes
-    if (has_assets)
-        mount_directory("", assets, 100); // textures/, models/, gameplay/
+    mount_base_assets(project_root,shared_root);
+    mount_directory("",project_root,0); // scene metadata, legacy files
+    auto const assets=project_root/"assets";
+    if(fs::is_directory(assets))
+        mount_directory("",assets,100); // canonical project asset override
+}
+void AssetStore::mount_content_assets(std::filesystem::path const& content_root,
+                                     std::filesystem::path const& shared_root)
+{
+    if(!std::filesystem::is_directory(content_root))
+        throw std::invalid_argument("Content VFS root is not a directory");
+    mount_base_assets(content_root,shared_root);
+    // The same project override tier is used by game and editor previews.
+    mount_directory("",content_root,100);
 }
 void AssetStore::mount_runtime_archives(std::filesystem::path const& root)
 {

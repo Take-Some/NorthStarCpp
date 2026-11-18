@@ -1,0 +1,12 @@
+{
+  "schema": "northstar.character.v1",
+  "id": "characters/ellie",
+  "display_name": "Ellie",
+  "model": "characters/ellie/models/ellie.ydd",
+  "skeleton": "characters/ellie/models/ellie.ymt",
+  "appearance": {
+    "material": "characters/ellie/materials/ellie.ymat",
+    "textures": "characters/ellie/textures/ellie.ytd"
+  },
+  "animations": []
+}

@@ -2,29 +2,73 @@
 #include "renderer_private.hpp"
 #include "renderer_pass_graph.hpp"
 namespace northstarcpp::render::d3d12::detail {
-void RendererState::draw_translucent_materials(){
-        if(material_draws.empty())return;
-        ID3D12DescriptorHeap* heaps[]{material_srv_heap.Get()};
-        commands->SetDescriptorHeaps(1,heaps);
-        commands->SetGraphicsRootSignature(material_signature.Get());
-        commands->SetGraphicsRootConstantBufferView(
-            0,material_camera_gpu->GetGPUVirtualAddress());
-        commands->IASetVertexBuffers(0,1,&material_vertex_view);
-        commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        auto base=material_srv_heap->GetGPUDescriptorHandleForHeapStart();
-        for(UINT i=0;i<material_draws.size();++i) {
-            auto const& draw=material_draws[i];
-            if(draw.blend_mode!=2 || (!draw.variant_pipeline && !hot_pipeline(i)))continue;
-            auto handle=base;
-            handle.ptr+=UINT64(i*5)*material_descriptor_increment;
-            commands->SetPipelineState(hot_pipeline(i)?hot_pipeline(i):
-                                       draw.variant_pipeline.Get());
-            commands->SetGraphicsRootConstantBufferView(1,
-                material_constant_gpu->GetGPUVirtualAddress()+UINT64(i)*256u);
-            commands->SetGraphicsRootDescriptorTable(2,handle);
-            commands->DrawInstanced(draw.count,1,draw.first,0);
+void RendererState::draw_translucent_materials(
+    const northstarcpp::math::float3& focus,
+    const northstarcpp::math::float3& forward) {
+    if(material_draws.empty())return;
+    // Preserve depth-test and depth-write-disabled alpha state while globally
+    // sorting all translucent triangles by view distance (far -> near).
+    // Material submission order alone is not a physically valid alpha order.
+    translucent_draw_scratch.clear();
+    for(UINT batch=0;batch<material_draws.size();++batch) {
+        auto const& draw=material_draws[batch];
+        if(draw.blend_mode!=2u ||
+           (!draw.variant_pipeline&&!hot_pipeline(batch)))continue;
+        if(std::size_t(draw.first)+draw.count>material_cpu_vertices.size())
+            throw std::logic_error("D3D12 translucent source vertex bounds");
+        for(UINT first=draw.first;first+2u<draw.first+draw.count;first+=3u) {
+            auto const& a=material_cpu_vertices[first];
+            auto const& b=material_cpu_vertices[first+1u];
+            auto const& c=material_cpu_vertices[first+2u];
+            const float x=(a.x+b.x+c.x)/3.f-focus.x;
+            const float y=(a.y+b.y+c.y)/3.f-focus.y;
+            const float z=(a.z+b.z+c.z)/3.f-focus.z;
+            const float depth=x*forward.x+y*forward.y+z*forward.z;
+            translucent_draw_scratch.push_back({depth,batch,first});
         }
     }
+    if(translucent_draw_scratch.empty())return;
+    std::stable_sort(translucent_draw_scratch.begin(),
+        translucent_draw_scratch.end(),[](auto const& a,auto const& b) {
+            return a.distance>b.distance;
+        });
+    ID3D12DescriptorHeap* heaps[]{material_srv_heap.Get()};
+    commands->SetDescriptorHeaps(1,heaps);
+    commands->SetGraphicsRootSignature(material_signature.Get());
+    commands->SetGraphicsRootConstantBufferView(
+        0,material_camera_gpu->GetGPUVirtualAddress());
+    commands->IASetVertexBuffers(0,1,&material_vertex_view);
+    commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    auto base=material_srv_heap->GetGPUDescriptorHandleForHeapStart();
+    constexpr UINT invalid_batch=~0u;
+    UINT current=invalid_batch,first=0u,count=0u;
+    auto flush=[&]() {
+        if(count)commands->DrawInstanced(count,1,first,0);
+    };
+    for(auto const& triangle:translucent_draw_scratch) {
+        if(current==triangle.batch && triangle.first==first+count) {
+            count+=3u;
+            continue;
+        }
+        flush();
+        if(current!=triangle.batch) {
+            current=triangle.batch;
+            auto const& draw=material_draws[current];
+            auto handle=base;
+            handle.ptr+=UINT64(current*5u)*material_descriptor_increment;
+            commands->SetPipelineState(
+                hot_pipeline(current)?hot_pipeline(current):
+                                      draw.variant_pipeline.Get());
+            commands->SetGraphicsRootConstantBufferView(1,
+                material_constant_gpu->GetGPUVirtualAddress()+
+                    UINT64(current)*256u);
+            commands->SetGraphicsRootDescriptorTable(2,handle);
+        }
+        first=triangle.first;
+        count=3u;
+    }
+    flush();
+}
 void RendererState::draw(const NorthStarRenderFrame& frame){
         if(frame.count>northstarcpp::max_scene_objects||(frame.count&&!frame.cubes))
             throw std::invalid_argument("Invalid render frame");
@@ -77,6 +121,7 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         temporal_camera.width=width;temporal_camera.height=height;
         temporal_camera.first_person=frame.camera_override||frame.first_person;
         temporal_frame=temporal_tracker.begin(temporal_camera);
+        if(!temporal_frame.history_valid)temporal_instances.invalidate();
         if(!temporal_frame.history_valid) {
             exposure_history_valid=false;
             exposure_frame_clock_valid=false;
@@ -168,7 +213,8 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         UINT hud_line_start=UINT(vertices.size());
         vertices.insert(vertices.end(),hud_line.begin(),hud_line.end());
         bool const has_deferred_geometry =
-            hud_tri_start>grid || !material_draws.empty();
+            hud_tri_start>grid || !material_draws.empty() ||
+            !rigid_draws.empty();
         if(has_deferred_geometry) {
             ensure_gbuffer();
             ensure_light_buffers();
@@ -176,6 +222,25 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         // A deliberately conservative single frame in flight, safe for resizing
         // and transient CPU-side uploads; optimize once profiling is available.
         wait();
+        // Mapped, 256-byte aligned sky CBV: update after the old frame fence
+        // and before the new GPU submission, without texture uploads.
+        // HLSL SkyTint retains the original 5-vec4 layout. The extended
+        // provider struct's camera_world tail is consumed only by Vulkan.
+        constexpr std::size_t sky_parameters_bytes=5u*4u*sizeof(float);
+        std::memcpy(sky_tint_data+16,&gpu_sky_uniforms,sky_parameters_bytes);
+        const float sky_camera_world[4]{
+            camera_eye.x,camera_eye.y,camera_eye.z,1.f};
+        std::memcpy(sky_tint_data+16+sky_parameters_bytes,
+                    sky_camera_world,sizeof(sky_camera_world));
+        // The fullscreen Sky PS reconstructs view rays from the actual
+        // camera direction; viewport ratio follows the active backbuffer.
+        float const sky_camera_view[4]{
+            std::atan2(camera_forward.x,camera_forward.z),
+            std::asin(std::clamp(camera_forward.y,-1.f,1.f)),
+            fov,float(width)/float(height)};
+        std::memcpy(sky_tint_data+16+sky_parameters_bytes+
+                        sizeof(sky_camera_world),sky_camera_view,
+                    sizeof(sky_camera_view));
         pump_hot_shaders();
         if(!vertices.empty())
             std::memcpy(vertex_data,vertices.data(),vertices.size()*sizeof(Vertex));
@@ -195,6 +260,8 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
             states.seed(target.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if(shadows_enabled)
             states.seed(sun_shadow_map.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if(velocity_enabled)
+            states.seed(motion_surface.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if(postfx_enabled()) {
             states.seed(scene_color.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             if(hdr_enabled) {
@@ -232,23 +299,29 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
         // The selected GPU pass records directly into this D3D12 command list.
         // Resource-state transitions are owned by individual pass implementations.
         static const auto frame_graph_plans=[] {
-            std::array<northstarcpp::render::RenderGraphPlan,16> cache;
+            std::array<northstarcpp::render::RenderGraphPlan,32> cache;
             for(std::size_t flags=0;flags<cache.size();++flags)
                 cache[flags]=build_frame_graph(
-                    (flags&1)!=0,(flags&2)!=0,(flags&4)!=0,(flags&8)!=0).compile();
+                    (flags&1)!=0,(flags&2)!=0,(flags&4)!=0,
+                    (flags&8)!=0,(flags&16)!=0).compile();
             return cache;
         }();
         const auto flags=(gbuffer_v2?1u:0u) | (bloom_enabled?2u:0u) |
-                         (hdr_enabled?4u:0u) | (postfx_enabled()?8u:0u);
+                         (hdr_enabled?4u:0u) | (postfx_enabled()?8u:0u) |
+                         (velocity_enabled?16u:0u);
         auto const& frame_graph_plan=frame_graph_plans[flags];
         for(auto const& pass:frame_graph_plan.passes) {
-            const auto stage=static_cast<FrameStage>(pass.id);
+            const auto stage=velocity_enabled&&pass.id==4u?
+                FrameStage::Motion:
+                static_cast<FrameStage>(pass.id-
+                    (velocity_enabled&&pass.id>=5u?1u:0u));
             apply_graph_resource_states(pass,context);
             switch(stage) {
             case FrameStage::Shadow:record_shadow_pass(context);break;
             case FrameStage::GBuffer:record_gbuffer_pass(context);break;
             case FrameStage::Deferred:record_deferred_pass(context);break;
             case FrameStage::Translucency:record_translucency_pass(context);break;
+            case FrameStage::Motion:record_motion_pass(context);break;
             case FrameStage::Bloom:record_bloom_pass(context);break;
             case FrameStage::Exposure:record_exposure_pass(context);break;
             case FrameStage::Tonemap:record_tonemap_pass(context);break;
@@ -257,6 +330,10 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
             default:throw std::logic_error("Unknown D3D12 render graph pass");
             }
         }
+        // Alpha/deferred passes read depth. Return the resource to the
+        // well-defined initial state before the next frame or resize.
+        states.transition(commands.Get(),depth.Get(),
+                          D3D12_RESOURCE_STATE_DEPTH_WRITE);
         // Validate the exact end-of-frame contract assumed when the next
         // command-list frame seeds its known initial resource states.
         if(states.state(backs[index].Get())!=D3D12_RESOURCE_STATE_PRESENT ||
@@ -281,7 +358,14 @@ void RendererState::draw(const NorthStarRenderFrame& frame){
                 for(auto& exposure:hdr_exposure)
                     if(states.state(exposure.Get())!=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
                         throw std::logic_error("Render Graph did not restore exposure SRV");
+                if(velocity_enabled &&
+                   states.state(motion_surface.Get())!=
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+                    throw std::logic_error(
+                        "Render Graph did not restore D3D12 motion SRV");
             }
         }
+        // Preserve the actual rendered-frame pose, not the most recent setter.
+        temporal_instances.commit();
 }
 } // namespace northstarcpp::render::d3d12::detail

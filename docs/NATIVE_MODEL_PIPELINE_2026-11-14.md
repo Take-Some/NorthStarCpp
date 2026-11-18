@@ -32,7 +32,7 @@ negotiation.
 - sharedAssets/materials/weapon_pistol.ymat
 - sharedAssets/textures/weapon/pistol.ytd
 - sharedAssets/models/weapon/pistol/pistol.skeleton.ymt
-- Projects/NorthStarFirstPersonPlatform/prefabs/pistol.nprefab
+- Projects/NorthStarFirstPersonPlatform/prefabs/weapon/pistol.nprefab
 
 Verified: eight mesh parts, 21,902 triangles, four unique native
 material references, nonempty decoded YTD albedo, 62 skeleton joints.

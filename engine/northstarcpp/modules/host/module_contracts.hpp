@@ -11,14 +11,18 @@
 #include <northstarcpp/collision_plugin.h>
 #include <northstarcpp/time_plugin.h>
 #include <northstarcpp/physics_plugin.h>
+#include <northstarcpp/physics_terrain_streaming_api.h>
 #include <northstarcpp/physics_vehicle_plugin.h>
 #include <northstarcpp/vehicle_plugin.h>
 #include <northstarcpp/vehicle_dynamics_plugin.h>
 #include <northstarcpp/vehicle_cabin_plugin.h>
+#include <northstarcpp/vehicle_powertrain_plugin.h>
 #include <northstarcpp/render_triangles_api.h>
 #include <northstarcpp/render_ui_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_materials_api.h>
+#include <northstarcpp/render_rigid_instances_api.h>
+#include <northstarcpp/render_rigid_residency_api.h>
 #include <northstarcpp/render_shader_reload_api.h>
 #include <northstarcpp/render_postfx_api.h>
 #include <northstarcpp/render_skinning_api.h>
@@ -28,6 +32,8 @@
 #include <northstarcpp/render_features_api.h>
 #include <northstarcpp/render_editor_grid_api.h>
 #include <northstarcpp/render_pick_api.h>
+#include <northstarcpp/render_capture_api.h>
+#include <northstarcpp/render_sky_api.h>
 #include <northstarcpp/render_character_api.h>
 #include <northstarcpp/script_service_plugin.h>
 #include <northstarcpp/scripting_plugin.h>
@@ -59,6 +65,11 @@ inline bool valid_api(NsEcsApi const& api)
         api.at && api.set && api.get && api.has && api.remove && api.query && api.progress;
 }
 
+inline bool valid_api(NorthStarVehiclePowertrainApi const& api) {
+    return api.abi_version==NORTHSTARCPP_VEHICLE_POWERTRAIN_ABI &&
+        api.struct_size>=sizeof(NorthStarVehiclePowertrainApi) &&
+        api.configure && api.state && api.select_gear;
+}
 inline bool valid_api(NorthStarVehicleCabinApi const& api)
 {
     return api.abi_version==NORTHSTARCPP_VEHICLE_CABIN_ABI &&
@@ -88,6 +99,10 @@ inline bool valid_api(NorthStarPhysicsVehicleApi const& api)
         api.create && api.destroy && api.controls && api.pose &&
         api.wheel && api.wheel_count;
 }
+inline bool valid_api(NorthStarPhysicsTerrainApi const& api) {
+    return api.abi_version==NORTHSTARCPP_PHYSICS_TERRAIN_ABI &&
+           api.upsert && api.remove && api.resident_count && api.commit;
+}
 inline bool valid_api(NorthStarPhysicsApi const& api)
 {
     // Older ABI 4 providers may omit impulse support. The host checks it at use.
@@ -99,6 +114,16 @@ inline bool valid_api(NorthStarPhysicsCharacterApi const& api)
 {
     return api.abi_version==NORTHSTARCPP_PHYSICS_CHARACTER_ABI &&
         api.possess_body && api.set_sprinting && api.configure_motor;
+}
+inline bool valid_api(NorthStarPhysicsAiMotorApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_AI_MOTOR_ABI &&
+        api.set_intent && api.clear_intent;
+}
+inline bool valid_api(NorthStarPhysicsRootMotionApi const& api)
+{
+    return api.abi_version==NORTHSTARCPP_PHYSICS_ROOT_MOTION_ABI &&
+        api.submit!=nullptr;
 }
 inline bool valid_api(NorthStarPhysicsColliderApi const& api)
 {
@@ -134,6 +159,10 @@ inline bool valid_api(NorthStarPhysicsResponseApi const& api)
            api.configure && api.query && api.drain_events;
 }
 
+inline bool valid_api(NorthStarPhysicsBodyMaterialApi const& api) {
+    return api.abi_version==NORTHSTARCPP_PHYSICS_BODY_MATERIAL_ABI &&
+           api.configure!=nullptr;
+}
 inline bool valid_api(NorthStarPhysicsRuntimeApi const& api)
 {
     return api.abi_version==NORTHSTARCPP_PHYSICS_RUNTIME_ABI &&
@@ -150,6 +179,17 @@ inline bool valid_api(NorthStarRenderEditorGridApi const& api) {
     return api.abi_version==NORTHSTARCPP_RENDER_EDITOR_GRID_ABI &&
            api.struct_size>=sizeof(NorthStarRenderEditorGridApi) &&
            api.set_grid && (api.anti_aliasing_modes&1u);
+}
+
+inline bool valid_api(NorthStarRenderSkyApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_SKY_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderSkyApi) &&
+           api.set_uniforms!=nullptr;
+}
+inline bool valid_api(NorthStarRenderCaptureApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_CAPTURE_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderCaptureApi) &&
+           api.request && api.read;
 }
 
 inline bool valid_api(NorthStarRenderPickApi const& api) {
@@ -203,6 +243,16 @@ inline bool valid_api(NorthStarRenderMaterialsApi const& api)
     return api.abi_version==NORTHSTARCPP_RENDER_MATERIALS_ABI && api.set_batches;
 }
 
+inline bool valid_api(NorthStarRenderRigidResidencyApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_RIGID_RESIDENCY_ABI &&
+        api.struct_size>=sizeof(NorthStarRenderRigidResidencyApi) &&
+        api.release_meshes!=nullptr;
+}
+inline bool valid_api(NorthStarRenderRigidInstancesApi const& api) {
+    return api.abi_version==NORTHSTARCPP_RENDER_RIGID_INSTANCES_ABI &&
+           api.struct_size>=sizeof(NorthStarRenderRigidInstancesApi) &&
+           api.upload_mesh && api.clear_meshes && api.set_instances && api.read_stats;
+}
 inline bool valid_api(NorthStarRenderMaterialsApiV2 const& api)
 {
     return api.abi_version==NORTHSTARCPP_RENDER_MATERIALS_V2_ABI &&

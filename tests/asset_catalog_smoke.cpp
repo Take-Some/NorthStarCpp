@@ -77,6 +77,8 @@ int main(int argc,char** argv) {
               AssetKind::skeleton,"YMT must classify as a skeleton");
         check(kind_from_extension(fs::path("military-pistol.YCD"))==
               AssetKind::animation,"YCD must classify as animation");
+        check(kind_from_extension(fs::path("combat.nagraph.xml"))==
+              AssetKind::animation,"XML Animation Graph must classify as animation");
         catalog.scan(root/"Assets");
         auto const* character=catalog.find(
             "characters/abby/abby.character.json");
@@ -206,6 +208,34 @@ int main(int argc,char** argv) {
               "Repaired NEF8 dictionary failed to invalidate/reindex");
 
         std::cout<<"YMT joints="<<joints<<" YCD clips="<<clips<<"\n";
+        // Game scripts are first-class physical assets inside assets/scripts.
+        // A sibling project/scripts directory must not be indexed as an
+        // implicit source or override the canonical VFS tree.
+        fs::create_directories(root/"Assets"/"scripts"/"player");
+        std::ofstream(root/"Assets"/"scripts"/"main.js")<<"// main";
+        std::ofstream(root/"Assets"/"scripts"/"player"/"controller.ts")<<"export {};";
+        fs::create_directories(root/"scripts");
+        std::ofstream(root/"scripts"/"legacy.js")<<"// legacy";
+        catalog.scan(root/"Assets");
+        auto const* script_dir=catalog.find("scripts");
+        auto const* entry=catalog.find("scripts/main.js");
+        auto const* nested=catalog.find("scripts/player/controller.ts");
+        check(script_dir && script_dir->directory,
+              "Project script assets root missing");
+        check(entry && entry->kind==AssetKind::script,
+              "Project main.js missing from asset catalog");
+        check(nested && nested->kind==AssetKind::script,
+              "Nested TypeScript asset missing");
+        check(catalog.find("scripts/legacy.js")==nullptr,
+              "Legacy sibling scripts shadowed canonical assets");
+        check(catalog.backing_file("scripts/main.js")==
+              (root/"Assets"/"scripts"/"main.js").lexically_normal(),
+              "Script backing file must resolve under assets");
+        check(catalog.resolve("scripts/player")==
+              (root/"Assets"/"scripts"/"player").lexically_normal(),
+              "Nested script asset folder cannot be resolved");
+        check(catalog.asset_reference("scripts/main.js")=="scripts/main.js",
+              "Project VFS script reference unexpectedly changed");
         std::cout<<"Cross-platform asset catalog: PASS\n";
         return 0;
     } catch(std::exception const& e) {

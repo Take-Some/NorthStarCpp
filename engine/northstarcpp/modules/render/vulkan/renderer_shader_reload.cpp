@@ -41,8 +41,10 @@ void check(VkResult code,char const* call) {
 void Renderer::set_material_references(const char* const* references,
                                         std::uint32_t count) {
     if(count>NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES ||
-       count!=material_sources_.size() || (count && !references))
-        throw std::invalid_argument("Shader reload material binding count mismatch");
+       count+(sky_enabled_?1u:0u)!=material_sources_.size() ||
+       (count && !references))
+        { std::fprintf(stderr,"[WARN] [vulkan.shader] ref_count=%u material_count=%zu sky=%u\n",count,material_sources_.size(),sky_enabled_?1u:0u);
+          throw std::invalid_argument("Shader reload material binding count mismatch"); }
     std::vector<std::string> next;
     next.reserve(count);
     for(std::uint32_t i=0;i<count;++i) {

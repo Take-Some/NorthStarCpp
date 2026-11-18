@@ -1,7 +1,9 @@
 #include <northstarcpp/character.hpp>
 #include <northstarcpp/shared_assets.hpp>
+#include <northstarcpp/assets.hpp>
 #include "asset_list_file.hpp"
 #include "character_asset_namespace.hpp"
+#include "native_skin_reconstruction.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -20,11 +22,127 @@ std::string name_at(Bytes const& bytes, std::uint64_t base, std::uint64_t end, s
 }
 }
 
+// Native NVRM/YDD can carry the source's full twelve bone influences per
+// vertex. The existing CPU reference and GPU character ABI support eight;
+// select the eight strongest (never synthesize bone zero) and normalize.
+static CharacterModel parse_nvrm_character(
+    AssetStore const& assets, std::string const& path,
+    shared_assets::detail::ListFile const& file,
+    Skeleton const& rig)
+{
+    using namespace shared_assets::detail;
+    Bytes const body(file.body);
+    require(file.kind==6 && file.entries==1 && body.size()>=20 &&
+            body.magic(0,"NVRM") && body.integer(4,4)==1,
+            "Expected a skinned NVRM/YDD");
+    auto const meta_size=body.integer(8,4);
+    auto const geom_size=body.integer(12,8);
+    require(meta_size>0 && meta_size<=8u*1024u*1024u &&
+            20u+meta_size<=body.size() &&
+            geom_size==body.size()-20u-meta_size,
+            "Invalid NVRM skin metadata extent");
+    auto doc=parse_json(body.string(20,meta_size));
+    require(doc.get<std::string>("schema","")=="northstar.model.runtime.v1",
+            "Unsupported NVRM skin metadata schema");
+    auto const& metadata=doc.get_child("meshes");
+    auto drawables=shared_assets::load_drawables_from_bytes(
+        assets.read(path),path);
+    require(drawables.size()==1 && metadata.size()==drawables.front().meshes.size(),
+            "NVRM skinned mesh/geometry counts disagree");
+    CharacterModel result;
+    result.name=std::move(drawables.front().name);
+    for(unsigned i=0;i<4;++i)
+        for(unsigned j=0;j<4;++j)
+            result.mesh_to_skeleton.elements[i][j]=i==j?1.f:0.f;
+    auto geometry=20u+meta_size;
+    std::size_t mesh_id=0;
+    std::vector<native_skin_reconstruction::Anchor> repaired_anchors;
+    std::size_t reconstructed_parts=0,reconstructed_vertices=0;
+    for(auto const& record:metadata) {
+        auto const& entry=record.second;
+        CharacterMesh part;
+        part.mesh=std::move(drawables.front().meshes[mesh_id++]);
+        auto count=entry.get<std::size_t>("vertex_count");
+        require(count==part.mesh.vertices.size() && count<=200000,
+                "NVRM skin vertex count differs from mesh");
+        struct Stream { std::uint64_t offset=0; bool valid=false; };
+        Stream joints,weights;
+        for(auto const& s:entry.get_child("streams")) {
+            auto const& item=s.second;
+            auto const semantic=item.get<std::string>("semantic");
+            Stream* target=nullptr;
+            std::uint64_t stride=0;
+            char const* format="";
+            if(semantic=="joint_indices") {
+                target=&joints;stride=24;format="u16x12";
+            } else if(semantic=="joint_weights") {
+                target=&weights;stride=48;format="f32x12";
+            } else continue;
+            auto offset=item.get<std::uint64_t>("offset");
+            require(!target->valid && item.get<std::string>("format")==format &&
+                    item.get<std::uint64_t>("stride")==stride &&
+                    item.get<std::uint64_t>("length")==stride*count &&
+                    offset<=geom_size && stride*count<=geom_size-offset,
+                    "Invalid NVRM bone/weight stream");
+            *target={geometry+offset,true};
+        }
+        require(joints.valid && weights.valid,
+                "Skinned NVRM part has no original influence streams");
+        part.skin.reserve(count);
+        for(std::size_t vertex=0;vertex<count;++vertex) {
+            std::array<std::pair<float,std::uint16_t>,12> influences{};
+            float sum=0.f;
+            for(unsigned i=0;i<12;++i) {
+                auto const j=body.integer(joints.offset+vertex*24+2*i,2);
+                auto const w=body.real(weights.offset+vertex*48+4*i);
+                require(std::isfinite(w) && w>=0.f && w<=1.f &&
+                        (w<=0.f || j<rig.joints.size()),
+                        "Invalid original skin influence");
+                influences[i]={w,static_cast<std::uint16_t>(j)};
+                sum+=w;
+            }
+            require(sum>.99f && sum<1.01f,
+                    "Original NVRM skin weights are not normalized");
+            std::partial_sort(influences.begin(),influences.begin()+8,
+                influences.end(),
+                [](auto const& a,auto const& b){return a.first>b.first;});
+            float selected=0.f;
+            SkinWeights skin{};
+            for(unsigned i=0;i<8;++i) {
+                skin.joints[i]=influences[i].second;
+                skin.weights[i]=influences[i].first;
+                selected+=skin.weights[i];
+            }
+            require(selected>0.f,"No usable eight-influence NVRM skin");
+            for(auto& weight:skin.weights) weight/=selected;
+            part.skin.push_back(skin);
+        }
+        if(!entry.get<bool>("skin_binding.runtime_skinning_enabled",true)) {
+            if(repaired_anchors.empty())
+                repaired_anchors=native_skin_reconstruction::canonical_anchors(
+                    rig,result.mesh_to_skeleton);
+            const auto report=native_skin_reconstruction::rebind_part(
+                part,rig,repaired_anchors);
+            ++reconstructed_parts;
+            reconstructed_vertices+=report.corrected_vertices;
+        }
+        result.parts.push_back(std::move(part));
+    }
+    if(reconstructed_parts)
+        std::fprintf(stderr,
+            "[WARN] [engine.animation] Reconstructed INFERRED native skin "
+            "for inert source palette asset=%s parts=%zu vertices=%zu "
+            "originalPaletteNotDecoded=true\n",
+            path.c_str(),reconstructed_parts,reconstructed_vertices);
+    return result;
+}
+
 CharacterModel load_character_model(AssetStore const& assets, std::string const& path,
                                     Skeleton const& rig)
 {
     using namespace shared_assets::detail;
     auto file = read_list_file(assets, path);
+    if(file.kind==6)return parse_nvrm_character(assets,path,file,rig);
     Bytes const bytes(file.body);
     require(file.kind == 2 && file.entries == 1 && bytes.integer(0,4) == 4 &&
         bytes.integer(4,4) == 1 && bytes.integer(8,8) == 40, "Expected a skeletal YDD v4");

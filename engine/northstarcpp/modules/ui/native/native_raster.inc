@@ -117,6 +117,16 @@ RectMap geometry(Context& context) {
         };
         if(booleanProperty("anchor_right"))x=parent.x+parent.w-padding-width;
         if(booleanProperty("anchor_bottom"))y=parent.y+parent.h-padding-height;
+        // Resolution-independent UI/2 design: center anchors and percentage
+        // placement are computed from the actual parent rectangle.
+        if(booleanProperty("anchor_center_x"))
+            x=parent.x+(parent.w-width)/2;
+        if(booleanProperty("anchor_center_y"))
+            y=parent.y+(parent.h-height)/2;
+        if(double percentage=prop(node,"x_percent",-1.);percentage>=0.)
+            x=parent.x+dimension(parent.w*std::min(percentage,100.)/100.,0);
+        if(double percentage=prop(node,"y_percent",-1.);percentage>=0.)
+            y=parent.y+dimension(parent.h*std::min(percentage,100.)/100.,0);
         x+=static_cast<int>(prop(node,"x",0));
         y+=static_cast<int>(prop(node,"y",0));
         x-=static_cast<int>(prop(container,"scroll_x",0));

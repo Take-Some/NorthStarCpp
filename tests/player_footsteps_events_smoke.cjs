@@ -24,7 +24,7 @@ function load(file,imports=false){
  src="(()=>{"+src+"})();";}
  vm.runInContext(src,ctx,{filename:file,timeout:1500});
 }
-load("northstar/bootstrap.js");load("northstar/events.js");
+load("northstar/bootstrap.js");
 const Events=vm.runInContext("NorthStar.modules.engine.Events",ctx);
 Events.define("qa.once",p=>typeof p==="number");
 let once=0;Events.once("qa.once",()=>once++);Events.emit("qa.once",1);Events.emit("qa.once",2);
@@ -35,8 +35,10 @@ const scoped=Events.scope();let scopedCount=0;
 scoped.on("qa.once",()=>scopedCount++);Events.emit("qa.once",3);
 scoped.dispose();Events.emit("qa.once",4);assert.equal(scopedCount,1);
 const Player=vm.runInContext("NorthStar.player",ctx);
-Player.configure({enabled:true});
-load("audio/footsteps.js",true);load("player/playerFootsteps.js",true);
+Player.configure({enabled:true,footsteps:{
+    sounds:{wood:{asset:"audio/footsteps/wood.nac",gain:0.85}}
+}});
+load("character/footsteps.js",true);
 Events.on("player.footstep",e=>steps.push(e));
 engine.emit("start");
 const tick=(n=1)=>{for(let i=0;i<n;i++)engine.emit("update",0.1);};

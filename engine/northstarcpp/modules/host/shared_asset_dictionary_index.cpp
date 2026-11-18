@@ -69,20 +69,89 @@ std::vector<AnimationClipInfo> inspect_animation_clip_dictionary(
     }
     return clips;
 }
+std::string decode_particle_runtime_json(
+    std::vector<std::uint8_t> const& source) {
+    using namespace detail;
+    auto const file=parse_list_file(source,false);
+    require(file.kind==36 && file.body.size()>=20,
+            "Expected a native YPT particle dictionary");
+    Bytes const body(file.body);
+    require(body.magic(0,"NVPT") && body.integer(4,4)==1 &&
+            body.integer(8,8)==file.body.size()-20,
+            "Corrupt NVPT particle runtime header");
+    std::string json(reinterpret_cast<char const*>(file.body.data()+20),
+                     file.body.size()-20);
+    auto const root=parse_json(json);
+    require(root.get<std::string>("schema","")==
+                "northstar.particle_dictionary.runtime.v1" &&
+            bool(root.get_child_optional("effects")) &&
+            bool(root.get_child_optional("emitters")) &&
+            bool(root.get_child_optional("particles")),
+            "Invalid NVPT particle schema");
+    return json;
+}
 std::vector<DictionaryEntry> list_dictionary_entries(
     std::vector<std::uint8_t> const& source,std::string const& path) {
     using namespace detail;
     auto const ext=extension(path);
     require(ext==".ytd" || ext==".ydd" || ext==".ydr" ||
-            ext==".ymat" || ext==".ymt" || ext==".ycd",
+            ext==".ymat" || ext==".ymt" || ext==".ycd" ||
+            ext==".ypt",
             "Expected NEF8 YTD/YDD/YMAT/YMT/YCD dictionary");
     // Catalog indexes typed content; never parse optional JSON metadata
     // solely to enumerate virtual children in a concurrent scan.
-    auto file=parse_list_file(source,false); // envelope, DEFLATE and hash checks
+    // Native YPT uses the NEF16 runtime body and a small authored
+    // particle-entry index in the authenticated NEF8 metadata. Other
+    // dictionaries intentionally skip optional metadata for scan speed.
+    auto file=parse_list_file(source,ext==".ypt"); // envelope and hash checks
     std::vector<DictionaryEntry> output;
     output.reserve(file.entries);
     std::set<std::string> unique;
-    if(ext==".ymt") {
+    if(ext==".ypt") {
+        require(file.kind==36 && file.entries==1 &&
+                file.body.size()>=20 &&
+                file.metadata.get<std::string>("content_kind","")==
+                    "particle_dictionary",
+                "Unsupported NEF16 particle dictionary");
+        auto const& entries=file.metadata.get_child("entries");
+        require(entries.size()==file.entries &&
+                entries.begin()->second.get<std::string>("asset_kind","")==
+                    "particle_dictionary",
+                "Invalid YPT top-level asset metadata");
+        // The NEF16 payload is an NVPT runtime JSON document, not a flat
+        // ListFile. The outer header counts dictionaries, whereas the
+        // browser needs individual EFFECT / EMITTER / PARTICLE definitions.
+        Bytes const runtime(file.body);
+        require(runtime.magic(0,"NVPT") && runtime.integer(4,4)==1 &&
+                runtime.integer(8,8)==file.body.size()-20,
+                "Invalid NVPT particle runtime header");
+        auto const root=parse_json(std::string(
+            reinterpret_cast<char const*>(file.body.data()+20),
+            file.body.size()-20));
+        require(root.get<std::string>("schema","")==
+                    "northstar.particle_dictionary.runtime.v1",
+                "Unsupported NVPT particle runtime schema");
+        for(auto const& [category,prefix]:
+            std::array<std::pair<char const*,char const*>,3>{{
+                {"effects","effect."},{"emitters","emitter."},
+                {"particles","particle."}}}) {
+            auto const& group=root.get_child(category);
+            require(group.size()<=4096,
+                    "YPT runtime category exceeds indexing limits");
+            for(auto const& item:group) {
+                require(item.first.empty(),"YPT runtime entries must be an array");
+                auto name=std::string(prefix)+
+                    item.second.get<std::string>("name");
+                validate_name(name);
+                require(unique.insert(name).second,
+                        "Duplicate YPT runtime entry name");
+                output.push_back({std::move(name),0});
+            }
+        }
+        require(!output.empty() && output.size()<=12288,
+                "Invalid or empty YPT particle definition table");
+        return output; // NEF8 'entries' is 1 root, not the effect count.
+    } else if(ext==".ymt") {
         auto skeleton=northstarcpp::load_skeleton_from_bytes(source);
         require(!skeleton.joints.empty(),"Empty native YMT skeleton");
         output.reserve(skeleton.joints.size());

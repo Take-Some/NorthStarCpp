@@ -1,51 +1,63 @@
 # NorthStar Qt UI icons in NorthStar Pak
 
-The `assetBrowser` and `playIcons` PNG resources are engine assets, not compiled Qt blobs.
-Authoritative editable files:
+The `assetBrowser` and `playIcons` PNG assets are provided by the shared engine
+NSP archive, not embedded in the Qt Editor or Asset Browser binaries.
 
-- `engine/northstarcpp/resources/sharedAssets/icons/assetBrowser/*.png` (19 files)
+Authoritative source artwork:
+- `engine/northstarcpp/resources/sharedAssets/icons/assetBrowser/*.png` (20 files)
+- `engine/northstarcpp/resources/sharedAssets/icons/assetBrowser/fileNui.svg` (editable source for `.nui`)
 - `engine/northstarcpp/resources/sharedAssets/icons/playIcons/*.png` (9 files)
 
-Older files under `engine/northstarcpp/resources/icons/assetBrowser` and
-`engine/northstarcpp/resources/icons/playIcons` are not used by the new build.
-They remain as legacy copies and are not authoritative.
+Older artwork in `engine/northstarcpp/resources/icons/` is legacy and is not authoritative.
+
+## Size convention
+
+Every Asset Browser PNG has a **256 x 256 transparent canvas**.
+The visible artwork should fit a **225 px maximum dimension**, allowing for
+anti-aliasing tolerance (approximately 222–227 px at 15% alpha threshold).
+File-shaped icons are centered vertically; folder-shaped icons have the same
+maximum dimension on the horizontal axis. Preserve the aspect ratio, shadows,
+and alpha channel; do not stretch file icons to the folder proportions.
+
+As of 2026-11-17, `fileNui.png` and `fileJs.png` were resized to the
+same visible scale as the rest of the icon family. `fileNui.svg` uses a
+larger viewBox to preserve this normalization on regeneration.
 
 ## Build and runtime contract
 
-During compilation, `tools/pack_nsp.py` invokes the toolchain's
-`rcc --binary` to generate `ui/northstar_ui_icons.rcc` from these PNGs.
-The binary RCC and the 28 source PNGs are packaged in `northstar_shared.nsp`
-and installed beneath `bin/archive/`. These icons are not compiled into
-the Qt Editor or Asset Browser executables.
+`tools/pack_nsp.py` invokes Qt `rcc --binary` to generate
+`ui/northstar_ui_icons.rcc` automatically from the 29 source PNGs.
+The RCC and individual images are packaged in `northstar_shared.nsp`,
+typically deployed beneath `bin/archive/`.
 
-The common `ensure_northstar_qt_icons()` function uses the `engine.assets`
-VFS provider to discover NSP archives beside the runtime and load the RCC
-resource from the active VFS. The RCC bytes persist until process exit.
-The existing Qt resource URLs are unchanged:
+`ensure_northstar_qt_icons()` loads and registers the RCC from the layered
+`engine.assets` VFS. Existing Qt resource URLs remain stable:
 
 - `:/northstar/icons/assetBrowser/folder.png`
 - `:/northstar/icons/assetBrowser/materialFunc.png`
+- `:/northstar/icons/assetBrowser/fileNui.png`
 - `:/northstar/play/play.png`
 - `:/northstar/play/pause-active.png`
 
-If the archive or artwork is invalid, the loader logs a warning instead
-of terminating the editor. Qt can use normal placeholder icons.
+The package also includes reusable `.nui` files under `ui/*.nui`,
+including `ui/default_menu.nui`; project `assets/ui/*.nui` files may
+override them through the VFS.
 
-To change the artwork, update the PNGs under `sharedAssets/icons`, rebuild
-the `northstarcpp_shared_nsp` CMake target and restart the Qt application.
-The .exe and native DLLs do not need to be relinked.
+The icon loader logs warnings and falls back to placeholders when optional
+artwork is unavailable. Windows PE application `.ico` resources remain
+embedded separately, so they show correctly before engine startup.
 
-**Windows exception:** the application `.ico` inside PE resources must stay
-embedded so the executable has an icon in Explorer before the engine starts.
-This does not apply to the Qt UI PNG artwork.
+To refresh icons, update source artwork, run the `northstarcpp_shared_nsp`
+CMake target, deploy the refreshed archive, and restart the Qt application.
+Icon updates do not need C++ relinking; Qt source changes do.
 
-## Regression tests
+## Regression test
 
-The `northstarcpp_qt_nsp_icons` test opens the real NSP, registers RCC
-and decodes all 28 PNGs through unchanged Qt URLs. Related regression tests
-cover collisions, NAC/category icons, and the editor Content Browser dock.
+`northstarcpp_qt_nsp_icons` opens the built NSP, registers and decodes
+all 20 Asset Browser icons and all 9 Play icons, and validates
+`ui/default_menu.nui` through AssetStore.
 
 ```powershell
-cmake --build out/nsp-ui-qa-20261116 --target northstarcpp_qt_nsp_icons_smoke
-ctest --test-dir out/nsp-ui-qa-20261116 --output-on-failure -R northstarcpp_qt_nsp_icons
+cmake --build <build-dir> --target northstarcpp_qt_nsp_icons_smoke
+ctest --test-dir <build-dir> --output-on-failure -R northstarcpp_qt_nsp_icons
 ```

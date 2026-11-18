@@ -1,0 +1,32 @@
+<?xml version='1.0' encoding='utf-8'?>
+<NorthStarUI version="3" target="screen" layer="weapon">
+  <Elements>
+    <Panel id="panel">
+      <Property name="x" type="number" value="700" />
+      <Property name="y" type="number" value="12" />
+      <Property name="width" type="number" value="320" />
+      <Property name="height" type="number" value="118" />
+      <Property name="padding" type="number" value="10" />
+      <Property name="gap" type="number" value="4" />
+      <Property name="background" type="color" value="#111b2cdd" />
+    </Panel>
+    <Text id="header" parent="panel">
+      <Property name="text" type="string" value="WEAPON" />
+      <Property name="height" type="number" value="24" />
+      <Property name="font_scale" type="number" value="2" />
+      <Property name="color" type="color" value="#f6c753ff" />
+    </Text>
+    <Text id="ammo" parent="panel">
+      <Property name="text" type="string" value="00 / 00" />
+      <Property name="height" type="number" value="35" />
+      <Property name="font_scale" type="number" value="3" />
+      <Property name="color" type="color" value="#e4f0ffff" />
+    </Text>
+    <Text id="state" parent="panel">
+      <Property name="text" type="string" value="READY   LMB FIRE / RMB AIM / R RELOAD" />
+      <Property name="height" type="number" value="27" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="color" type="color" value="#87cadfff" />
+    </Text>
+  </Elements>
+</NorthStarUI>

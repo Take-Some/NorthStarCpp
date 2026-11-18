@@ -1,7 +1,7 @@
 {
   "description": "NorthStarCpp GNU GCC / CMake / Ninja development shell",
   "build_root": "out",
-  "default_build_type": "Debug",
+  "default_build_type": "Release",
   "toolchain": {
     "bin_dir": "C:\\msys64\\mingw64\\bin"
   },

@@ -9,6 +9,10 @@
 namespace northstarcpp::nac {
 inline constexpr std::uint16_t version = 1;
 inline constexpr std::uint32_t codec_pcm16 = 1;
+// The NEF8 asset reader permits up to 256 MiB on disk. Audio can also
+// expand to 256 MiB of PCM under the same v1 envelope.
+inline constexpr std::size_t max_container_bytes = 256u * 1024 * 1024;
+inline constexpr std::size_t max_pcm_bytes = 256u * 1024 * 1024;
 
 // V1 stores interleaved little-endian PCM16, CRC32 and optional loop markers.
 struct Track {

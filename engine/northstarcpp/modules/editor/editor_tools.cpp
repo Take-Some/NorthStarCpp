@@ -124,6 +124,7 @@ std::size_t duplicate(Scene& scene, std::size_t index, bool as_child)
         promote_to_v3(scene);
 
     auto copy = scene.objects[index];
+    auto const sourceId=copy.node.id;
     std::string const suffix = as_child ? " Child" : " Copy";
     if (copy.name.size() + suffix.size() > 96)
         copy.name.resize(96 - suffix.size());
@@ -134,7 +135,30 @@ std::size_t duplicate(Scene& scene, std::size_t index, bool as_child)
         if (as_child)
             copy.node.parent = scene.objects[index].node.id;
     }
+    // A copied Scene V3 entity must retain its engine/plugin component
+    // instances, not just its visual SceneObject properties. Keep opaque
+    // plugin records byte-identical; only the owner entity ID changes.
+    std::vector<SceneComponentBlob> copiedComponents;
+    decltype(scene.opaque_records) copiedOpaque;
+    if(scene.version==3) {
+        for(auto const& component:scene.components)
+            if(component.entity_id==sourceId) {
+                auto record=component;
+                record.entity_id=copy.node.id;
+                copiedComponents.push_back(std::move(record));
+            }
+        for(auto const& component:scene.opaque_records)
+            if(component.entity_id==sourceId) {
+                auto record=component;
+                record.entity_id=copy.node.id;
+                copiedOpaque.push_back(std::move(record));
+            }
+    }
     scene.objects.push_back(std::move(copy));
+    for(auto& component:copiedComponents)
+        scene.components.push_back(std::move(component));
+    for(auto& component:copiedOpaque)
+        scene.opaque_records.push_back(std::move(component));
     validate_scene(scene);
     return scene.objects.size() - 1;
 }
@@ -162,6 +186,17 @@ std::size_t delete_subtree(Scene& scene, std::size_t index)
             [&](SceneObject const& object) {
                 return removing.count(object.node.id) != 0;
             }),scene.objects.end());
+        // An actor owns its ECS and opaque component records. Leaving those
+        // behind makes validate_scene reject the entire deletion transaction.
+        // Preserve scene-global records (entity_id=0) and unrelated actors.
+        scene.components.erase(std::remove_if(scene.components.begin(),scene.components.end(),
+            [&](auto const& record) {
+                return record.entity_id != 0 && removing.count(record.entity_id) != 0;
+            }),scene.components.end());
+        scene.opaque_records.erase(std::remove_if(scene.opaque_records.begin(),scene.opaque_records.end(),
+            [&](auto const& record) {
+                return record.entity_id != 0 && removing.count(record.entity_id) != 0;
+            }),scene.opaque_records.end());
     } else {
         scene.objects.erase(scene.objects.begin()+static_cast<std::ptrdiff_t>(index));
     }
@@ -338,9 +373,7 @@ void assign_actor_material(Scene& scene,std::size_t actor,
         virtual_material.find_first_of("/\\:",selector+1)==std::string::npos &&
         std::none_of(virtual_material.begin()+selector+1,
             virtual_material.end(),[](unsigned char c){return c<32;});
-    if(!valid_suffix(".material.json") && !valid_suffix(".ymat") &&
-       !valid_suffix(".material") && !valid_suffix(".mtl") &&
-       !selected_ymat)
+    if(!valid_suffix(".ymat") && !selected_ymat)
         throw std::invalid_argument("An actor must reference a material, not a texture");
     auto const entity=scene.objects[actor].node.id;
     if(!entity)throw std::runtime_error("Actor has no stable scene ID");

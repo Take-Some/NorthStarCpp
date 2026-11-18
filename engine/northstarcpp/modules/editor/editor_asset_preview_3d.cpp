@@ -50,12 +50,14 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                                    int width,int height,float yaw,float pitch,
                                    float zoom,bool wireframe,
                                    std::vector<MaterialDefinition> const* materials,
-                                   float key_light_intensity) {
+                                   float key_light_intensity,
+                                   std::uint32_t interactive_triangle_step) {
     AssetPreviewImage out;
     if(width<64 || height<64 || width>1280 || height>1280 ||
        !std::isfinite(yaw) || !std::isfinite(pitch) ||
        !std::isfinite(zoom) || !std::isfinite(key_light_intensity) ||
-       key_light_intensity<0.f || key_light_intensity>3.f)return out;
+       key_light_intensity<0.f || key_light_intensity>3.f ||
+       interactive_triangle_step==0 || interactive_triangle_step>32)return out;
     out.width=width;out.height=height;
     out.argb.resize(std::size_t(width)*height);
     for(int y=0;y<height;++y)for(int x=0;x<width;++x) {
@@ -68,10 +70,10 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max()};
     std::array<float,3> maximum{-minimum[0],-minimum[1],-minimum[2]};
-    std::size_t vertices=0;
+    bool has_vertices=false;
     for(auto const& mesh:drawable.meshes) {
         for(auto const& vertex:mesh.vertices) {
-            if(++vertices>1000000)break;
+            has_vertices=true;
             for(int j=0;j<3;++j) {
                 float const value=vertex.position[j];
                 if(!std::isfinite(value))return {};
@@ -79,9 +81,8 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 maximum[j]=std::max(maximum[j],value);
             }
         }
-        if(vertices>1000000)break;
     }
-    if(!vertices)return out;
+    if(!has_vertices)return out;
     float const extent=std::max({maximum[0]-minimum[0],
         maximum[1]-minimum[1],maximum[2]-minimum[2],.0001f});
     std::array<float,3> center{
@@ -130,11 +131,21 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
     auto edge=[](ViewVertex const& a,ViewVertex const& b,float x,float y) {
         return (x-a.x)*(b.y-a.y)-(y-a.y)*(b.x-a.x);
     };
-    std::size_t total_faces=0,mesh_number=0;
+    bool has_faces=false;
+    // Keep the opaque depth buffer intact while collecting transparent
+    // fragments in an order-independent weighted color/revealage buffer.
+    // This makes alpha-blended bus glass reveal the actual cabin.
+    using Accum=std::array<float,4>;
+    std::vector<Accum> transparency(std::size_t(width)*height,Accum{0,0,0,0});
+    std::vector<float> transmittance(std::size_t(width)*height,1.f);
+    for(unsigned pass=0;pass<2;++pass) {
+    std::size_t mesh_number=0;
     for(auto const& mesh:drawable.meshes) {
         auto const part_index=mesh_number++;
         auto const* material=materials && part_index<materials->size()
             ? &materials->at(part_index) : nullptr;
+        bool const alpha_blend=material && material->blend_mode==2;
+        if(alpha_blend!=(pass==1))continue;
         auto base=tint(part_index);
         if(material) {
             auto ch=[](float x) {
@@ -149,46 +160,40 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
         bool const textured=albedo && albedo->width>0 && albedo->height>0 &&
             albedo->rgba8.size()==
                 std::size_t(albedo->width)*albedo->height*4u;
-        for(std::size_t i=0;i+2<mesh.indices.size();i+=3) {
-            if(++total_faces>120000)break;
+        // Reuse each vertex transform and lighting calculation across all
+        // triangles referencing it. Large MT28 mesh sections share vertices.
+        std::vector<ViewVertex> projected;
+        projected.reserve(mesh.vertices.size());
+        for(auto const& vertex:mesh.vertices) {
+            auto normal=vertex.normal;
+            float length=std::sqrt(normal[0]*normal[0]+
+                normal[1]*normal[1]+normal[2]*normal[2]);
+            if(length<.1f || !std::isfinite(length))
+                normal={{0.f,1.f,0.f}};
+            else for(auto& component:normal)component/=length;
+            auto n=rotate(normal);
+            float const directional=std::clamp(
+                n[0]*.36f+n[1]*.72f+n[2]*.45f,0.f,1.f);
+            float const fill=std::max(0.f,-n[0]*.50f+n[1]*.30f);
+            float const spec=std::pow(std::max(0.f,
+                n[0]*.15f+n[1]*.35f+n[2]*.93f),24.f);
+            float const lighting=std::clamp(.46f+key_light_intensity*
+                (.70f*directional+.28f*fill+.15f*spec),.34f,2.6f);
+            projected.push_back(project(vertex.position,lighting));
+        }
+        // Interactive viewport LOD only; full-quality preview uses step=1.
+        for(std::size_t i=0;i+2<mesh.indices.size();
+            i+=3u*interactive_triangle_step) {
+            has_faces=true;
             auto a=mesh.indices[i],b=mesh.indices[i+1],c=mesh.indices[i+2];
             if(a>=mesh.vertices.size()||b>=mesh.vertices.size()||
                c>=mesh.vertices.size())continue;
             auto const& va=mesh.vertices[a];
             auto const& vb=mesh.vertices[b];
             auto const& vc=mesh.vertices[c];
-            auto face_normal=[&]() {
-                auto const& p0=va.position;
-                auto const& p1=vb.position;
-                auto const& p2=vc.position;
-                float const ux=p1[0]-p0[0],uy=p1[1]-p0[1],uz=p1[2]-p0[2];
-                float const vx=p2[0]-p0[0],vy=p2[1]-p0[1],vz=p2[2]-p0[2];
-                auto normal=std::array<float,3>{
-                    uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx};
-                float norm=std::sqrt(normal[0]*normal[0]+
-                    normal[1]*normal[1]+normal[2]*normal[2]);
-                if(norm>1.e-12f)for(auto& v:normal)v/=norm;
-                return normal;
-            }();
-            auto light=[&](shared_assets::Vertex const& vertex) {
-                auto normal=vertex.normal;
-                float length=std::sqrt(normal[0]*normal[0]+
-                    normal[1]*normal[1]+normal[2]*normal[2]);
-                if(length<.1f || !std::isfinite(length))
-                    normal=face_normal;
-                else for(auto& part:normal)part/=length;
-                auto n=rotate(normal);
-                float const directional=std::clamp(
-                    n[0]*.36f+n[1]*.72f+n[2]*.45f,0.f,1.f);
-                float const fill=std::max(0.f,-n[0]*.50f+n[1]*.30f);
-                float const spec=std::pow(std::max(0.f,
-                    n[0]*.15f+n[1]*.35f+n[2]*.93f),24.f);
-                return std::clamp(.22f+key_light_intensity*
-                    (.58f*directional+.15f*fill+.18f*spec),.13f,2.5f);
-            };
-            auto const p0=project(va.position,light(va));
-            auto const p1=project(vb.position,light(vb));
-            auto const p2=project(vc.position,light(vc));
+            auto const& p0=projected[a];
+            auto const& p1=projected[b];
+            auto const& p2=projected[c];
             float const area=edge(p0,p1,p2.x,p2.y);
             if(!std::isfinite(area)||std::abs(area)<1.e-4f)continue;
             int x0=std::clamp(int(std::floor(std::min({p0.x,p1.x,p2.x}))),0,width-1);
@@ -204,12 +209,13 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 auto const index=std::size_t(y)*width+x;
                 float const z=u*p0.inv_depth+v*p1.inv_depth+w*p2.inv_depth;
                 if(z<=depth[index])continue;
-                depth[index]=z;
                 // Perspective-correct UV sampling uses the very same
                 // decoded YMAT/YTD base-color image as the runtime material
                 // pipeline. CPU preview does not execute PBR shaders.
                 float const shading=u*p0.light+v*p1.light+w*p2.light;
                 auto pixel_color=base;
+                float alpha=material?std::clamp(
+                    material->base_color[3]*material->opacity,0.f,1.f):1.f;
                 if(textured && z>1.e-8f) {
                     auto const a=u*p0.inv_depth/z;
                     auto const b=v*p1.inv_depth/z;
@@ -231,9 +237,24 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                             static_cast<int>(data[offset+1])*base.g/255,
                             static_cast<int>(data[offset+2])*base.b/255
                         };
+                        alpha*=float(data[offset+3])/255.f;
                     }
                 }
-                out.argb[index]=color(pixel_color,shading);
+                if(material && material->blend_mode==1 &&
+                   alpha<material->alpha_cutoff)continue;
+                if(alpha_blend) {
+                    if(alpha<=.001f)continue;
+                    auto const shaded=color(pixel_color,shading);
+                    auto& sum=transparency[index];
+                    sum[0]+=float((shaded>>16)&255)*alpha;
+                    sum[1]+=float((shaded>>8)&255)*alpha;
+                    sum[2]+=float(shaded&255)*alpha;
+                    sum[3]+=alpha;
+                    transmittance[index]*=1.f-alpha;
+                } else {
+                    depth[index]=z;
+                    out.argb[index]=color(pixel_color,shading);
+                }
             }
             if(wireframe) {
                 line(out,int(p0.x),int(p0.y),int(p1.x),int(p1.y),0xff86d9f0u);
@@ -241,11 +262,26 @@ AssetPreviewImage preview_drawable(shared_assets::Drawable const& drawable,
                 line(out,int(p2.x),int(p2.y),int(p0.x),int(p0.y),0xff86d9f0u);
             }
         }
-        if(total_faces>120000)break;
+    }
+    } // pass: opaque/masked first, translucent second
+    for(std::size_t i=0;i<transparency.size();++i) {
+        auto const& sum=transparency[i];
+        if(sum[3]<=0.f)continue;
+        auto const visibility=1.f-transmittance[i];
+        auto const existing=out.argb[i];
+        auto const compose=[&](unsigned shift,unsigned component) {
+            auto const behind=float((existing>>shift)&255);
+            auto const front=sum[component]/sum[3];
+            return std::uint32_t(std::clamp(
+                int(std::lround(behind*(1.f-visibility)+front*visibility)),
+                0,255));
+        };
+        out.argb[i]=0xff000000u|
+            (compose(16,0)<<16)|(compose(8,1)<<8)|compose(0,2);
     }
     // If drawable contains only points/lines, show their positions as lit
     // markers. This still represents the actual geometry, not a type icon.
-    if(total_faces==0) {
+    if(!has_faces) {
         for(auto const& mesh:drawable.meshes)
             for(auto const& vertex:mesh.vertices) {
                 auto p=project(vertex.position,.8f);

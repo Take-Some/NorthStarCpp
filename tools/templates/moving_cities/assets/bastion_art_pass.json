@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "profile": "bastion.traction-city.art-pass.v2",
+  "source": "procedurally authored for Sea of Rust",
+  "licenses": "Original game-authored geometry; material sources remain CC0 Poly Haven",
+  "playable_deck_y_m": 5.7,
+  "tracks": "visual-only, not simulated rotating belts",
+  "models": {
+    "bastion_outer_hull.ydr": {
+      "vertices": 116,
+      "triangles": 58,
+      "sha256": "eadede286f759f7c9add689642996e05df302be265b44ab993d13d084c62dc7a"
+    },
+    "bastion_armor_belt.ydr": {
+      "vertices": 944,
+      "triangles": 472,
+      "sha256": "c0329699e436b378b3b4783a012529872c7b7e6bd55ee36d516343fd4eaf671b"
+    },
+    "bastion_topdeck.ydr": {
+      "vertices": 52,
+      "triangles": 26,
+      "sha256": "f8bd677bb1a02f9434f85c0579c32f0870a633666e029dfb2a7be44208dbc908"
+    },
+    "bastion_walkway.ydr": {
+      "vertices": 408,
+      "triangles": 204,
+      "sha256": "b1b2fef5534403f7f4fe39caa87e0df3bb6c54f72f772045ed781881d0ff5a2a"
+    },
+    "bastion_tread_belts.ydr": {
+      "vertices": 1280,
+      "triangles": 640,
+      "sha256": "7043a0af3647f35ebff22161f9f51f4a0e4878daf6c669eb5b50a2b079f6d5ce"
+    },
+    "bastion_tread_shoes.ydr": {
+      "vertices": 3840,
+      "triangles": 1920,
+      "sha256": "9d59941427995942e6952b13ed8ac2dbae8b7cc3827fa5a9fc6a3b1692af93b2"
+    },
+    "bastion_wheels.ydr": {
+      "vertices": 1344,
+      "triangles": 840,
+      "sha256": "0a0fb64622d956325a8b0cc691b89d96c0dee36f301e953e195af59a5d37406f"
+    },
+    "bastion_wheel_hubs.ydr": {
+      "vertices": 3696,
+      "triangles": 2128,
+      "sha256": "d7096d6928e07ce42793dc8c870d837a4324afa84e7fb451af48a7eedc6f061e"
+    },
+    "bastion_tread_link.ydr": {
+      "vertices": 120,
+      "triangles": 60,
+      "sha256": "b204394a8fb540e6a5d60768ef13aef941ece58a4bcf01386029e4fc65c7010d"
+    },
+    "bastion_wheel_spokes.ydr": {
+      "vertices": 576,
+      "triangles": 332,
+      "sha256": "fcf236cbe03d72b9ca53a406b5bc1686ae48f7215909bb5fb06e30eea2b367f6"
+    },
+    "bastion_dust_puff.ydr": {
+      "vertices": 8,
+      "triangles": 8,
+      "sha256": "97418a49abb97557d6f6c10514a15e22cc43146057351c41e31eec498353a2f2"
+    },
+    "bastion_superstructure.ydr": {
+      "vertices": 504,
+      "triangles": 252,
+      "sha256": "fa20d0a95d58953f414569a150143ce57571dc6b1f0d782e0cf2fa4199fbf73a"
+    },
+    "bastion_roofwork.ydr": {
+      "vertices": 336,
+      "triangles": 168,
+      "sha256": "5d6c3154e3263d65f4617d8f1dccb36f068e484216c472b01add9d864fe0bad4"
+    },
+    "bastion_steel_ribs.ydr": {
+      "vertices": 2160,
+      "triangles": 1160,
+      "sha256": "dfdc7af2d0d194bd4ea757e9a5ef3a2d13fa931fc6e99479b1057f3b3d10db99"
+    },
+    "bastion_amber_marks.ydr": {
+      "vertices": 768,
+      "triangles": 384,
+      "sha256": "5a47de12015137ad8e5bfa0906a9d3edc96e6af4b1de849897581f1e2930479f"
+    },
+    "bastion_windows.ydr": {
+      "vertices": 312,
+      "triangles": 156,
+      "sha256": "60a977b21b349a0cfa23db3478583afaeaf0f1e8c6ee0fd28bc031deaddd4833"
+    },
+    "bastion_pipework.ydr": {
+      "vertices": 1512,
+      "triangles": 920,
+      "sha256": "ba32cbc2c519ab29852025b5a004a58b2f858606ce3f2985e626cf070ebcdc7d"
+    },
+    "rustsea_boulder_a.ydr": {
+      "vertices": 156,
+      "triangles": 82,
+      "sha256": "fa52975366c2a39b39343d3f7a7add84b28139c6521b1c1a6d8a69e23f8b1325"
+    },
+    "rustsea_boulder_b.ydr": {
+      "vertices": 156,
+      "triangles": 82,
+      "sha256": "8cda9dc9d672fe04c6aa5ffa6fbb3594f6941a183bce045f949736703f570820"
+    },
+    "rustsea_boulder_c.ydr": {
+      "vertices": 156,
+      "triangles": 82,
+      "sha256": "c4f6791c3d0768eb92c9cc4678004359014b967f18c7532a49b67b1ee089e37e"
+    }
+  }
+}

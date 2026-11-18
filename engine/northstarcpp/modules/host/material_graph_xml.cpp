@@ -299,31 +299,6 @@ boost::property_tree::ptree graph_xml_value_from_json(
         throw std::invalid_argument("Material Graph must be an object");
     return data;
 }
-std::string typed_material_graph_from_json_library(
-    std::string const& source,std::size_t material_index) {
-    JsonReader parser{source};
-    auto document=parser.value();parser.spaces();
-    if(document.kind!=Value::Kind::Object ||
-       parser.pos!=source.size())
-        throw std::invalid_argument("Invalid imported material JSON library");
-    for(auto const& [name,field]:document.children) {
-        if(name!="materials")continue;
-        if(field.kind!=Value::Kind::Array ||
-           material_index>=field.children.size())
-            throw std::invalid_argument("Missing imported material record");
-        auto const& material=field.children[material_index].second;
-        if(material.kind!=Value::Kind::Object)
-            throw std::invalid_argument("Invalid imported material record");
-        for(auto const& [key,value]:material.children) {
-            if(key!="graph")continue;
-            if(value.kind!=Value::Kind::Object)
-                throw std::invalid_argument("Imported Material Graph is not an object");
-            return parse_xml(emit(value));
-        }
-        return {};
-    }
-    throw std::invalid_argument("Missing legacy materials array");
-}
 std::string graph_json_from_xml_value(Tree const& node) {
     auto source=parse_xml(node);
     JsonReader verify{source};

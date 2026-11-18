@@ -18,42 +18,42 @@
     let previousPause = false, previousExit = false;
     let playerIndex = -1;
 
-    const pressed = key => engine.input.isDown(key);
+    const pressed = key => engine.input.keyboard.isDown(key);
     const controller = () => {
         for (let i = 0; i < 4; ++i) {
-            const pad = engine.input.gamepad(i);
+            const pad = engine.input.gamepads.gamepad(i);
             if (pad) return pad;
         }
         return null;
     };
     function title() {
-        engine.ui.setTitle(paused
+        engine.ui.viewport.setTitle(paused
             ? projectTitle + " | PAUSED"
             : projectTitle + " | WASD Move | Mouse Look | Space Jump | E Push");
     }
     function playerObject() {
         for (let start = 0; ; start += 256) {
-            const page = engine.scene.objects(start, 256);
+            const page = engine.scene.entities.objects(start, 256);
             const player = page.find(object => object.player);
             if (player) return player.index;
             if (page.length < 256) return -1;
         }
     }
     function interact() {
-        const eye = engine.player.eye();
+        const eye = engine.player.motion.eye();
         const dx = Math.sin(yaw) * Math.cos(pitch);
         const dy = Math.sin(pitch);
         const dz = Math.cos(yaw) * Math.cos(pitch);
-        const hit = engine.physics.sweepSphere(
+        const hit = engine.physics.queries.sweepSphere(
             eye.x, eye.y, eye.z,
             eye.x + dx * config.interactRange,
             eye.y + dy * config.interactRange,
             eye.z + dz * config.interactRange,
             config.interactRadius, playerIndex);
         if (!hit) return;
-        const object = engine.scene.objects(hit.index, 1)[0];
+        const object = engine.scene.entities.objects(hit.index, 1)[0];
         if (object && object.mass > 0 && !object.player) {
-            engine.physics.applyImpulse(hit.index,
+            engine.physics.bodies.applyImpulse(hit.index,
                 dx * config.pushImpulse,
                 dy * config.pushImpulse + 1.2,
                 dz * config.pushImpulse);
@@ -62,7 +62,7 @@
     engine.on("start", () => {
         playerIndex = playerObject();
         if (playerIndex < 0) throw Error("Scene has no player actor");
-        engine.player.setEyeHeight(config.eyeHeight);
+        engine.player.motion.setEyeHeight(config.eyeHeight);
         engine.logger.info("Project-controlled first-person gameplay initialized");
         title();
     });
@@ -72,25 +72,25 @@
         const pauseKey = pressed(KEY.ESCAPE) || Boolean(buttons & 0x0010);
         if (pauseKey && !previousPause) {
             paused = !paused;
-            engine.session.pause(paused);
+            engine.session.lifecycle.pause(paused);
             title();
         }
         previousPause = pauseKey;
         const exitKey = pressed(KEY.EXIT) || Boolean(buttons & 0x0020);
-        if (exitKey && !previousExit) engine.session.quit();
+        if (exitKey && !previousExit) engine.session.lifecycle.quit();
         previousExit = exitKey;
         if (paused) {
-            engine.player.move(0, 0);
+            engine.player.motion.move(0, 0);
             return;
         }
-        const pointer = engine.input.pointerDelta();
+        const pointer = engine.input.pointer.pointerDelta();
         yaw += pointer.x * config.mouseSensitivity +
             (pad ? pad.rightX * 2.5 * deltaTime : 0);
         pitch = Math.max(-config.maxPitch,
             Math.min(config.maxPitch, pitch - pointer.y * config.mouseSensitivity +
                 (pad ? pad.rightY * 2.1 * deltaTime : 0)));
         if (Math.abs(yaw) > Math.PI) yaw %= 2 * Math.PI;
-        engine.camera.setAngles(yaw, pitch);
+        engine.camera.views.setAngles(yaw, pitch);
 
         let horizontal = Number(pressed(KEY.D)) - Number(pressed(KEY.A)) +
             (pad ? pad.leftX + Number(Boolean(buttons & 0x0008)) -
@@ -100,12 +100,12 @@
                 Number(Boolean(buttons & 0x0002)) : 0);
         const length = Math.hypot(horizontal, forward);
         if (length > 1) { horizontal /= length; forward /= length; }
-        engine.player.move(
+        engine.player.motion.move(
             horizontal * Math.cos(yaw) + forward * Math.sin(yaw),
             forward * Math.cos(yaw) - horizontal * Math.sin(yaw));
 
         const jump = pressed(KEY.JUMP) || Boolean(buttons & 0x1000);
-        if (jump && !previousJump) engine.player.jump();
+        if (jump && !previousJump) engine.player.motion.jump();
         previousJump = jump;
 
         const use = pressed(KEY.USE) || Boolean(buttons & 0x4000);

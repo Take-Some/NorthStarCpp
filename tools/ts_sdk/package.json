@@ -1,0 +1,13 @@
+{
+  "name": "@northstar/ts-sdk-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned TypeScript language service and SDK conformance checks",
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --pretty false",
+    "service-smoke": "node ts_language_service_smoke.cjs"
+  }
+}

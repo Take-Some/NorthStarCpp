@@ -1,0 +1,23 @@
+"use strict";
+const assert=require("node:assert/strict"),fs=require("node:fs"),vm=require("node:vm"),path=require("node:path");
+const src=fs.readFileSync(path.join(__dirname,"../engine/northstarcpp/resources/sharedAssets/api/weapon/recoil.js"),"utf8");
+const env={};vm.runInNewContext(src+"\nthis.Motion=WeaponRecoilMotion;",env);
+function sequence(){const m=new env.Motion();
+ m.trigger({weaponBackMeters:.03,armImpulse:.68,snapSeconds:.043,accentSeconds:.036,settleSeconds:.16,aftershock:.23});
+ const a=[m.sample()];for(let i=0;i<30;i++)a.push(m.advance(.01));return a;}
+const a=sequence(),b=sequence();
+assert.deepEqual(JSON.parse(JSON.stringify(a)),JSON.parse(JSON.stringify(b)));
+assert.equal(a[0].backMeters,0);
+assert(a[4].backMeters>.02&&a[4].backMeters<.031);
+assert(a[4].armImpulse>.4);
+assert(a[15].backMeters<a[4].backMeters);
+assert.equal(a.at(-1).backMeters,0);
+assert.equal(a.at(-1).active,false);
+const m=new env.Motion();
+m.trigger({weaponBackMeters:.03,armImpulse:.68});m.advance(.05);
+m.trigger({weaponBackMeters:.03,armImpulse:.68});
+assert(m.advance(.045).backMeters<=.048);
+assert.throws(()=>m.trigger({weaponBackMeters:-.03}),/Invalid authored recoil/);
+assert.throws(()=>m.advance(NaN),/Invalid weapon recoil frame/);
+m.reset();assert.equal(m.sample().active,false);
+console.log("PASS deterministic snap/accent/spring and bounded stacking");

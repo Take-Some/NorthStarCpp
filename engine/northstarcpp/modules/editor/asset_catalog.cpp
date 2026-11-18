@@ -60,12 +60,14 @@ void index_prefab(AssetRecord& record,fs::path const& source) noexcept {
 }
 char const* kind_name(AssetKind k) noexcept {
     switch(k) {
+    case AssetKind::ui_document:return "UI Document";
     case AssetKind::folder:return "Folder";
     case AssetKind::mesh:return "Mesh";
     case AssetKind::collision:return "Collision";
     case AssetKind::material:return "Material";
     case AssetKind::texture:return "Texture";
     case AssetKind::audio:return "Audio";
+    case AssetKind::particle:return "Particle";
     case AssetKind::scene:return "Scene";
     case AssetKind::prefab:return "Prefab";
     case AssetKind::character:return "Character";
@@ -83,6 +85,9 @@ AssetKind kind_from_extension(fs::path const& p) noexcept {
     if(e==".ydd" || e==".ydr" || e==".mesh" || e==".obj" || e==".fbx" ||
        e==".gltf" || e==".glb")return AssetKind::mesh;
     auto const filename=lowercase(p.filename().u8string());
+    if(filename.size()>=12 &&
+       filename.compare(filename.size()-12,12,".nagraph.xml")==0)
+        return AssetKind::animation;
     static constexpr char character_suffix[]=".character.json";
     constexpr auto character_suffix_length=sizeof(character_suffix)-1;
     if(filename.size()>character_suffix_length &&
@@ -93,21 +98,21 @@ AssetKind kind_from_extension(fs::path const& p) noexcept {
        filename.compare(filename.size()-23,23,
                         ".material-function.json")==0)
         return AssetKind::material_function;
-    if(e==".ymat" || e==".material" || e==".mtl" ||
-       (e==".json" &&
-         ((filename.size()>14 &&
-           filename.compare(filename.size()-14,14,".material.json")==0) ||
-          (filename.size()>23 &&
-           filename.compare(filename.size()-23,23,".material-instance.json")==0))))
+    if(e==".ymat" ||
+       (e==".json" && filename.size()>23 &&
+        filename.compare(filename.size()-23,23,".material-instance.json")==0))
         return AssetKind::material;
     if(e==".ytd" || e==".png" || e==".jpg" || e==".jpeg" ||
        e==".dds" || e==".tga" || e==".webp" || e==".bmp" ||
        e==".ktx" || e==".ktx2")return AssetKind::texture;
     if(e==".wav" || e==".ogg" || e==".mp3" || e==".flac" || e==".nac")return AssetKind::audio;
+    if(e==".nui")return AssetKind::ui_document;
     if(e==".nprefab")return AssetKind::prefab;
     if(e==".nscn" || e==".nscene" || e==".ymap" || e==".world")return AssetKind::scene;
-    if(e==".js" || e==".mjs" || e==".ysc" || e==".lua" ||
-       e==".ts" || e==".py")return AssetKind::script;
+    if(e==".js" || e==".mjs" || e==".cjs" || e==".jsx" ||
+       e==".ts" || e==".tsx" || e==".ysc" || e==".lua" ||
+       e==".py")return AssetKind::script;
+    if(e==".ypt")return AssetKind::particle;
     if(e==".ymt")return AssetKind::skeleton;
     if(e==".anim" || e==".ycd" || e==".gltfanim")return AssetKind::animation;
     if(e==".vert" || e==".frag" || e==".hlsl" || e==".hlsli" || e==".shader" || e==".vs" ||
@@ -214,7 +219,8 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records,
             }
             auto ext=lowercase(it->path().extension().u8string());
             if((ext==".ytd" || ext==".ydd" || ext==".ydr" ||
-                 ext==".ymat" || ext==".ymt" || ext==".ycd") && rec.size>=128) {
+                 ext==".ymat" || ext==".ymt" || ext==".ycd" ||
+                  ext==".ypt") && rec.size>=128) {
                 // Only valid NEF8 ListFiles are virtual directories.
                 // Invalid/legacy files stay visible as ordinary assets.
                 try {
@@ -243,6 +249,7 @@ void AssetCatalog::scan(fs::path root,std::size_t max_records,
                                    ext==".ymat"?AssetKind::material:
                                    ext==".ycd"?AssetKind::animation:
                                    ext==".ymt"?AssetKind::skeleton:
+                                   ext==".ypt"?AssetKind::particle:
                                    AssetKind::texture;
                         child.container_path=relative;
                         child.entry_name=item.name;

@@ -3,10 +3,12 @@
 // Independent scene spatial query + deterministic streaming implementation.
 
 #include <northstarcpp/scene_world.hpp>
-#include <northstarcpp/scene_pawn.hpp>
+#include "scene_portal_polygon.hpp"
 #include <northstarcpp/scene_pawn.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -48,6 +50,90 @@ bool box_overlaps(Vector3 a_min, Vector3 a_max, Vector3 b_min, Vector3 b_max)
         a_min.y <= b_max.y && a_max.y >= b_min.y &&
         a_min.z <= b_max.z && a_max.z >= b_min.z;
 }
+// Conservative AABB/plane rejection: if the vertex furthest along the
+// plane normal is outside, no point of this portal is in the camera view.
+bool portal_intersects_frustum(ScenePortal const& portal,SceneViewFrustum const& frustum)
+{
+    for (auto const& plane:frustum.planes) {
+        auto const point=Vector3{
+            plane.normal.x>=0.f?portal.maximum.x:portal.minimum.x,
+            plane.normal.y>=0.f?portal.maximum.y:portal.minimum.y,
+            plane.normal.z>=0.f?portal.maximum.z:portal.minimum.z};
+        double const signed_distance=double(plane.normal.x)*point.x+
+            double(plane.normal.y)*point.y+double(plane.normal.z)*point.z+
+            plane.offset;
+        if(signed_distance < -1.e-5)return false;
+    }
+    return true;
+}
+// Prefer an authored convex polygon from a scene-level NEF8 component.
+// Legacy AABB portals use the thinnest axis as a rectangular aperture;
+// both variants emit camera-to-edge clipping half-spaces.
+std::vector<SceneViewPlane> portal_aperture_planes(
+    ScenePortal const& portal,Vector3 camera,
+    std::vector<Vector3> const* polygon=nullptr)
+{
+    auto const& lo=portal.minimum;
+    auto const& hi=portal.maximum;
+    auto const dx=hi.x-lo.x,dy=hi.y-lo.y,dz=hi.z-lo.z;
+    Vector3 center{(lo.x+hi.x)*0.5f,(lo.y+hi.y)*0.5f,(lo.z+hi.z)*0.5f};
+    std::vector<Vector3> corners;
+    if(polygon && polygon->size()>=3) {
+        corners=*polygon;
+        center={0.f,0.f,0.f};
+        for(auto const& v:corners){
+            center.x+=v.x;center.y+=v.y;center.z+=v.z;
+        }
+        auto const scale=1.f/float(corners.size());
+        center={center.x*scale,center.y*scale,center.z*scale};
+    }else if(dx<=dy && dx<=dz) {
+        corners={Vector3{center.x,lo.y,lo.z},Vector3{center.x,hi.y,lo.z},
+                 Vector3{center.x,hi.y,hi.z},Vector3{center.x,lo.y,hi.z}};
+    } else if(dy<=dz) {
+        corners={Vector3{lo.x,center.y,lo.z},Vector3{hi.x,center.y,lo.z},
+                 Vector3{hi.x,center.y,hi.z},Vector3{lo.x,center.y,hi.z}};
+    } else {
+        corners={Vector3{lo.x,lo.y,center.z},Vector3{hi.x,lo.y,center.z},
+                 Vector3{hi.x,hi.y,center.z},Vector3{lo.x,hi.y,center.z}};
+    }
+    std::vector<SceneViewPlane> result;
+    result.reserve(corners.size());
+    auto const toward=Vector3{center.x-camera.x,center.y-camera.y,
+                              center.z-camera.z};
+    for(std::size_t i=0;i<corners.size();++i) {
+        auto const& a=corners[i];
+        auto const& b=corners[(i+1)%corners.size()];
+        Vector3 const u{a.x-camera.x,a.y-camera.y,a.z-camera.z};
+        Vector3 const v{b.x-camera.x,b.y-camera.y,b.z-camera.z};
+        Vector3 n{u.y*v.z-u.z*v.y,u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x};
+        double const len=std::sqrt(double(n.x)*n.x+double(n.y)*n.y+
+                                   double(n.z)*n.z);
+        if(len<1.e-8)continue; // degenerate or camera within aperture
+        auto const inward=double(n.x)*toward.x+double(n.y)*toward.y+
+                          double(n.z)*toward.z;
+        auto const sign=inward<0.0?-1.0:1.0;
+        n={float(n.x*sign/len),float(n.y*sign/len),float(n.z*sign/len)};
+        result.push_back({n,-(n.x*camera.x+n.y*camera.y+n.z*camera.z)});
+    }
+    return result;
+}
+
+bool portal_intersects_clip(ScenePortal const& portal,
+                            std::vector<SceneViewPlane> const& clip)
+{
+    for(auto const& plane:clip) {
+        Vector3 const point{
+            plane.normal.x>=0.f?portal.maximum.x:portal.minimum.x,
+            plane.normal.y>=0.f?portal.maximum.y:portal.minimum.y,
+            plane.normal.z>=0.f?portal.maximum.z:portal.minimum.z};
+        double const d=double(plane.normal.x)*point.x+
+            double(plane.normal.y)*point.y+double(plane.normal.z)*point.z+
+            plane.offset;
+        if(d < -1.e-5)return false;
+    }
+    return true;
+}
+
 int grid_coord(float world, float grid)
 {
     auto const result = std::floor(static_cast<double>(world) / grid);
@@ -89,20 +175,27 @@ std::size_t SceneSpatialIndex::Hash::operator()(CellKey const& key) const
 }
 
 SceneSpatialIndex::SceneSpatialIndex(Scene const& scene, float grid_size)
-    : objects_(scene.objects), grid_size_(grid_size)
+    : grid_size_(grid_size)
 {
     validate_scene(scene);
     if (!std::isfinite(grid_size) || grid_size < 1.f || grid_size > 100000.f)
         throw std::invalid_argument("Scene spatial cell width is invalid");
-    cells_.reserve(objects_.size());
-    object_cells_.reserve(objects_.size());
-    for (std::size_t i=0;i<objects_.size();++i) {
-        auto const& object=objects_[i];
+    objects_.reserve(scene.objects.size());
+    cells_.reserve(scene.objects.size());
+    object_cells_.reserve(scene.objects.size());
+    object_slots_.reserve(scene.objects.size());
+    staged_cells_.reserve(scene.objects.size());
+    for (std::size_t i=0;i<scene.objects.size();++i) {
+        auto const& object=scene.objects[i];
+        float const half=extent(object);
+        objects_.push_back({object.node.id,object.position,half});
         CellKey key{grid_coord(object.position.x,grid_size_),
                     grid_coord(object.position.z,grid_size_)};
         object_cells_.push_back(key);
-        cells_[key].push_back(i);
-        maximum_extent_ = std::max(maximum_extent_,extent(object));
+        auto& bucket=cells_[key];
+        object_slots_.push_back(bucket.size());
+        bucket.push_back(i);
+        maximum_extent_ = std::max(maximum_extent_,half);
     }
 }
 
@@ -110,32 +203,39 @@ void SceneSpatialIndex::update_dynamic_positions(Scene const& live_scene)
 {
     if (live_scene.objects.size()!=objects_.size())
         throw std::invalid_argument("Live scene entity count differs from authored scene");
-    std::vector<CellKey> updated;
-    updated.reserve(objects_.size());
+    staged_cells_.clear();
     // Validate the entire update before changing any bucket. Invalid or
     // reordered runtime data must not corrupt the spatial index.
     for (std::size_t i=0;i<objects_.size();++i) {
         auto const& live=live_scene.objects[i];
-        if (objects_[i].node.id != live.node.id)
+        if (objects_[i].id != live.node.id)
             throw std::invalid_argument("Live scene stable ID ordering changed");
         if (!finite(live.position) ||
             std::max({std::abs(live.position.x),std::abs(live.position.y),
                       std::abs(live.position.z)})>1000000.f)
             throw std::invalid_argument("Live scene position exceeds world bounds");
-        updated.push_back({grid_coord(live.position.x,grid_size_),
+        staged_cells_.push_back({grid_coord(live.position.x,grid_size_),
                            grid_coord(live.position.z,grid_size_)});
     }
     for (std::size_t i=0;i<objects_.size();++i) {
-        auto const& next=updated[i];
+        auto const& next=staged_cells_[i];
         auto const& previous=object_cells_[i];
         if (!(next==previous)) {
+            // Allocate destination before modifying the source bucket.
+            auto& destination=cells_[next];
+            auto const new_slot=destination.size();
+            destination.push_back(i);
             auto bucket=cells_.find(previous);
             if (bucket!=cells_.end()) {
                 auto& indices=bucket->second;
-                indices.erase(std::remove(indices.begin(),indices.end(),i),indices.end());
+                auto const slot=object_slots_[i];
+                auto const moved=indices.back();
+                indices[slot]=moved;
+                object_slots_[moved]=slot;
+                indices.pop_back();
                 if (indices.empty()) cells_.erase(bucket);
             }
-            cells_[next].push_back(i);
+            object_slots_[i]=new_slot;
             object_cells_[i]=next;
         }
         objects_[i].position=live_scene.objects[i].position;
@@ -149,7 +249,7 @@ std::vector<std::size_t> SceneSpatialIndex::query_box(Vector3 minimum, Vector3 m
     std::vector<std::size_t> result;
     auto matches=[&](std::size_t index) {
         auto const& object=objects_[index];
-        auto const half=extent(object);
+        auto const half=object.half_extent;
         auto const pad=Vector3{half,half,half};
         if (box_overlaps(minimum,maximum,subtract(object.position,pad),
                           add(object.position,pad)))
@@ -185,7 +285,7 @@ std::vector<std::size_t> SceneSpatialIndex::query_sphere(Vector3 center, float r
     candidates.erase(std::remove_if(candidates.begin(),candidates.end(),
         [&](std::size_t index) {
             auto const& object=objects_[index];
-            auto const half=extent(object);
+            auto const half=object.half_extent;
             auto const pad=Vector3{half,half,half};
             return box_distance_sq(center,subtract(object.position,pad),
                                     add(object.position,pad)) > radius*radius;
@@ -202,6 +302,31 @@ SceneWorld::SceneWorld(Scene scene)
     for (size_t i=0;i<scene_.objects.size();++i)
         if (scene_.objects[i].node.id != 0)
             id_lookup_.emplace(scene_.objects[i].node.id,i);
+    // Authored convex portal outlines ride within existing NEF8 scene-level
+    // XML component blobs. Invalid optional geometry fails open to the AABB.
+    for(auto const& component:scene_.components) {
+        if(component.type!="engine.scene.portal_polygon" ||
+           component.entity_id!=0 || component.version!=1)continue;
+        try {
+            auto parsed=scene_portal_polygon::parse(component.payload);
+            auto const found=std::find_if(scene_.portals.begin(),scene_.portals.end(),
+                [&](ScenePortal const& portal){return portal.name==parsed.name;});
+            if(found==scene_.portals.end())
+                throw std::invalid_argument("polygon references unknown portal");
+            portal_polygons_[parsed.name]=std::move(parsed.vertices);
+        }catch(std::exception const& e) {
+            std::fprintf(stderr,"[WARN] [scene.portal] Invalid polygon component: %s\n",
+                         e.what());
+        }
+    }
+    for(std::size_t i=0;i<scene_.portals.size();++i) {
+        auto const& portal=scene_.portals[i];
+        portals_by_room_[portal.room_a].push_back(i);
+        portals_by_room_[portal.room_b].push_back(i);
+    }
+    cell_telemetry_.reserve(scene_.cells.size());
+    for (auto const& cell:scene_.cells)
+        cell_telemetry_.push_back(SceneCellTelemetry{cell.name});
     loaded_cells_.resize(scene_.cells.size(),0);
     payload_ready_.resize(scene_.cells.size(),1);
     effective_cell_indices_.assign(scene_.objects.size(),
@@ -214,6 +339,17 @@ SceneWorld::SceneWorld(Scene scene)
         if (cell!=cell_lookup_.end())
             effective_cell_indices_[i]=cell->second;
     }
+    // One-time authored cell costs; runtime residency is updated each frame.
+    std::vector<std::unordered_set<std::string>> cell_assets(scene_.cells.size());
+    for(std::size_t i=0;i<scene_.objects.size();++i) {
+        auto const owner=effective_cell_indices_[i];
+        if(owner==std::numeric_limits<std::size_t>::max())continue;
+        ++cell_telemetry_[owner].authored_entities;
+        auto const& asset=scene_.objects[i].node.asset;
+        if(!asset.empty())cell_assets[owner].insert(asset);
+    }
+    for(std::size_t i=0;i<cell_assets.size();++i)
+        cell_telemetry_[i].unique_authored_assets=cell_assets[i].size();
     resident_mask_.resize(scene_.objects.size(),0);
     visible_mask_.resize(scene_.objects.size(),0);
 
@@ -361,6 +497,8 @@ void SceneWorld::update_cell_selection(Vector3 position,Vector3 predicted)
 void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
                         std::string current_room, Scene const* live_scene)
 {
+    auto const update_started=std::chrono::steady_clock::now();
+    diagnostics_.portals_frustum_rejected=0;
     if (!finite(camera_position) || !finite(camera_velocity))
         throw std::invalid_argument("Scene streaming view contains non-finite coordinates");
     if (live_scene) {
@@ -413,9 +551,18 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
         while (!pending.empty()) {
             auto room=std::move(pending.front());
             pending.pop_front();
-            for (auto const& portal : scene_.portals) {
+            auto const edges=portals_by_room_.find(room);
+            if(edges==portals_by_room_.end())continue;
+            for(auto const portal_index:edges->second) {
+                auto const& portal=scene_.portals[portal_index];
                 if (!portal.open)
                     continue;
+                // Use the camera frustum only when provided. This is an
+                // AABB rejection gate, not polygonal portal clip recursion.
+                if (view_frustum_ && !portal_intersects_frustum(portal,*view_frustum_)) {
+                    ++diagnostics_.portals_frustum_rejected;
+                    continue;
+                }
                 std::string const* next=nullptr;
                 if (portal.room_a == room) next=&portal.room_b;
                 else if (portal.room_b == room) next=&portal.room_a;
@@ -423,6 +570,55 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
                     pending.push_back(*next);
             }
         }
+    }
+
+    // Recursively restrict each downstream portal by the aperture already
+    // traversed. Distinct camera-to-room paths have distinct clip volumes;
+    // do not mark a room closed after its first visible entrance.
+    if(view_frustum_ && !current_room.empty()) {
+        struct ClipState {
+            std::string room;
+            std::vector<SceneViewPlane> clip;
+            std::vector<std::size_t> traversed;
+        };
+        std::deque<ClipState> queue;
+        queue.push_back({current_room,
+            {view_frustum_->planes.begin(),view_frustum_->planes.end()}, {}});
+        std::unordered_set<std::string> clipped_rooms{current_room};
+        std::size_t visited_paths=0;
+        bool overflow=false;
+        while(!queue.empty()) {
+            if(++visited_paths>2048) {overflow=true;break;}
+            auto node=std::move(queue.front());
+            queue.pop_front();
+            if(node.traversed.size()>=24) {overflow=true;break;}
+            auto const edges=portals_by_room_.find(node.room);
+            if(edges==portals_by_room_.end())continue;
+            for(auto const id:edges->second) {
+                if(std::find(node.traversed.begin(),node.traversed.end(),id)!=
+                   node.traversed.end())continue;
+                auto const& portal=scene_.portals[id];
+                if(!portal.open)continue;
+                if(!portal_intersects_clip(portal,node.clip)) {
+                    ++diagnostics_.portals_frustum_rejected;
+                    continue;
+                }
+                auto const& target=portal.room_a==node.room?
+                    portal.room_b:portal.room_a;
+                clipped_rooms.insert(target);
+                auto const outline=portal_polygons_.find(portal.name);
+                auto side_planes=portal_aperture_planes(portal,camera_position,
+                    outline==portal_polygons_.end()?nullptr:&outline->second);
+                auto child=node.clip;
+                child.insert(child.end(),side_planes.begin(),side_planes.end());
+                auto used=node.traversed;
+                used.push_back(id);
+                queue.push_back({target,std::move(child),std::move(used)});
+                // Preserve the parent clip for its other outgoing portals.
+            }
+        }
+        // Fail open on path explosion rather than silently deleting rooms.
+        if(!overflow)accessible=std::move(clipped_rooms);
     }
 
     std::unordered_map<std::string,bool> layer_visibility{{"Default",true}};
@@ -511,6 +707,44 @@ void SceneWorld::update(Vector3 camera_position, Vector3 camera_velocity,
     diagnostics_.resident_entities=resident_indices_.size();
     diagnostics_.visible_entities=visible_indices_.size();
     diagnostics_.generation=generation_;
+    for(std::size_t i=0;i<cell_telemetry_.size();++i) {
+        auto& stat=cell_telemetry_[i];
+        stat.assigned_entities=stat.resident_entities=stat.visible_entities=0;
+        stat.active_hlod_proxies=stat.hlod_replaced_entities=0;
+        stat.loaded=loaded_cells_[i]!=0;
+        stat.payload_ready=!payload_gate_ || payload_ready_[i]!=0;
+    }
+    for(std::size_t i=0;i<effective_cell_indices_.size();++i) {
+        auto const owner=effective_cell_indices_[i];
+        if(owner>=cell_telemetry_.size())continue;
+        auto& stat=cell_telemetry_[owner];
+        ++stat.assigned_entities;
+        if(resident_mask_[i])++stat.resident_entities;
+        if(visible_mask_[i])++stat.visible_entities;
+    }
+    for(auto const& proxy:hlod_proxies_) {
+        if(proxy.members.empty())continue;
+        auto const owner=effective_cell_indices_[proxy.members.front()];
+        if(owner>=cell_telemetry_.size())continue;
+        ++cell_telemetry_[owner].active_hlod_proxies;
+        cell_telemetry_[owner].hlod_replaced_entities+=proxy.member_count;
+    }
+    diagnostics_.last_update_cpu_us=static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now()-update_started).count());
+    cost_profiler_.record_cpu(diagnostics_.last_update_cpu_us);
+}
+
+void SceneWorld::set_view_frustum(SceneViewFrustum const& frustum)
+{
+    for(auto const& plane:frustum.planes) {
+        if(!finite(plane.normal) || !std::isfinite(plane.offset) ||
+            double(plane.normal.x)*plane.normal.x+
+            double(plane.normal.y)*plane.normal.y+
+            double(plane.normal.z)*plane.normal.z < 1.e-12)
+            throw std::invalid_argument("Scene camera frustum contains invalid plane");
+    }
+    view_frustum_=frustum;
 }
 
 void SceneWorld::set_layer_visible(std::string const& name, bool value)

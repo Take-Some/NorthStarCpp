@@ -1,0 +1,6 @@
+NorthStarCpp.Scene 3
+scene "Rifle Cartridge Casing"
+streaming 150 220 1
+stream_budget 64 64
+layer "Weapon debris" 1
+entity 1 0 "Rifle Shell" "Weapon debris" "" "" "models/weapon/pistol/pistol_shell.ydd" 0 0 0 0.062 BE9A48 0 0.011 0 0 0 1 1 1 0 1000000 1 1

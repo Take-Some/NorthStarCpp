@@ -1,6 +1,8 @@
 #include "qt_editor_window.hpp"
+#include "qt_editor_workflow_ux.hpp"
 #include "editor_visual_prefab.hpp"
 #include "qt_place_actors_panel.hpp"
+#include "../render/shared/render_light_components.hpp"
 #include <northstarcpp/scene_camera_actor.hpp>
 #include <northstarcpp/scene_pawn.hpp>
 #include "qt_actor_tree_widget.hpp"
@@ -16,7 +18,7 @@
 #endif
 #include "qt_editor_viewport.hpp"
 #include "qt_content_browser.hpp"
-#include "qt_text_asset_workspace.hpp"
+#include <northstarcpp/sky_project_config.hpp>
 #include "qt_camera_studio.hpp"
 #include "qt_asset_preview_dialog.hpp"
 #include "qt_material_asset_dialog.hpp"
@@ -172,6 +174,22 @@ QIcon paintOutlinerGlyph(int kind) {
         p.setBrush(QColor("#947338"));
         p.drawRoundedRect(QRectF(2,2.8,8,6.4),1.7,1.7);
         p.drawPolygon(QPolygonF{{9.7,4.2},{16.5,1.9},{16.5,15.2},{9.7,8.5}});
+    } else if(kind==8) { // Directional light — sun glyph
+        p.setPen(QPen(QColor("#f1d996"),1.6));
+        p.setBrush(QColor("#b78b37"));
+        p.drawEllipse(QPointF(9,9),3.5,3.5);
+        for(int i=0;i<4;++i) {
+            constexpr float pi=3.14159265358979323846f;
+            auto angle=float(i)*pi/2.f;
+            p.drawLine(QPointF(9+5*std::cos(angle),9+5*std::sin(angle)),
+                       QPointF(9+8*std::cos(angle),9+8*std::sin(angle)));
+        }
+    } else if(kind==9) { // Sky light — hemispherical glow
+        p.setPen(QPen(QColor("#96bfff"),1.5));
+        p.setBrush(QColor("#4964a0"));
+        p.drawArc(QRectF(2,4,14,14),0,180*16);
+        p.drawLine(QPointF(2,11),QPointF(16,11));
+        p.drawLine(QPointF(9,2),QPointF(9,5));
     } else { // Mesh / imported asset
         p.setBrush(QColor("#355c75"));
         p.drawRoundedRect(QRectF(3.1,2.7,11.8,12.7),1.5,1.5);
@@ -258,6 +276,8 @@ QtEditorWindow::QtEditorWindow(QWidget* parent):QMainWindow(parent) {
         },nullptr});
     setupUi();
     restoreWorkspace();
+    // Single-window, Unreal-style workflows built on original NorthStar actions.
+    workflow::install(this,contentDock_,outlinerDock_,detailsDock_,viewport_);
     updateAll();
 }
 QString QtEditorWindow::sceneTitle() const {
@@ -280,6 +300,47 @@ void QtEditorWindow::log(QString const& line) {
     }
 }
 void QtEditorWindow::updateOutliner() {
+    std::uint64_t signature=14695981039346656037ull;
+    auto mix=[&](std::uint64_t value) {signature^=value;signature*=1099511628211ull;};
+    auto mix_text=[&](std::string const& s) {
+        mix(s.size());for(unsigned char ch:s)mix(ch);
+    };
+    // Presentation-only signature: transforms never change the tree.
+    mix(scene_.objects.size());
+    for(auto const& object:scene_.objects) {
+        mix(object.node.id);mix(object.node.parent);
+        mix(object.node.visible?1:0);
+        mix_text(object.name);mix_text(object.node.layer);mix_text(object.node.asset);
+    }
+    mix(scene_.components.size());
+    for(auto const& component:scene_.components) {
+        mix(component.entity_id);mix(component.version);
+        mix_text(component.type);mix(component.payload.size());
+        if(component.type=="engine.render.light" ||
+           component.type==player_character::pawn_type ||
+           component.type==player_blueprint::controller_type)
+            mix_text(component.payload);
+    }
+    auto const filterBytes=outlinerSearch_->text().trimmed().toUtf8();
+    mix(filterBytes.size());
+    for(unsigned char ch:filterBytes)mix(ch);
+    if(auto* sort=outlinerDock_->findChild<QToolButton*>("outlinerSort"))
+        mix(sort->isChecked()?1:0);
+    if(outlinerContentValid_ && outlinerContentHash_==signature) {
+        QSignalBlocker selectionBlock(outliner_);
+        uiSync_=true;
+        outliner_->clearSelection();
+        QTreeWidgetItem* active=nullptr;
+        for(auto const id:selectedActorIds_) {
+            auto* item=outlinerItemsById_.value(quint64(id),nullptr);
+            if(item)item->setSelected(true);
+        }
+        if(selection_>=0 && std::size_t(selection_)<scene_.objects.size())
+            active=outlinerItemsById_.value(quint64(scene_.objects[selection_].node.id),nullptr);
+        outliner_->setCurrentItem(active);
+        uiSync_=false;
+        return;
+    }
     QSignalBlocker block(outliner_);
     uiSync_=true;
     // Capture open/closed branches only from the unfiltered tree. While
@@ -307,6 +368,18 @@ void QtEditorWindow::updateOutliner() {
     outliner_->setProperty("outlinerCollapsedKeys",saved);
     outliner_->setProperty("outlinerFiltered",!outlinerSearch_->text().trimmed().isEmpty());
     outliner_->setSortingEnabled(false);
+    // Retain actor rows across hierarchy changes. Detach every actor before
+    // clearing layer folders so Qt does not delete reusable child rows.
+    auto reusableActors=std::move(outlinerItemsById_);
+    outlinerItemsById_.clear();
+    outlinerContentValid_=false;
+    for(auto* item:reusableActors) {
+        if(auto* parent=item->parent())parent->removeChild(item);
+        else {
+            int const top=outliner_->indexOfTopLevelItem(item);
+            if(top>=0)(void)outliner_->takeTopLevelItem(top);
+        }
+    }
     outliner_->clear();
     QString const filter=outlinerSearch_->text().trimmed();
     std::unordered_map<std::uint64_t,std::size_t> byId;
@@ -318,42 +391,59 @@ void QtEditorWindow::updateOutliner() {
     if(selectedActorIds_.empty() && selection_>=0 &&
        std::size_t(selection_)<scene_.objects.size())
         selectedActorIds_.insert(scene_.objects[std::size_t(selection_)].node.id);
-    std::unordered_set<std::uint64_t> geometryIds,cameraIds,pointLightIds,spotLightIds;
+    std::unordered_set<std::uint64_t> geometryIds,cameraIds,pointLightIds,
+        spotLightIds,directionalLightIds,skyLightIds;
+    std::unordered_set<std::uint64_t> pawnIds,controllerIds,motorIds;
+    auto const startupPawn=scene_pawn::startup_pawn(scene_).id;
     geometryIds.reserve(scene_.components.size());
     for(auto const& component:scene_.components) {
         if(component.type==geometry_primitive_component)
             geometryIds.insert(component.entity_id);
-        else if(component.type==scene_camera::type)
+        else if(component.type==scene_camera::type ||
+                component.type==player_blueprint::camera_attachment_type)
             cameraIds.insert(component.entity_id);
+        else if(component.type==player_blueprint::controller_type)
+            controllerIds.insert(component.entity_id);
+        else if(component.type==player_character::motor_type)
+            motorIds.insert(component.entity_id);
+        else if(component.type==player_character::pawn_type &&
+                player_character::detail::pawn_valid(nullptr,component.version,
+                    component.payload.data(),component.payload.size()))
+            pawnIds.insert(component.entity_id);
         else if(component.type=="engine.render.light") {
-            // Cone cosine is the 12th scalar in the current light bridge.
-            std::istringstream input(component.payload);
-            float value=0.f,cone=-1.f;
-            bool valid=true;
-            for(int i=0;i<12;++i)
-                if(!(input>>value)) {valid=false;break;}
-                else if(i==11)cone=value;
-            if(valid && cone>=0.f)spotLightIds.insert(component.entity_id);
-            else pointLightIds.insert(component.entity_id);
+            try {
+                auto source=render::decode_scene_light(component);
+                auto& bucket=source.kind==render::LightKind::Spot?spotLightIds:
+                    source.kind==render::LightKind::Directional?directionalLightIds:
+                    source.kind==render::LightKind::Sky?skyLightIds:pointLightIds;
+                bucket.insert(component.entity_id);
+            }catch(std::exception const&) {
+                // Invalid component remains inspectable as an opaque blob.
+            }
         }
     }
 
-    // Search by name, layer, asset, entity ID and useful UE-style qualifiers:
-    // "type:mesh", "type:player", "type:geometry", "is:hidden".
+    // Search by name, layer, asset, entity ID, actor type and state.
     // simplified() normalizes whitespace without constructing a regex per refresh.
     auto terms=filter.simplified().split(' ',Qt::SkipEmptyParts);
     auto matches=[&](SceneObject const& actor) {
         auto const procedural=geometryIds.count(actor.node.id)!=0;
-        QString const kind=player_character::has_pawn(scene_,actor.node.id)?"player":
+        QString const kind=pawnIds.count(actor.node.id)?"pawn":
+            controllerIds.count(actor.node.id)?"controller":
             cameraIds.count(actor.node.id)?"camera":
-            (pointLightIds.count(actor.node.id)||spotLightIds.count(actor.node.id))?"light":
+            motorIds.count(actor.node.id)?"motor":
+            (pointLightIds.count(actor.node.id)||spotLightIds.count(actor.node.id)||
+             directionalLightIds.count(actor.node.id)||skyLightIds.count(actor.node.id))?"light":
             procedural?"geometry":actor.node.asset.empty()?"primitive":"mesh";
         QString nameText,layerText,assetText,idText;
         bool textDecoded=false;
         for(auto const& term:terms) {
             if(term.startsWith("type:",Qt::CaseInsensitive)) {
-                auto const type=term.mid(5);
+                auto type=term.mid(5);
+                if(type.compare("player",Qt::CaseInsensitive)==0)type="pawn";
                 if(!kind.contains(type,Qt::CaseInsensitive))return false;
+            } else if(term.compare("is:startup",Qt::CaseInsensitive)==0) {
+                if(!pawnIds.count(actor.node.id) || actor.node.id!=startupPawn)return false;
             } else if(term.compare("is:hidden",Qt::CaseInsensitive)==0) {
                 if(actor.node.visible)return false;
             } else if(term.compare("is:visible",Qt::CaseInsensitive)==0) {
@@ -401,24 +491,33 @@ void QtEditorWindow::updateOutliner() {
         if(!visible[i])continue;
         auto const& object=scene_.objects[i];
         bool const procedural=geometryIds.count(object.node.id)!=0;
-        auto* item=new QTreeWidgetItem({from8(object.name)});
+        auto* item=reusableActors.take(quint64(object.node.id));
+        if(!item)item=new QTreeWidgetItem({from8(object.name)});
+        else item->setText(0,from8(object.name));
         item->setData(0,Qt::UserRole,int(i));
         item->setData(0,Qt::UserRole+1,qulonglong(object.node.id));
         item->setFlags(item->flags()|Qt::ItemIsEditable);
-        auto const kind=player_character::has_pawn(scene_,object.node.id)?"Player":
+        bool const pawn=pawnIds.count(object.node.id)!=0;
+        auto const kind=pawn?(object.node.id==startupPawn?"Startup Pawn":"Pawn"):
+            controllerIds.count(object.node.id)?"Player Controller":
             cameraIds.count(object.node.id)?"Camera":
+            motorIds.count(object.node.id)?"Character Motor":
             pointLightIds.count(object.node.id)?"Point Light":
             spotLightIds.count(object.node.id)?"Spot Light":
+            directionalLightIds.count(object.node.id)?"Directional Light":
+            skyLightIds.count(object.node.id)?"Sky Light":
             procedural?"Geometry":object.node.asset.empty()?"Primitive":"Static Mesh";
         item->setToolTip(0,QString("%1  |  ID %2\nLayer: %3")
                               .arg(kind).arg(object.node.id)
                               .arg(from8(object.node.layer)));
         item->setToolTip(1,object.node.visible?"Hide in Editor":"Show in Editor");
         item->setIcon(0,outlinerGlyph(
-            player_character::has_pawn(scene_,object.node.id)?1:
+            pawn || controllerIds.count(object.node.id)?1:
             cameraIds.count(object.node.id)?5:
             pointLightIds.count(object.node.id)?6:
             spotLightIds.count(object.node.id)?7:
+            directionalLightIds.count(object.node.id)?8:
+            skyLightIds.count(object.node.id)?9:
             procedural?2:object.node.asset.empty()?4:3));
         item->setIcon(1,outlinerEyeGlyph(object.node.visible));
         item->setTextAlignment(1,Qt::AlignCenter);
@@ -489,6 +588,12 @@ void QtEditorWindow::updateOutliner() {
     for(std::size_t i=0;i<entries.size();++i)
         if(entries[i] && selectedActorIds_.count(scene_.objects[i].node.id))
             entries[i]->setSelected(true);
+    for(std::size_t i=0;i<entries.size();++i)
+        if(entries[i])outlinerItemsById_.insert(quint64(scene_.objects[i].node.id),entries[i]);
+    // Only removed/filtered-out actors are actually destroyed.
+    for(auto* item:reusableActors)delete item;
+    outlinerContentHash_=signature;
+    outlinerContentValid_=true;
     uiSync_=false;
 }
 void QtEditorWindow::refreshProviderInspector() {
@@ -540,9 +645,53 @@ void QtEditorWindow::updateInspector() {
         visualPrefabPath_->clear();
         materialPicker_->setCurrentIndex(0);
         materialEditButton_->setEnabled(false);
-        objectName_->clear();assetPath_->clear();return;
+        if(lightSettings_)lightSettings_->setVisible(false);
+        objectName_->clear();assetPath_->clear();
+        if(updateDetailsFilter_)updateDetailsFilter_();
+        return;
     }
     auto const& o=scene_.objects[std::size_t(selection_)];
+    if(lightSettings_) {
+        bool isLight=false;
+        if(selectedActorIds_.size()<=1)for(auto const& component:scene_.components)
+            if(component.type=="engine.render.light" &&
+               component.entity_id==o.node.id) {
+                try {
+                    auto source=render::decode_scene_light(component);
+                    auto const& gpu=source.gpu;
+                    QSignalBlocker typeBlock(lightType_);
+                    lightType_->setCurrentIndex(int(source.kind));
+                    const std::array<QDoubleSpinBox*,9> inputs{
+                        lightIntensity_,lightRange_,lightCone_,
+                        lightR_,lightG_,lightB_,
+                        lightDirX_,lightDirY_,lightDirZ_};
+                    const std::array<double,9> values{
+                        gpu.color_intensity[3],gpu.position_range[3],
+                        source.kind==render::LightKind::Spot?
+                            std::acos(std::clamp(double(gpu.direction_cone[3]),0.,1.))*
+                                180./3.14159265358979323846:40.,
+                        gpu.color_intensity[0],gpu.color_intensity[1],
+                        gpu.color_intensity[2],
+                        gpu.direction_cone[0],gpu.direction_cone[1],
+                        gpu.direction_cone[2]};
+                    for(std::size_t i=0;i<inputs.size();++i) {
+                        QSignalBlocker blocked(inputs[i]);
+                        inputs[i]->setValue(values[i]);
+                    }
+                    bool localized=source.kind==render::LightKind::Point ||
+                                   source.kind==render::LightKind::Spot;
+                    lightRange_->setEnabled(localized);
+                    lightCone_->setEnabled(source.kind==render::LightKind::Spot);
+                    bool oriented=source.kind==render::LightKind::Spot ||
+                                  source.kind==render::LightKind::Directional;
+                    for(auto* box:{lightDirX_,lightDirY_,lightDirZ_})
+                        box->setEnabled(oriented);
+                    isLight=true;
+                }catch(std::exception const&) {isLight=false;}
+                break;
+            }
+        lightSettings_->setVisible(isLight);
+    }
     auto const material=from8(editor_tools::actor_material(
         scene_,static_cast<std::size_t>(selection_)));
     int materialIndex=materialPicker_->findData(material);
@@ -556,7 +705,7 @@ void QtEditorWindow::updateInspector() {
     if(materialPicker_->currentIndex()>0)
         queueMaterialPreviews(materialPicker_->currentIndex());
     materialEditButton_->setEnabled(
-        material.endsWith(".material.json",Qt::CaseInsensitive) &&
+        material.endsWith(".ymat",Qt::CaseInsensitive) &&
         cachedMaterials_.contains(material));
     QSignalBlocker a(objectName_),b(assetPath_),c(visualPrefabPath_);
     visualPrefabPath_->setText(from8(visual_prefab::reference(scene_,o.node.id)));
@@ -686,6 +835,7 @@ void QtEditorWindow::updateInspector() {
         colliderObjectType_,colliderSplits_,colliderX_,colliderY_,colliderZ_,
         colliderOffsetX_,colliderOffsetY_,colliderOffsetZ_,colliderHullPreview_})
         field->setEnabled(!multi);
+    if(updateDetailsFilter_)updateDetailsFilter_();
 }
 void QtEditorWindow::updateComponentInspector() {
     if(!components_)return;
@@ -730,6 +880,7 @@ void QtEditorWindow::editComponent(bool create) {
     }
     if(!create && index<0)return;
     SceneComponentBlob existing;
+    const bool batchEdit=!create && selectedActorIds_.size()>1;
     if(index>=0)existing=scene_.components[std::size_t(index)];
     else {
         if(selection_>=0 && std::size_t(selection_)<scene_.objects.size())
@@ -776,6 +927,7 @@ void QtEditorWindow::editComponent(bool create) {
     auto* typedGroup=new QGroupBox("Typed ECS Properties",&dialog);
     typedGroup->setObjectName("componentTypedProperties");
     auto* typedForm=new QFormLayout(typedGroup);
+    auto touchedFields=std::make_shared<std::unordered_set<std::string>>();
     std::vector<std::pair<SceneComponentField,QDoubleSpinBox*>> typedControls;
     auto const currentSchema=scene_component_schema(existing.type);
     if(currentSchema && existing.version>=currentSchema->min_version &&
@@ -797,6 +949,10 @@ void QtEditorWindow::editComponent(bool create) {
                 static_cast<double>(std::get<float>(*scalar)));
             typedForm->addRow(from8(field.label),control);
             typedControls.emplace_back(field,control);
+            connect(control,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                &dialog,[touchedFields,label=field.label](double) {
+                    touchedFields->insert(label);
+                });
             connect(control,QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 &dialog,[payload,existing,field,integer](double input) {
                     auto hex=payload->toPlainText();
@@ -821,6 +977,25 @@ void QtEditorWindow::editComponent(bool create) {
         }
     }
     typedGroup->setVisible(!typedControls.empty());
+    if(batchEdit) {
+        type->setEnabled(false);
+        version->setReadOnly(true);
+        payload->setReadOnly(true);
+        auto* explanation=new QLabel(
+            "Editing multiple actors: only properties changed here are "
+            "applied to matching components. Other component fields, versions "
+            "and unknown bytes remain untouched. Changes use one Undo step.",
+            &dialog);
+        explanation->setObjectName("componentBatchEditHint");
+        explanation->setWordWrap(true);
+        fields->addRow(explanation);
+        if(typedControls.empty()) {
+            QMessageBox::information(this,"Batch Component Editing",
+                "This component has no registered editable scalar fields. "
+                "Select one actor to edit its opaque binary payload.");
+            return;
+        }
+    }
     if(!typedControls.empty()) {
         fields->addRow(typedGroup);
         // Keep typed controls consistent when raw bytes are pasted by hand.
@@ -904,6 +1079,11 @@ void QtEditorWindow::editComponent(bool create) {
                 "The plugin schema rejected this component or its payload.");
             return;
         }
+        if(batchEdit && touchedFields->empty()) {
+            QMessageBox::information(&dialog,"No Changes",
+                "Change at least one typed property to edit the selected actors.");
+            return;
+        }
         dialog.accept();
     });
     if(dialog.exec()!=QDialog::Accepted)return;
@@ -914,6 +1094,56 @@ void QtEditorWindow::editComponent(bool create) {
             if(selection_>=0 && std::size_t(selection_)<scene.objects.size())
                 edited.entity_id=scene.objects[std::size_t(selection_)].node.id;
             scene.components.push_back(edited);
+        });
+    } else if(batchEdit) {
+        // Compute/validate the entire batch before issuing the single undoable
+        // editScene transaction. Never memcpy the primary actor's raw payload
+        // over other actors' unknown fields or plugin-owned bytes.
+        std::unordered_map<std::uint64_t,SceneComponentBlob> patches;
+        for(auto const id:selectedActorIds_) {
+            SceneComponentBlob const* source=nullptr;
+            for(auto const& candidate:scene_.components) {
+                if(candidate.entity_id!=id || candidate.type!=edited.type)
+                    continue;
+                if(source) {
+                    QMessageBox::warning(this,"Ambiguous Component",
+                        "Selected actors contain duplicate components of this type.");
+                    return;
+                }
+                source=&candidate;
+            }
+            if(!source || source->version!=edited.version) {
+                QMessageBox::warning(this,"Incompatible Selection",
+                    "Every selected actor must have a component of the same "
+                    "registered type and schema version. No changes were applied.");
+                return;
+            }
+            auto candidate=*source;
+            for(auto const& field:currentSchema->editor_fields) {
+                if(!touchedFields->count(field.label))continue;
+                auto value=read_scene_component_field(edited,field);
+                if(!value || !write_scene_component_field(candidate,field,*value)) {
+                    QMessageBox::warning(this,"Invalid Property",
+                        "A selected component cannot accept the changed field.");
+                    return;
+                }
+            }
+            if(!validate_scene_component_blob(candidate)) {
+                QMessageBox::warning(this,"Component Validation Failed",
+                    "A selected component failed plugin validation. "
+                    "The batch was not applied.");
+                return;
+            }
+            patches.emplace(id,std::move(candidate));
+        }
+        editScene([patches=std::move(patches),componentType=edited.type,
+                   componentVersion=edited.version](Scene& scene) {
+            for(auto& component:scene.components) {
+                if(component.type!=componentType ||
+                   component.version!=componentVersion)continue;
+                auto const found=patches.find(component.entity_id);
+                if(found!=patches.end())component=found->second;
+            }
         });
     } else {
         editScene([&](Scene& scene) {
@@ -1033,18 +1263,119 @@ void QtEditorWindow::renameSelected() {
     }
 }
 void QtEditorWindow::duplicateSelected() {
-    if(selection_<0 || std::size_t(selection_)>=scene_.objects.size())return;
-    int next=-1;
-    editScene([this,&next](Scene& scene) {
-        next=int(editor_tools::duplicate(scene,std::size_t(selection_)));
+    bool const hasPrimary=selection_>=0 &&
+        std::size_t(selection_)<scene_.objects.size();
+    if(!hasPrimary && selectedActorIds_.empty())return;
+    if(selectedActorIds_.size()<=1) {
+        int next=-1;
+        editScene([this,&next](Scene& scene) {
+            next=int(editor_tools::duplicate(scene,std::size_t(selection_)));
+        });
+        if(next>=0)chooseObject(next);
+        return;
+    }
+    // One transaction: Ctrl+D on N actors must be undone in ONE Ctrl+Z.
+    // Actor identity is stable even as append reallocates scene.objects.
+    std::vector<std::uint64_t> sourceIds;
+    for(auto const& object:scene_.objects)
+        if(selectedActorIds_.count(object.node.id))
+            sourceIds.push_back(object.node.id);
+    std::unordered_set<std::uint64_t> created;
+    editScene([&](Scene& scene) {
+        for(auto const id:sourceIds) {
+            auto it=std::find_if(scene.objects.begin(),scene.objects.end(),
+                [id](SceneObject const& o){return o.node.id==id;});
+            if(it==scene.objects.end())continue;
+            auto const index=std::size_t(it-scene.objects.begin());
+            auto const duplicated=editor_tools::duplicate(scene,index);
+            created.insert(scene.objects[duplicated].node.id);
+        }
     });
-    if(next>=0)chooseObject(next);
+    if(created.empty())return;
+    bool found=false;
+    for(auto const& object:scene_.objects)
+        if(created.count(object.node.id)){found=true;break;}
+    if(!found)return; // Edit failed validation; preserve original selection.
+    selectedActorIds_=std::move(created);
+    for(std::size_t i=0;i<scene_.objects.size();++i)
+        if(selectedActorIds_.count(scene_.objects[i].node.id)) {
+            selection_=int(i);break;
+        }
+    updateOutliner();
+    chooseObject(selection_,true);
 }
 void QtEditorWindow::deleteSelected() {
-    if(selection_<0 || std::size_t(selection_)>=scene_.objects.size())return;
-    editScene([this](Scene& scene) {
-        editor_tools::delete_subtree(scene,std::size_t(selection_));
+    bool const hasPrimary=selection_>=0 &&
+        std::size_t(selection_)<scene_.objects.size();
+    if(!hasPrimary && selectedActorIds_.empty())return;
+    auto targets=selectedActorIds_;
+    if(targets.empty())
+        targets.insert(scene_.objects[std::size_t(selection_)].node.id);
+    editScene([targets](Scene& scene) {
+        // Delete subtrees only once. If parent and child are both selected,
+        // the first deletion removes both; later lookups skip missing IDs.
+        for(auto const id:targets) {
+            auto it=std::find_if(scene.objects.begin(),scene.objects.end(),
+                [id](SceneObject const& o){return o.node.id==id;});
+            if(it!=scene.objects.end())
+                editor_tools::delete_subtree(scene,
+                    std::size_t(it-scene.objects.begin()));
+        }
     },-1);
+    // updateOutliner prunes dangling selection IDs.
+}
+void QtEditorWindow::setSelectedVisibility(bool visible) {
+    auto targets=selectedActorIds_;
+    if(targets.empty() && selection_>=0 &&
+       std::size_t(selection_)<scene_.objects.size())
+        targets.insert(scene_.objects[std::size_t(selection_)].node.id);
+    if(targets.empty())return;
+    bool changed=false;
+    for(auto const& o:scene_.objects)
+        if(targets.count(o.node.id) && o.node.visible!=visible)
+            changed=true;
+    if(!changed)return;
+    editScene([targets,visible](Scene& scene) {
+        for(auto& o:scene.objects)
+            if(targets.count(o.node.id))o.node.visible=visible;
+    });
+}
+void QtEditorWindow::moveSelectedToLayer(QString const& layer) {
+    auto targets=selectedActorIds_;
+    if(targets.empty() && selection_>=0 &&
+       std::size_t(selection_)<scene_.objects.size())
+        targets.insert(scene_.objects[std::size_t(selection_)].node.id);
+    if(targets.empty())return;
+    std::string const target=layer.toUtf8().toStdString();
+    bool const known=target=="Default" ||
+        std::any_of(scene_.layers.begin(),scene_.layers.end(),
+            [&](SceneLayer const& item){return item.name==target;});
+    if(!known)return;
+    bool changed=false;
+    for(auto const& o:scene_.objects)
+        if(targets.count(o.node.id) && o.node.layer!=target)changed=true;
+    if(!changed)return;
+    editScene([targets,target](Scene& scene) {
+        for(auto& o:scene.objects)
+            if(targets.count(o.node.id))o.node.layer=target;
+    });
+}
+void QtEditorWindow::selectChildren() {
+    if(selectedActorIds_.empty())return;
+    auto withChildren=selectedActorIds_;
+    bool grown=true;
+    while(grown) {
+        grown=false;
+        for(auto const& o:scene_.objects)
+            if(o.node.parent && withChildren.count(o.node.parent))
+                grown|=withChildren.insert(o.node.id).second;
+    }
+    selectedActorIds_=std::move(withChildren);
+    updateOutliner();
+    updateInspector();
+    statusBar()->showMessage(
+        QString("%1 actors selected, including descendants")
+            .arg(selectedActorIds_.size()),3500);
 }
 void QtEditorWindow::editScene(std::function<void(Scene&)> change,int selectedAfter) {
     try {
@@ -1163,16 +1494,20 @@ void QtEditorWindow::placeActorById(QString const& id,QVector3D position) {
             component.type=scene_camera::type;
             component.version=scene_camera::version;
             component.payload=scene_camera::encode({});
-        } else if(id=="light.point" || id=="light.spot") {
-            label=id=="light.point"?"PointLight":"SpotLight";
-            verticalOffset=2.5f;
+        } else if(id=="light.point" || id=="light.spot" ||
+                  id=="light.directional" || id=="light.sky") {
+            const auto kind=id=="light.point"?render::LightKind::Point:
+                            id=="light.spot"?render::LightKind::Spot:
+                            id=="light.directional"?render::LightKind::Directional:
+                            render::LightKind::Sky;
+            label=id=="light.point"?"PointLight":
+                  id=="light.spot"?"SpotLight":
+                  id=="light.directional"?"DirectionalLight":"SkyLight";
+            verticalOffset=kind==render::LightKind::Sky?0.f:2.5f;
             component.type="engine.render.light";
-            component.version=1;
-            // The current light ABI supports point and spot (not a fake
-            // directional-light emulation). Positions are entity-relative.
-            component.payload=id=="light.point"?
-                "0 0 0 18 1 0.94 0.78 8 0 -1 0 -1":
-                "0 0 0 26 1 0.94 0.78 12 0 -1 0 0.82";
+            component.version=2;
+            component.payload=render::encode_scene_light(
+                render::default_scene_light(kind));
         } else if(id.startsWith("component.")) {
             const auto type=id.mid(10).toStdString();
             auto const schema=scene_component_schema(type);
@@ -1309,8 +1644,16 @@ bool QtEditorWindow::openScene(QString const& file) {
         scene_=std::move(next);
         file_=fs::absolute(path);
         history_.clear();dirty_=false;selection_=-1;
+        // Recover the engine mount if its previous directory was moved
+        // without disturbing an already valid shared-content navigation.
+        if(browser_->sharedContentRoot().isEmpty() ||
+           !QFileInfo(browser_->sharedContentRoot()).isDir()) {
+            auto const shared=asset_paths::locate_shared_root(file_.parent_path());
+            if(!shared.empty())
+                browser_->setSharedContentRoot(qpath(shared));
+        }
         browser_->setProjectScene(qpath(file_));
-        viewport_->setAssetSources(file_.parent_path());
+        viewport_->setAssetSources(project_sky::find_root(file_),file_);
         // Project manifests own the default runtime mode; editor authoring
         // should not silently launch an FPS scene as an ordinary static view.
         QFile projectManifest(QDir(qpath(file_.parent_path())).filePath(
@@ -1360,7 +1703,7 @@ bool QtEditorWindow::saveScene(QString path) {
         dirty_=false;
         if(changed) {
             browser_->setProjectScene(qpath(file_));
-            viewport_->setAssetSources(file_.parent_path());
+            viewport_->setAssetSources(project_sky::find_root(file_),file_);
         }
         updateAll();
         log("Saved NSCN binary scene: "+qpath(file_));
@@ -1399,6 +1742,11 @@ bool QtEditorWindow::confirmDiscard() {
 }
 void QtEditorWindow::wireAssetMutation(QtContentBrowser* content) {
     if(!content)return;
+    content->setSkySceneProvider([this] {return qpath(file_);});
+    connect(content,&QtContentBrowser::sceneSkyChanged,this,[this] {
+        viewport_->reloadSceneSky();
+        log("Updated sky for "+qpath(file_));
+    });
     content->setMutationPreflight([this] {
         if(!dirty_)return true;
         auto choice=QMessageBox::question(this,"Save Before Asset Move",
@@ -1440,6 +1788,86 @@ void QtEditorWindow::showContentBrowser(QString const& virtualReference) {
     if(!virtualReference.isEmpty())
         browser_->revealAsset(virtualReference);
     else browser_->focusSearch();
+}
+
+void QtEditorWindow::applyDefaultEditorLayout() {
+    if(immersiveViewport_)toggleImmersiveViewport();
+    auto dockTo=[this](QDockWidget* dock,Qt::DockWidgetArea area) {
+        if(!dock)return;
+        if(dock->isFloating())dock->setFloating(false);
+        addDockWidget(area,dock);
+        dock->show();
+    };
+    dockTo(outlinerDock_,Qt::LeftDockWidgetArea);
+    dockTo(detailsDock_,Qt::RightDockWidgetArea);
+    dockTo(contentDock_,Qt::BottomDockWidgetArea);
+    if(placeActorsDock_) {
+        dockTo(placeActorsDock_,Qt::LeftDockWidgetArea);
+        tabifyDockWidget(outlinerDock_,placeActorsDock_);
+        outlinerDock_->raise();
+    }
+    if(dependencyDock_)dependencyDock_->hide();
+    if(providerDock_)providerDock_->hide();
+    for(auto* dock:findChildren<QDockWidget*>()) {
+        if(dock!=outlinerDock_ && dock!=detailsDock_
+           && dock!=contentDock_ && dock!=placeActorsDock_)
+            dock->hide();
+    }
+    for(auto* bar:findChildren<QToolBar*>())bar->show();
+    statusBar()->showMessage("Level Editing layout restored",3500);
+    QTimer::singleShot(0,this,[this] {
+        if(outlinerDock_ && detailsDock_)
+            resizeDocks({outlinerDock_,detailsDock_},{280,350},
+                        Qt::Horizontal);
+        if(contentDock_)
+            resizeDocks({contentDock_},{245},Qt::Vertical);
+    });
+}
+void QtEditorWindow::applyAssetEditorLayout() {
+    if(immersiveViewport_)toggleImmersiveViewport();
+    if(outlinerDock_)outlinerDock_->hide();
+    if(placeActorsDock_)placeActorsDock_->hide();
+    if(dependencyDock_)dependencyDock_->hide();
+    if(providerDock_)providerDock_->hide();
+    if(contentDock_) {
+        if(contentDock_->isFloating())contentDock_->setFloating(false);
+        addDockWidget(Qt::LeftDockWidgetArea,contentDock_);
+        contentDock_->show();
+        contentDock_->raise();
+    }
+    if(detailsDock_) {
+        if(detailsDock_->isFloating())detailsDock_->setFloating(false);
+        addDockWidget(Qt::RightDockWidgetArea,detailsDock_);
+        detailsDock_->show();
+        detailsDock_->raise();
+    }
+    for(auto* bar:findChildren<QToolBar*>())bar->show();
+    if(browser_)browser_->focusSearch();
+    statusBar()->showMessage("Asset Editing: Content / Viewport / Details",3500);
+    QTimer::singleShot(0,this,[this] {
+        if(contentDock_ && detailsDock_)
+            resizeDocks({contentDock_,detailsDock_},{360,340},
+                        Qt::Horizontal);
+    });
+}
+void QtEditorWindow::toggleImmersiveViewport() {
+    if(embeddedPlay_)return; // Play already owns fullscreen UI state.
+    if(!immersiveViewport_) {
+        immersiveWorkspaceBefore_=saveState(1);
+        immersiveViewport_=true;
+        for(auto* dock:findChildren<QDockWidget*>())dock->hide();
+        for(auto* bar:findChildren<QToolBar*>())bar->hide();
+        if(viewport_)viewport_->setFocus(Qt::OtherFocusReason);
+        statusBar()->showMessage("Immersive Viewport — F11 to restore panels",5000);
+    } else {
+        immersiveViewport_=false;
+        if(!immersiveWorkspaceBefore_.isEmpty())
+            restoreState(immersiveWorkspaceBefore_,1);
+        immersiveWorkspaceBefore_.clear();
+        statusBar()->showMessage("Editor panels restored",3000);
+    }
+    if(auto* action=findChild<QAction*>("immersiveViewportAction"))
+        action->setChecked(immersiveViewport_);
 }
 
 void QtEditorWindow::restoreWorkspace() {
@@ -1516,7 +1944,8 @@ void QtEditorWindow::persistWorkspace() const {
         if(findChild<QDockWidget*>(id))browserTabs.append(id);
     }
     settings.setValue("Workspace/ContentBrowserTabs",browserTabs);
-    settings.setValue("Workspace/State",saveState(1));
+    settings.setValue("Workspace/State",immersiveViewport_ ?
+        immersiveWorkspaceBefore_ : saveState(1));
     settings.setValue("Viewport/FlySpeed",viewport_->flySpeed());
     settings.setValue("Viewport/Grid",viewport_->showGrid());
     settings.setValue("Viewport/DrawMode",int(viewport_->drawMode()));
@@ -1531,9 +1960,6 @@ void QtEditorWindow::persistWorkspace() const {
     settings.setValue("Game/PlayerExecutable",configuredPlayerPath_);
 }
 void QtEditorWindow::closeEvent(QCloseEvent* e) {
-    if(textWorkspace_ && !textWorkspace_->confirmCloseAll()) {
-        e->ignore();return;
-    }
     if(!confirmDiscard()){e->ignore();return;}
     if(playerProcess_ && playerProcess_->state()!=QProcess::NotRunning)
         stopGame();

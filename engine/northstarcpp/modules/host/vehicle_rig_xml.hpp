@@ -1,9 +1,11 @@
 #pragma once
 #include <northstarcpp/vehicle_cabin_plugin.h>
+#include <northstarcpp/vehicle_powertrain_plugin.h>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <optional>
 namespace northstarcpp {
 struct VehicleRigAsset {
     NorthStarVehicleRig setup{};
@@ -12,6 +14,7 @@ struct VehicleRigAsset {
     std::vector<NorthStarVehicleSeatConfig> seats;
     std::vector<NorthStarVehicleDoorConfig> doors;
     std::vector<std::string> door_visual_nodes;
+    std::optional<NorthStarVehiclePowertrainConfig> powertrain;
     std::string contact_mode="flat";
     float surface_friction=1.f;
     NorthStarVehicleRig view() const {

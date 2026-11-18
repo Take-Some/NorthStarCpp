@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NorthStarUI version="3" target="screen" layer="gallery">
+  <Tokens>
+    <Token name="accent" type="color" value="#f5c86dff"/>
+    <Token name="surface" type="color" value="#17293ef0"/>
+  </Tokens>
+  <Styles>
+    <Style name="toolbar">
+      <Property name="height" type="number" value="270"/>
+      <Property name="padding" type="number" value="18"/>
+      <Property name="gap" type="number" value="12"/>
+      <Property name="background" token="surface"/>
+    </Style>
+  </Styles>
+  <Components>
+    <Component name="menuAction" type="button">
+      <Property name="width" type="number" value="450"/>
+      <Property name="height" type="number" value="56"/>
+      <Property name="text" type="string" value="ACTION"/>
+      <Property name="color" token="accent"/>
+      <Property name="background" token="surface"/>
+      <Property name="font_scale" type="number" value="2"/>
+    </Component>
+  </Components>
+  <Elements>
+    <Panel id="toolbar" style="toolbar">
+      <Property name="width" type="number" value="520"/>
+      <Property name="anchor_center_x" type="bool" value="true"/>
+      <Property name="y" type="number" value="150"/>
+    </Panel>
+    <Text id="title" parent="toolbar">
+      <Property name="text" type="string" value="UI COMPONENTS"/>
+      <Property name="height" type="number" value="48"/>
+      <Property name="color" token="accent"/>
+    </Text>
+    <Use id="accept" parent="toolbar" component="menuAction">
+      <Property name="text" type="string" value="ACCEPT"/>
+    </Use>
+    <Use id="cancel" parent="toolbar" component="menuAction">
+      <Property name="text" type="string" value="CANCEL"/>
+    </Use>
+  </Elements>
+  <Actions>
+    <Action id="accept" event="click" emit="ui.gallery.accept" animation="pulse"/>
+    <Action id="cancel" event="click" emit="ui.gallery.cancel"/>
+  </Actions>
+  <Animations>
+    <Animation name="enter" id="toolbar" property="y"
+               from="-320" to="150" duration="0.4"
+               easing="easeOutCubic" trigger="mount"/>
+    <Animation name="pulse" id="accept" property="x"
+               from="0" to="16" duration="0.2"
+               easing="easeInOut" trigger="manual"/>
+  </Animations>
+  <Breakpoints>
+    <Breakpoint minWidth="0" maxWidth="720">
+      <Override id="toolbar">
+        <Property name="width" type="number" value="320"/>
+        <Property name="y" type="number" value="45"/>
+      </Override>
+      <Override id="accept">
+        <Property name="width" type="number" value="280"/>
+      </Override>
+      <Override id="cancel">
+        <Property name="width" type="number" value="280"/>
+      </Override>
+    </Breakpoint>
+  </Breakpoints>
+</NorthStarUI>

@@ -37,7 +37,7 @@ std::vector<std::uint8_t> serialize_list_file(
     std::string const& metadata_json,std::vector<std::uint8_t> const& body)
 {
     constexpr std::size_t header=128;
-    constexpr std::size_t max_body=64u*1024u*1024u;
+    auto const max_body=list_body_limit(kind);
     if(kind==0 || schema==0 || !entries || entries>65536 ||
        body.empty() || body.size()>max_body ||
        metadata_json.size()>8u*1024u*1024u)
@@ -68,6 +68,39 @@ std::vector<std::uint8_t> serialize_list_file(
     blake3_hasher_update(&hasher,body.data(),body.size());
     blake3_hasher_finalize(&hasher,h+64,BLAKE3_OUT_LEN);
     put(h+112,1,8);
+    std::memcpy(h+offset,compressed.data(),compressed.size());
+    return output;
+}
+
+std::vector<std::uint8_t> serialize_list_file_v2(
+    std::uint16_t kind,std::uint16_t schema,std::uint32_t entries,
+    std::string const& metadata_json,std::vector<std::uint8_t> const& body)
+{
+    constexpr std::size_t header=64;
+    auto const limit=list_body_limit(kind,true);
+    if(kind==0 || schema==0 || entries==0 || entries>65536 ||
+       body.empty() || body.size()>limit || metadata_json.size()>8u*1024u*1024u)
+        throw std::runtime_error("NEF8 v2: invalid kind, schema or size");
+    if(!metadata_json.empty())(void)parse_json(metadata_json);
+    auto compressed=deflate_raw(body);
+    auto const offset=header+metadata_json.size();
+    if(offset+compressed.size()>256ull*1024*1024)
+        throw std::runtime_error("NEF8 v2: compressed container too large");
+    std::vector<std::uint8_t> output(offset+compressed.size(),0);
+    auto* h=output.data();
+    std::memcpy(h,"NEF8",4);
+    h[4]=2;h[5]=6;
+    put(h+6,kind,2);
+    put(h+8,metadata_json.empty()?5:7,2); // raw DEFLATE, BLAKE3, optional JSON
+    put(h+10,schema,2);
+    put(h+12,entries,4);
+    put(h+16,compressed.size(),8);
+    put(h+24,body.size(),8);
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher,body.data(),body.size());
+    blake3_hasher_finalize(&hasher,h+32,BLAKE3_OUT_LEN);
+    std::memcpy(h+header,metadata_json.data(),metadata_json.size());
     std::memcpy(h+offset,compressed.data(),compressed.size());
     return output;
 }

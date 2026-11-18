@@ -6,7 +6,7 @@ const vm=require("node:vm");
 const assert=require("node:assert/strict");
 const ROOT=path.join(__dirname,"..");
 const PREFAB=fs.readFileSync(path.join(ROOT,
-    "sharedAssets/api/scene/Prefab.js"),"utf8");
+    "engine/northstarcpp/resources/sharedAssets/api/scene/Prefab.js"),"utf8");
 const spawned=[],played=[],destroyed=[];
 let Prefab;
 const scene={
@@ -46,8 +46,8 @@ function parseNativeText(relative) {
     return {objects:[root],animations};
 }
 const descriptors={
-    "prefabs/abby.nprefab":parseNativeText(
-        "sharedAssets/prefabs/abby.nprefab"),
+    "prefabs/characters/abby.nprefab":parseNativeText(
+        "engine/northstarcpp/resources/sharedAssets/prefabs/characters/abby.nprefab"),
     "prefabs/another.nprefab":{objects:[{
         id:"1",parent:"0",name:"Generic Skeletal NPC",
         asset:"characters/another/models/actor.ydd",layer:"Default",
@@ -63,13 +63,13 @@ const context={
 };
 vm.runInNewContext(PREFAB,context,{filename:"Prefab.js"});
 assert.equal(typeof Prefab,"function");
-const abbey=Prefab.instantiate("prefabs/abby.nprefab",{
+const abbey=Prefab.instantiate("prefabs/characters/abby.nprefab",{
     position:{x:2,y:0,z:3}});
 assert.equal(abbey.alive,true);
 assert.equal(spawned[0].config.asset,"characters/abby/models/abby.ydd");
 assert.equal(spawned[0].config.position.x,2);
 assert.match(played[0].clip,/mm-explore\.ycd@abby-mm-explore-idle$/);
-const second=Prefab.instantiate("prefabs/abby.nprefab",{
+const second=Prefab.instantiate("prefabs/characters/abby.nprefab",{
     position:{x:7,y:0,z:9}});
 assert.notEqual(abbey.root.index,second.root.index);
 const other=Prefab.instantiate("prefabs/another.nprefab");

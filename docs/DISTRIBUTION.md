@@ -1,5 +1,7 @@
 # NorthStarCpp: source architecture and distributable releases
 
+**NorthStarCpp 0.7.0:** approved releases now contain separate `Engine/` and `GameClient/` directories with separate ZIP archives; the combined `bin/` layout described below remains the internal QA staging format. See [ENGINE_CLIENT_SPLIT_0_7_0.md](ENGINE_CLIENT_SPLIT_0_7_0.md) for the current release layout and commands.
+
 ## Repository boundaries
 
 NorthStarCpp uses **one** module registry (`tools/cmake/NorthStarModules.cmake`). CMake's registered targets are the authority for plugin metadata, output directories, install destinations and shipping manifests. No release script should search arbitrary build-tree DLLs.

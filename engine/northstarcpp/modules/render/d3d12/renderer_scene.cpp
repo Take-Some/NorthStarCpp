@@ -16,6 +16,26 @@ void RendererState::set_triangles(const NorthStarRenderTriangleVertex* source,UI
     }
     // Own all geometry and texture contents after return; the host may free its
     // YDD/YTD/ymat buffers immediately.
+void RendererState::set_gpu_sky_uniforms(NorthStarGpuSkyUniforms const* source) {
+    if(!source) {
+        gpu_sky_uniforms={};
+        height_fog_density=0.f;
+        return;
+    }
+    auto const* values=reinterpret_cast<float const*>(source);
+    for(std::size_t i=0;i<sizeof(*source)/sizeof(float);++i)
+        if(!std::isfinite(values[i]))
+            throw std::invalid_argument("Non-finite GPU sky uniform value");
+    if(source->atmosphere[0]<0.f||source->atmosphere[0]>1.f||
+       source->atmosphere[1]<0.f||source->atmosphere[1]>1.f||
+       source->cloud[0]<0.f||source->cloud[0]>1.f||
+       source->cloud[2]<0.f||source->cloud[2]>=1.f)
+        throw std::invalid_argument("GPU sky range violation");
+    if(source->sun_direction[3]<0.f || source->sun_direction[3]>.25f)
+        throw std::invalid_argument("D3D12 sky fog density out of range");
+    gpu_sky_uniforms=*source; // No GPU resource creation or queue wait.
+    height_fog_density=source->flags[0]>.5f ? source->sun_direction[3] : 0.f;
+}
 void RendererState::set_sky(NorthStarSky const* source){
         wait();
         if(!source) {

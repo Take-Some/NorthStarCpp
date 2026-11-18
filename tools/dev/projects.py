@@ -391,8 +391,9 @@ class ProjectManager:
         parent.mkdir(parents=True, exist_ok=True)
         target.mkdir(exist_ok=False)
         try:
-            for subdir in ("assets", "scripts", "config"):
+            for subdir in ("assets", "config"):
                 (target / subdir).mkdir()
+            (target / "assets" / "scripts").mkdir()
             (target / STARTUP_SCENE).write_bytes(encode_legacy_template(chosen.scene))
             # Game templates are script-first. World/ECS/physics stay native.
             if chosen.id in ("sandbox", "physics"):
@@ -401,7 +402,7 @@ class ProjectManager:
                 script_source = script_source.replace(
                     '"__NORTHSTAR_PROJECT_TITLE__"',
                     json.dumps(name.strip(), ensure_ascii=False))
-                (target / "scripts" / "main.js").write_text(
+                (target / "assets" / "scripts" / "main.js").write_text(
                     script_source, encoding="utf-8")
             meta = {
                 "schema_version": PROJECT_SCHEMA, "engine": "NorthStarCpp",
@@ -418,7 +419,7 @@ class ProjectManager:
             (target / "README.md").write_text(
                 "# " + name.strip() + "\n\n" + chosen.description + "\n\n"
                 "NorthStarCpp project, scene: main.nscn. "
-                "JavaScript gameplay can be placed in scripts/main.js; runtime execution requires an installed V8 scripting provider.\n",
+                "JavaScript gameplay is authored in assets/scripts/main.js (VFS: scripts/main.js); runtime execution requires an installed V8 scripting provider.\n",
                 encoding="utf-8",
             )
             return self.register(target)

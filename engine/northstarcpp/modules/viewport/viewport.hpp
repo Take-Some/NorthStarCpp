@@ -9,6 +9,9 @@
 #endif
 #include <windows.h>
 #include <memory>
+#include <northstarcpp/world_foundation.hpp>
+#include <map>
+#include <utility>
 #include <cstddef>
 #include <filesystem>
 #include <string>
@@ -20,6 +23,7 @@
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/render_postfx_api.h>
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_rigid_instances_api.h>
 #include "ui_document.hpp"
 
 namespace northstarcpp {
@@ -27,9 +31,11 @@ namespace northstarcpp {
 class PhysicsScene;
 class SceneWorld;
 class FpsArena;
+class FpsWeaponEffects;
 struct CameraPose;
 namespace shared_assets { struct DrawableResources; }
 class AssetStore;
+class SkyEnvironment;
 
 // Player-independent skeletal resource description supplied by project scripts.
 // Model, rig, materials, textures and animation names are virtual VFS paths.
@@ -65,6 +71,7 @@ struct ViewportAssetStats {
     std::size_t material_batches = 0;
     std::size_t textured_material_batches = 0;
     std::size_t cube_proxies = 0;
+    std::size_t baked_hlod_clusters = 0; // rendered as real indexed geometry
     std::size_t invalid_meshes = 0;
 };
 
@@ -76,10 +83,21 @@ public:
     // Actual selected GPU provider for startup diagnostics.
     std::string renderer_provider_name() const;
     std::string renderer_provider_version() const;
+    bool supports_shader_hot_reload() const noexcept;
     ViewportAssetStats asset_stats() const noexcept;
+    // Preview-only immutable world-space CPU stream cache for *true* alpha
+    // batches that still use the forward material renderer. Never enabled
+    // for Player/ECS simulation, animated rigs or mutable game entities.
+    void set_preview_static_cache(bool enabled);
+    std::pair<std::size_t,std::size_t> preview_cache_frame_stats() const noexcept;
     // GPU-backed cube ID selection when supported by the active provider.
     // nullopt = unsupported/incomplete scene; -1 = valid GPU background hit.
     std::optional<int> pick_actor_gpu(std::uint32_t x,std::uint32_t y) const;
+    // Exact cached skinned bone-attachment transform from the last rendered
+    // scene frame. No guessed camera/hand offset. Used by shared script
+    // ballistics to locate a weapon-local muzzle point in world space.
+    std::optional<Vector3> attached_local_point(std::uint64_t child_entity,
+        Vector3 weapon_local_point,CameraPose const* camera_pose) const;
     // Provider-owned bounded GPU readback queue: submit returns immediately,
     // poll never waits on a GPU fence. UNKNOWN/STALE results are discarded.
     enum class PickStatus { Pending, Ready, Stale, Unknown };
@@ -88,6 +106,15 @@ public:
     std::optional<std::uint64_t> enqueue_actor_gpu_pick(
         std::uint32_t x,std::uint32_t y) const;
     std::optional<PickResult> poll_actor_gpu_pick(std::uint64_t id) const;
+
+    // Optional provider-owned RGBA8 readback of one actual rendered GPU frame.
+    // Never captures unrelated application or desktop pixels.
+    struct CapturedFrame {
+        std::uint32_t width=0,height=0;
+        std::vector<std::uint8_t> rgba;
+    };
+    bool request_scene_frame_capture();
+    std::optional<CapturedFrame> read_scene_frame_capture() const;
 
     // Project scripts select every skeletal resource and animation state.
     // The native viewport only decodes VFS assets and evaluates the skin pose.
@@ -99,6 +126,10 @@ public:
     // Uses the existing character provider, switching triangle index sets
     // without constructing a second skinned avatar or a fake UI overlay.
     void set_character_viewmodel(bool first_person_arms);
+    // Runtime, per-entity skeletal playback selected by project scripts.
+    // An empty reference clears the override and restores authored components.
+    void set_scene_animation_override(std::uint64_t entity_id,
+        std::string const& clip_reference, float playback_rate = 1.f);
     void set_ui_document(UiDocument document);
     // Controls how far authored mesh detail remains resident/visible.
     // No simplification, decimation or substitution of original triangles.
@@ -114,6 +145,14 @@ public:
     void hide_character();
     void clear_character();
     void set_sky(shared_assets::DrawableResources const& resources);
+    // Optional project sky reference: never a renderer/provider-owned file name.
+    void set_sky_asset_reference(std::string const& drawable);
+    // Editor preview reads the project manifest without executing game scripts.
+    void configure_project_sky(std::string_view scene={});
+    // Provider-neutral environment state; existing authored YDD remains the
+    // geometry source. If none is mounted, a standard UV sphere is used.
+    void set_sky_environment(SkyEnvironment const& environment);
+    bool supports_gpu_sky() const noexcept;
     // Mount source or archived project assets for authored OBJ scene meshes.
     // Geometry is loaded through AssetStore, never by render-provider filesystem I/O.
     struct ShaderReloadProgress {
@@ -134,6 +173,7 @@ public:
     // Synchronous diagnostic GPU timestamps; read() may wait for the GPU
     // and must not be used in the production hot path.
     std::optional<NorthStarRenderTimingStats> gpu_frame_timing() const;
+    std::optional<NorthStarRigidInstanceStats> rigid_gpu_stats() const;
     void set_asset_sources(std::filesystem::path const& project_root,
                            std::filesystem::path const& archive = {},
                            std::filesystem::path const& archive_data = {},
@@ -144,7 +184,10 @@ public:
         PhysicsScene const* physics = nullptr, FpsArena const* fps = nullptr, bool paused = false,
         CameraPose const* camera_pose = nullptr, SceneWorld const* scene_world = nullptr,
         bool show_fps_overlay = true, bool show_streaming_debug = false,
-        ViewportGizmo const* gizmo = nullptr);
+        ViewportGizmo const* gizmo = nullptr,
+        FpsWeaponEffects const* weapon_fx = nullptr,
+        std::map<world::ChunkKey,world::TerrainChunk> const* terrain_chunks = nullptr,
+        std::string const& terrain_material = {});
 
 private:
     struct State;

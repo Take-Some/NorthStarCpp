@@ -7,9 +7,10 @@
 
 int main() {
     using namespace northstarcpp::render::d3d12::detail;
-    auto graph = build_frame_graph();
+    auto graph = build_frame_graph(false,true,true,true);
     REQUIRE(graph.passes().size() == 9);
-    REQUIRE(graph.resources().size() == 10);
+    REQUIRE(graph.resources().size() ==
+        static_cast<std::size_t>(FrameResource::GBufferAuxiliary)+1);
     // Physical placed alias allocator depends on these enum IDs.
     REQUIRE(graph.resources()[static_cast<std::size_t>(FrameResource::GBufferNormal)].name
             == "G-buffer normal");
@@ -27,7 +28,7 @@ int main() {
     REQUIRE(graph.passes()[4].name == "bloom extraction");
     REQUIRE(graph.passes()[5].name == "exposure metering");
     REQUIRE(graph.passes()[6].name == "HDR tonemapping");
-    REQUIRE(graph.passes()[7].name == "FXAA/SDR composite");
+    REQUIRE(graph.passes()[7].name == "scene color composite");
     REQUIRE(graph.passes()[8].name == "HUD/Present");
     const auto& final_pass = graph.passes().back();
     REQUIRE(final_pass.reads.size() == 1);
@@ -64,7 +65,14 @@ int main() {
             return t.resource==tone && t.after==ResourceAccess::ShaderRead;
         }));
     // All backend-owned GPU resources have valid scheduled lifetimes.
-    for (const auto& lifetime : plan.lifetimes) {
+    for (std::size_t i=0;i<plan.lifetimes.size();++i) {
+        // GBuffer v2 auxiliary is registered but not used in default mode.
+        if(i==static_cast<std::size_t>(FrameResource::GBufferAuxiliary)) {
+            REQUIRE(plan.lifetimes[i].first==-1);
+            REQUIRE(plan.lifetimes[i].second==-1);
+            continue;
+        }
+        const auto& lifetime=plan.lifetimes[i];
         REQUIRE(lifetime.first >= 0);
         REQUIRE(lifetime.second >= lifetime.first);
     }

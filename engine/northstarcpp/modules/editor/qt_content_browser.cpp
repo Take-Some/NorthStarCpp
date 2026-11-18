@@ -5,6 +5,7 @@
 #include "qt_content_browser_internal.hpp"
 #include "qt_content_browser_thumbnails.hpp"
 #include <northstarcpp/assets.hpp>
+#include <northstarcpp/sky_project_config.hpp>
 #include <northstarcpp/embedded_script_api.hpp>
 #include "editor_asset_thumbnails.hpp"
 #include "qt_asset_preview_dialog.hpp"
@@ -65,6 +66,7 @@
 #include <QStatusBar>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -88,7 +90,7 @@ constexpr int role_path=asset_card_roles::path;
 constexpr int role_directory=asset_card_roles::directory;
 constexpr int role_kind=asset_card_roles::kind;
 constexpr int role_reference=asset_card_roles::reference;
-constexpr int role_source=Qt::UserRole+65; // QTreeWidget only, not grid roles
+constexpr int role_source=browser_internal::folderSourceRole;
 using browser_internal::qt;
 using browser_internal::native;
 using browser_internal::engineThumbnail;
@@ -109,6 +111,7 @@ QString bytesText(std::uintmax_t count) {
 struct Palette {QColor fill;QString text;};
 Palette asset_palette(AssetKind kind) {
     switch(kind) {
+    case AssetKind::ui_document:return {QColor("#e4bd60"),"UI"};
     case AssetKind::folder:return {QColor("#C99A52"),"DIR"};
     case AssetKind::mesh:return {QColor("#58A7DB"),"3D"};
     case AssetKind::collision:return {QColor("#B58C59"),"COL"};
@@ -121,6 +124,7 @@ Palette asset_palette(AssetKind kind) {
     case AssetKind::material_function:return {QColor("#d08fd8"),"FUNC"};
     case AssetKind::script:return {QColor("#D97893"),"JS"};
     case AssetKind::animation:return {QColor("#7DBD68"),"ANIM"};
+    case AssetKind::particle:return {QColor("#DBB66A"),"FX"};
     case AssetKind::skeleton:return {QColor("#8C9DDA"),"SKEL"};
     case AssetKind::shader:return {QColor("#6FAFD7"),"HLSL"};
     default:return {QColor("#718198"),"FILE"};
@@ -224,7 +228,7 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     toolbar->addWidget(search_);
     types_=new QComboBox(this);
     for(auto const& item:{"All Assets","Meshes","Materials","Textures","Audio",
-                          "Scenes","Scripts","Animations","Shaders","Other","Prefabs","Characters","Material Functions","Collisions"})
+                          "Scenes","Scripts","Animations","Shaders","Other","Prefabs","Characters","Material Functions","Collisions","UI Documents","Particles"})
         types_->addItem(item);
     types_->setMinimumWidth(130);
     toolbar->addWidget(types_);
@@ -264,6 +268,10 @@ QtContentBrowser::QtContentBrowser(QWidget* parent):QWidget(parent) {
     grid_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     entries_=new AssetGridModel(this);
     grid_->setModel(entries_);
+    for(auto* view:{grid_->viewport(),folders_->viewport()}) {
+        view->setAcceptDrops(true);
+        view->installEventFilter(this);
+    }
     auto* cards=new AssetCardDelegate(grid_);
     auto* listItems=new QStyledItemDelegate(grid_);
     grid_->setItemDelegate(cards);
@@ -593,15 +601,15 @@ void QtContentBrowser::selectAssetSource(bool shared) {
     populateItems();
     // Disable all project-mutating toolbar actions on the engine mount.
     add_->setEnabled(!engine_selected_ && !root_.isEmpty());
-    import_->setEnabled(!engine_selected_ && !root_.isEmpty());
+    import_->setEnabled(!import_busy_ && !engine_selected_ && !root_.isEmpty());
 }
 void QtContentBrowser::setProjectScene(QString const& scene) {
+    sky_scene_=scene;
     if(scene.trimmed().isEmpty()) {
         setContentRoot({});
         return;
     }
-    auto const file=QFileInfo(scene);
-    setContentRoot(file.absoluteDir().filePath("assets"));
+    setContentRoot(qt(project_sky::find_root(native(scene))/"assets"));
 }
 void QtContentBrowser::setContentRoot(QString const& path) {
     // QFileInfo("").absoluteFilePath() resolves to the process working
@@ -621,6 +629,8 @@ void QtContentBrowser::setContentRoot(QString const& path) {
     thumbs_.clear();icons_.clear();pending_.clear();
     project_catalog_=AssetCatalog{};
     catalog_ready_=false;
+    entries_->clear();
+    visible_items_.clear();
     refresh();
     emit contentRootsChanged(project_root_,engine_root_);
 }
@@ -674,26 +684,45 @@ void QtContentBrowser::completeReveal() {
     }
 }
 void QtContentBrowser::refresh() {
+    // Snapshot navigation before the asynchronous reindex. Keeping the
+    // previous catalog and model visible is critical: empty placeholder
+    // catalogs used to reset folder_ to the project root on every save.
+    auto const folderBefore=folder_;
+    auto const sourceBefore=engine_selected_;
+    auto const currentBefore=selectedPath();
+    auto const selectedBefore=selectedPaths();
+    int const scrollBefore=grid_->verticalScrollBar()->value();
+    QSet<QString> expandedBefore;
+    for(QTreeWidgetItemIterator it(folders_);*it;++it) {
+        auto* item=*it;
+        if(item->isExpanded())
+            expandedBefore.insert(QString::number(
+                item->data(0,role_source).toInt())+":"+
+                item->data(0,role_path).toString());
+    }
     auto const version=++generation_;
     ++registry_generation_;
     registry_.reset();
     git_decorations_.clear();
     ++thumbnail_generation_;
     catalog_ready_=false;
-    project_catalog_=AssetCatalog{};
-    engine_catalog_=AssetCatalog{};
+    // Do not clear the old catalog, grid or folder tree while indexing.
+    // Filesystem-watch bursts can start a second scan before the first
+    // completes; every scan then still has a valid navigation snapshot.
     pending_.clear();
     thumbs_.clear();
-    visible_items_.clear();
-    entries_->clear();
-    populateTree(); // Both root labels remain visible while indexing.
     bool const hasProject=!project_root_.isEmpty() &&
         QFileInfo(project_root_).isDir();
     bool const hasEngine=!engine_root_.isEmpty() &&
         QFileInfo(engine_root_).isDir();
     add_->setEnabled(!engine_selected_ && hasProject);
-    import_->setEnabled(!engine_selected_ && hasProject);
+    import_->setEnabled(!import_busy_ && !engine_selected_ && hasProject);
     if(!hasProject && !hasEngine) {
+        project_catalog_=AssetCatalog{};
+        engine_catalog_=AssetCatalog{};
+        entries_->clear();
+        visible_items_.clear();
+        populateTree();
         status_->setText("Open a project or connect Engine Shared Assets.");
         updateBreadcrumb();
         updateDetails();
@@ -705,7 +734,8 @@ void QtContentBrowser::refresh() {
     using Sources=std::pair<AssetCatalog,AssetCatalog>;
     auto* watcher=new QFutureWatcher<Sources>(this);
     connect(watcher,&QFutureWatcher<Sources>::finished,this,
-            [this,watcher,version] {
+            [this,watcher,version,folderBefore,sourceBefore,currentBefore,
+             selectedBefore,scrollBefore,expandedBefore] {
         try {
             auto result=watcher->result();
             if(version==generation_) {
@@ -717,7 +747,51 @@ void QtContentBrowser::refresh() {
                 refreshGitDecorations();
                 refreshCollections();
                 populateTree();
+                // Restore expansion state, including sibling folders.
+                if(!expandedBefore.isEmpty()) {
+                    for(QTreeWidgetItemIterator it(folders_);*it;++it) {
+                        auto* item=*it;
+                        auto const key=QString::number(
+                            item->data(0,role_source).toInt())+":"+
+                            item->data(0,role_path).toString();
+                        item->setExpanded(expandedBefore.contains(key));
+                    }
+                    // The currently open path must remain visible in the tree.
+                    for(auto* node=folders_->currentItem();node;node=node->parent())
+                        node->setExpanded(true);
+                }
                 populateItems();
+                if(folder_==folderBefore && engine_selected_==sourceBefore &&
+                   pending_reveal_.isEmpty()) {
+                    auto* selection=grid_->selectionModel();
+                    QModelIndex preferred;
+                    QList<QModelIndex> matches;
+                    QSet<QString> requested(selectedBefore.begin(),selectedBefore.end());
+                    for(int row=0;row<entries_->rowCount();++row) {
+                        auto const index=entries_->index(row,0);
+                        auto const path=index.data(role_path).toString();
+                        if(path==currentBefore)preferred=index;
+                        if(requested.contains(path))matches.push_back(index);
+                    }
+                    if(!preferred.isValid() && !matches.isEmpty())
+                        preferred=matches.first();
+                    if(preferred.isValid())
+                        selection->setCurrentIndex(preferred,QItemSelectionModel::NoUpdate);
+                    for(auto const& index:matches)
+                        selection->select(index,QItemSelectionModel::Select|
+                                             QItemSelectionModel::Rows);
+                    // Qt adjusts scrollbar bounds on a queued layout pass;
+                    // restore its position after that pass, not before it.
+                    QTimer::singleShot(0,this,[this,version,folderBefore,
+                                                sourceBefore,scrollBefore] {
+                        if(version==generation_ && folder_==folderBefore &&
+                           engine_selected_==sourceBefore) {
+                            grid_->verticalScrollBar()->setValue(scrollBefore);
+                            scheduleThumbnails();
+                        }
+                    });
+                    updateDetails();
+                }
                 completeReveal();
             }
         }catch(std::exception const& e) {
@@ -799,7 +873,12 @@ void QtContentBrowser::populateTree() {
         }
         folders_->expandItem(root);
         if(shared==engine_selected_) {
-            if(!lookup.contains(folder_))folder_.clear();
+            if(catalog_ready_) {
+                // Deleting a folder returns to its nearest surviving parent,
+                // never automatically to the global root.
+                while(!folder_.isEmpty() && !lookup.contains(folder_))
+                    folder_=parentVirtual(folder_);
+            }
             selected=lookup.value(folder_,root);
         }
     }
@@ -827,6 +906,7 @@ void QtContentBrowser::populateTree() {
     folders_->blockSignals(false);
     back_->setEnabled(!back_history_.isEmpty());
     forward_->setEnabled(!forward_history_.isEmpty());
+    up_->setEnabled(!folder_.isEmpty());
     updateBreadcrumb();
 }
 void QtContentBrowser::openFolder(QString const& folder,bool history) {
@@ -883,6 +963,20 @@ void QtContentBrowser::openAssetPreview(QString const& virtualPath) {
             static_cast<qsizetype>(embedded->source.size())));
         layout.addWidget(source);
         dialog.exec();
+        return;
+    }
+    if(record->kind==AssetKind::ui_document && !record->is_virtual_entry()) {
+        try {
+            auto const physical=activeCatalog().backing_file(record->virtual_path);
+            auto const absolute=from8(physical.u8string());
+            if(receivers(SIGNAL(uiAssetEditorRequested(QString,bool)))>0)
+                emit uiAssetEditorRequested(absolute,engine_selected_);
+            else
+                QMessageBox::information(this,"NorthStar UI Document",
+                    "Open .nui assets in the NorthStar Qt Editor to use the UI Designer.");
+        }catch(std::exception const& error) {
+            QMessageBox::warning(this,"UI Document",QString::fromUtf8(error.what()));
+        }
         return;
     }
     if(record->kind==AssetKind::audio) {
@@ -969,10 +1063,21 @@ QIcon QtContentBrowser::iconFor(AssetKind k) const {
     }
     // Dedicated NorthStar file art, embedded in RCC for both the editor
     // dock and standalone Asset Browser. Avoid FILE/FUNC placeholder tiles.
+    if(k==AssetKind::ui_document) {
+        // The .nui icon is supplied by the external NSP Qt resource archive.
+        static QIcon const uiDocumentArt(
+            QStringLiteral(":/northstar/icons/assetBrowser/fileNui.png"));
+        if(!uiDocumentArt.isNull())return uiDocumentArt;
+    }
     if(k==AssetKind::collision) {
         static QIcon const collisionFileArt(
             QStringLiteral(":/northstar/icons/assetBrowser/collisionFile.png"));
         if(!collisionFileArt.isNull())return collisionFileArt;
+    }
+    if(k==AssetKind::particle) {
+        static QIcon const particleArt(
+            QStringLiteral(":/northstar/icons/assetBrowser/fileYpt.png"));
+        if(!particleArt.isNull())return particleArt;
     }
     if(k==AssetKind::audio) {
         static QIcon const soundFileArt(
@@ -1022,7 +1127,11 @@ QIcon QtContentBrowser::iconForDirectory(AssetRecord const& record) const {
     }
     if(record.directory && record.is_list_file()) {
         auto const extension=fs::path(record.virtual_path).extension().u8string();
-        if(extension==".ytd") {
+        if(extension==".ypt") {
+            static QIcon const particleFolder(
+                QStringLiteral(":/northstar/icons/assetBrowser/yptFolder.png"));
+            if(!particleFolder.isNull())return particleFolder;
+        } else if(extension==".ytd") {
             static QIcon const textureFolder(
                 QStringLiteral(":/northstar/icons/assetBrowser/texturesFolder.png"));
             if(!textureFolder.isNull())return textureFolder;
@@ -1054,6 +1163,12 @@ QIcon QtContentBrowser::iconForRecord(AssetRecord const& record) const {
     if(record.directory)return iconForDirectory(record);
     if(!record.is_virtual_entry()) {
         auto const extension=QFileInfo(from8(record.virtual_path)).suffix().toLower();
+        // An Animation Graph is editable XML, not a NEF8 YCD dictionary.
+        if(from8(record.virtual_path).endsWith(".nagraph.xml",Qt::CaseInsensitive)) {
+            static QIcon const graphArt(
+                QStringLiteral(":/northstar/icons/assetBrowser/animFile.png"));
+            if(!graphArt.isNull())return graphArt;
+        }
         // Cache the decoded resource icon across all cards and refreshes.
         if(extension=="md" || extension=="markdown") {
             static QIcon const md(QStringLiteral(":/northstar/icons/assetBrowser/fileMd.png"));
@@ -1092,6 +1207,8 @@ QIcon QtContentBrowser::iconForRecord(AssetRecord const& record) const {
 QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
     if(!rec.directory && !rec.is_virtual_entry()) {
         auto const suffix=QFileInfo(from8(rec.virtual_path)).suffix().toLower();
+        if(from8(rec.virtual_path).endsWith(".nagraph.xml",Qt::CaseInsensitive))
+            return "Animation Graph (XML)";
         if(suffix=="md" || suffix=="markdown")return "Markdown Document";
         if(suffix=="js")return "JavaScript Source";
         if(suffix=="vert")return "GLSL Vertex Shader";
@@ -1113,7 +1230,8 @@ QString QtContentBrowser::subtitleText(AssetRecord const& rec) const {
                             extension==".ymat"?"material":
                             extension==".ymt"?"joint":
                             extension==".ycd"?"animation clip":
-                            extension==".nac"?"audio track":"item";
+                            extension==".nac"?"audio track":
+                            extension==".ypt"?"particle entry":"item";
         return QString::number(number)+" "+singular+
                (number==1?"":"s");
     }
@@ -1131,6 +1249,7 @@ QColor QtContentBrowser::accentColor(AssetRecord const& rec) const {
         if(ext==".ymat")return asset_palette(AssetKind::material).fill;
         if(ext==".ymt")return asset_palette(AssetKind::skeleton).fill;
         if(ext==".ycd")return asset_palette(AssetKind::animation).fill;
+        if(ext==".ypt")return asset_palette(AssetKind::particle).fill;
         if(ext==".nac")return asset_palette(AssetKind::audio).fill;
     }
     return asset_palette(rec.directory?AssetKind::folder:rec.kind).fill;
@@ -1177,6 +1296,8 @@ void QtContentBrowser::populateItems() {
             case 7:desired=AssetKind::animation;break;
             case 8:desired=AssetKind::shader;break;
             case 9:desired=AssetKind::other;break;
+            case 15:desired=AssetKind::particle;break;
+        case 14:desired=AssetKind::ui_document;break;
             case 10:desired=AssetKind::prefab;break;
             case 11:desired=AssetKind::character;break;
             case 12:desired=AssetKind::material_function;break;

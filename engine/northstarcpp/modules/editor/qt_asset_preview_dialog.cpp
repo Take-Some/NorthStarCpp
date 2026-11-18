@@ -1,12 +1,16 @@
 // Modal Unreal-style NorthStar asset inspector. CPU decoding and mesh preview
 // work without a configured Vulkan device or running engine.assets provider.
 #include "qt_asset_preview_dialog.hpp"
+#include "qt_editor_viewport.hpp"
+#include "qt_particle_simulation_dialog.hpp"
 #include "qt_asset_warnings.hpp"
 #include "qt_prefab_preview.hpp"
 #include "qt_prefab_collision_editor.hpp"
 #include "qt_material_function_editor.hpp"
 #include "qt_material_asset_dialog.hpp"
 #include "editor_prefab_composition.hpp"
+#include "editor_preview_studio_lighting.hpp"
+#include "../models/character_asset_namespace.hpp"
 #include "editor_asset_thumbnails.hpp"
 #include "editor_asset_material_source.hpp"
 #include <northstarcpp/shared_assets.hpp>
@@ -38,6 +42,7 @@
 #include <QSplitter>
 #include <QTextEdit>
 #include <QThread>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -49,10 +54,12 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <limits>
 
 namespace northstarcpp::editor {
 namespace fs=std::filesystem;
@@ -184,7 +191,7 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
                 if(tex.mips.empty())throw std::runtime_error("Texture has no mip levels");
                 result.details+="\nEntry: "+qt(name)+
                     "\nFormat: "+formatName(tex.format_id)+
-                    "\nResolution: "+QString::number(tex.mips[0].width)+" × "+
+                    "\nResolution: "+QString::number(tex.mips[0].width)+" Г— "+
                                       QString::number(tex.mips[0].height)+
                     "\nMip levels: "+QString::number(tex.mips.size())+
                     "\nColor space: "+QString(tex.srgb?"sRGB":"Linear")+
@@ -207,25 +214,28 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
                 AssetManager resources;
                 resources.mount_shared_assets(root);
                 std::unordered_map<std::string,MaterialDefinition> definitions;
+                MaterialLoadSession session(resources);
                 std::size_t material_count=0;
                 result.drawable_materials.reserve(mesh.meshes.size());
                 for(auto const& part:mesh.meshes) {
-                    if(part.material.empty()) {
+                    auto const material_ref=detail::rebase_embedded_character_material(
+                        relative,part.material);
+                    if(material_ref.empty()) {
                         result.drawable_materials.emplace_back();
                         continue;
                     }
                     try {
-                        auto found=definitions.find(part.material);
+                        auto found=definitions.find(material_ref);
                         if(found==definitions.end())
-                            found=definitions.emplace(part.material,
-                                load_material_definition(resources,part.material)).first;
+                            found=definitions.emplace(material_ref,
+                                session.load(material_ref)).first;
                         result.drawable_materials.push_back(found->second);
                         ++material_count;
                     } catch(std::exception const& e) {
                         // An absent material must be visible in the details
                         // rather than silently flattened into an OBJ proxy.
                         result.warnings.push_back({
-                            AssetWarningKind::Material,qt(part.material),qt(e.what())});
+                            AssetWarningKind::Material,qt(material_ref),qt(e.what())});
                         result.drawable_materials.emplace_back();
                     }
                 }
@@ -263,7 +273,7 @@ LoadedAsset loadAsset(fs::path const& root,std::string const& reference,
             result.image=readImage(physical);
             if(result.image.isNull())throw std::runtime_error("Image decoder failed");
             result.details+="\nResolution: "+QString::number(result.image.width())+
-                " × "+QString::number(result.image.height());
+                " Г— "+QString::number(result.image.height());
             result.supported=true;
         } else {
             // Unknown/binary assets are not misrepresented as a mesh/texture.
@@ -299,6 +309,19 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setProperty("previewReady",false);
         setStyleSheet("background:#131923");
+        QObject::connect(&render_watcher_,
+            &QFutureWatcher<editor_tools::AssetPreviewImage>::finished,
+            this,[this] {
+                auto const sequence=active_render_sequence_;
+                auto frame=render_watcher_.result();
+                render_in_flight_=false;
+                if(drawable_ && sequence==render_sequence_ && frame.valid()) {
+                    model_image_=imageFrom(frame);
+                    last_completed_sequence_=sequence;
+                    setProperty("previewRendered",true);
+                }
+                update(); // render only the newest orbit state
+            });
     }
     void setMaterial(shared_assets::Material material,
                      std::vector<shared_assets::ResolvedAsset<shared_assets::Texture>> textures) {
@@ -321,13 +344,90 @@ public:
     void setDrawable(shared_assets::Drawable drawable,
                      std::vector<MaterialDefinition> materials) {
         material_.reset();material_textures_.clear();
-        drawable_materials_=std::move(materials);
-        drawable_=std::move(drawable);texture_.reset();external_={};
+        drawable_materials_=std::make_shared<
+            std::vector<MaterialDefinition> const>(std::move(materials));
+        drawable_=std::make_shared<shared_assets::Drawable const>(
+            std::move(drawable));texture_.reset();external_={};
+        // One-time bounds calculation for both hardware orbit and CPU fallback.
+        // Full geometry stays immutable; interactive rendering must NEVER
+        // remove every Nth triangle (the source of the fragmented pistol/bus).
+        std::array<float,3> lo{1.e20f,1.e20f,1.e20f};
+        std::array<float,3> hi{-1.e20f,-1.e20f,-1.e20f};
+        for(auto const& part:drawable_->meshes)
+            for(auto const& vertex:part.vertices)
+                for(unsigned axis=0;axis<3;++axis) {
+                    lo[axis]=std::min(lo[axis],vertex.position[axis]);
+                    hi[axis]=std::max(hi[axis],vertex.position[axis]);
+                }
+        gpu_target_={(lo[0]+hi[0])*.5f,
+                     (lo[1]+hi[1])*.5f,(lo[2]+hi[2])*.5f};
+        gpu_distance_=std::clamp(
+            std::max({hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2],1.f})*1.7f,
+            2.5f,180.f);
+        ++render_sequence_;
+        last_render_dimension_=0;
+        model_image_={};
         zoom_=1.f;yaw_=0.62f;pitch_=0.27f;wireframe_=false;
         dirty_=true;
         setProperty("previewReady",true);
         setProperty("previewRendered",false);
         update();
+    }
+    // Prefer the engine's persistent GPU buffers and per-frame camera
+    // matrices; software rasterization remains only a provider fallback.
+    void setGpuScene(Scene scene,fs::path content_root) {
+#ifdef _WIN32
+        if(!drawable_ || QApplication::platformName()!="windows")return;
+        gpu_scene_=std::move(scene);
+        updateGpuLight();
+        gpu_pending_=true;
+        setProperty("previewBackend","gpu-initializing");
+        QTimer::singleShot(0,this,[this,root=std::move(content_root)] {
+            if(!gpu_pending_ || !gpu_scene_)return;
+            if(!gpu_viewport_) {
+                gpu_viewport_=new QtEditorViewport(this);
+                gpu_viewport_->setObjectName("assetPreviewGpuViewport");
+                gpu_viewport_->setMinimumSize(0,0);
+                gpu_viewport_->setGeometry(rect());
+                QObject::connect(gpu_viewport_,&QtEditorViewport::gpuUnavailable,
+                                 this,[this](QString const& diagnostic) {
+                    gpu_active_=false;
+                    gpu_pending_=false;
+                    setProperty("previewBackend","software-fallback");
+                    setProperty("gpuPreviewError",diagnostic);
+                    if(gpu_viewport_)gpu_viewport_->hide();
+                    dirty_=true;
+                    update();
+                });
+            }
+            gpu_viewport_->setAssetSources(root);
+            gpu_viewport_->setScene(&*gpu_scene_);
+            gpu_viewport_->setSelected(-1);
+            gpu_viewport_->setAssetPreviewMode(true);
+            gpu_viewport_->setShowGrid(false);
+            gpu_viewport_->setOrbitMode(true,gpu_target_,gpu_distance_);
+            gpu_viewport_->setOrbitAngles(.62f,-.27f);
+            gpu_viewport_->show();
+            gpu_viewport_->raise();
+            gpu_viewport_->setDrawMode(QtEditorViewport::DrawMode::EngineGpu);
+            gpu_active_=gpu_viewport_->gpuActive() &&
+                        gpu_viewport_->renderGpuNow();
+            gpu_pending_=false;
+            if(gpu_active_) {
+                setProperty("previewBackend","engine.render");
+                setProperty("gpuAssetSummary",gpu_viewport_->gpuAssetSummary());
+                setProperty("gpuRenderRevision",++gpu_frame_revision_);
+                setProperty("previewRendered",true);
+            } else {
+                setProperty("previewBackend","software-fallback");
+                gpu_viewport_->hide();
+                dirty_=true;
+                update();
+            }
+        });
+#else
+        (void)scene;(void)content_root;
+#endif
     }
     void setImage(QImage image) {
         material_.reset();material_textures_.clear();
@@ -344,16 +444,28 @@ public:
         setProperty("previewReady",!displayed_.isNull());
         update();
     }
-    void setWireframe(bool on) {wireframe_=on;dirty_=true;update();}
+    void setWireframe(bool on) {
+        wireframe_=on;
+        if(gpu_viewport_ && gpu_active_)gpu_viewport_->setVisible(!on);
+        dirty_=true;++render_sequence_;
+        setProperty("previewRendered",gpu_active_ && !on);
+        update();
+    }
     void setLightIntensity(float intensity) {
         light_intensity_=std::clamp(intensity,0.f,3.f);
+        if(gpu_active_)updateGpuLight();
         dirty_=true;
-        setProperty("previewRendered",false);
+        ++render_sequence_;
+        setProperty("previewRendered",gpu_active_);
         update();
     }
     void reset() {
+        if(gpu_active_ && gpu_viewport_) {
+            gpu_viewport_->setOrbitMode(true,gpu_target_,gpu_distance_);
+            gpu_viewport_->setOrbitAngles(.62f,-.27f);
+        }
         zoom_=1.f;offset_={};yaw_=.62f;pitch_=.27f;
-        dirty_=true;update();
+        dirty_=true;++render_sequence_;setProperty("previewRendered",false);update();
     }
     void oneToOne() {
         if(displayed_.isNull())return;
@@ -362,9 +474,10 @@ public:
         zoom_=std::clamp(1.f/std::max(fit,.001f),.1f,20.f);
         offset_={};update();
     }
-    void setZoom(float value) {zoom_=std::clamp(value,.1f,20.f);dirty_=true;update();}
+    void setZoom(float value) {zoom_=std::clamp(value,.1f,20.f);dirty_=true;++render_sequence_;setProperty("previewRendered",false);update();}
 protected:
     void paintEvent(QPaintEvent*) override {
+        if(gpu_pending_ || (gpu_active_ && !wireframe_))return;
         QPainter painter(this);
         painter.setRenderHint(QPainter::SmoothPixmapTransform,true);
         painter.fillRect(rect(),QColor("#111824"));
@@ -384,26 +497,29 @@ protected:
             return;
         }
         if(drawable_) {
-            auto const dimension=std::clamp(std::min(width(),height()),128,900);
-            if(dirty_ || model_image_.size()!=QSize(dimension,dimension)) {
-                model_image_=imageFrom(editor_tools::preview_drawable(
-                    *drawable_,dimension,dimension,yaw_,pitch_,
-                    std::clamp(zoom_,.35f,7.f),wireframe_,
-                    &drawable_materials_,light_intensity_));
+            // Millions of triangles must never block Qt's GUI paintEvent.
+            // Orbit reduces pixel count, not the rendered triangle count.
+            auto const dimension=dragging_?256:
+                std::clamp(std::min(width(),height()),128,900);
+            if(dirty_ || last_render_dimension_!=dimension) {
+                ++render_sequence_;
+                last_render_dimension_=dimension;
                 dirty_=false;
             }
+            beginDrawableRender(dimension);
             if(!model_image_.isNull()) {
                 auto side=std::min(width(),height());
                 painter.drawImage(QRect((width()-side)/2,(height()-side)/2,
                                         side,side),model_image_);
-                setProperty("previewRendered",true);
+                setProperty("previewRendered",
+                            last_completed_sequence_==render_sequence_);
             }
             return;
         }
         if(displayed_.isNull()) {
             painter.setPen(QColor("#aebdd0"));
             painter.drawText(rect(),Qt::AlignCenter,
-                "Loading preview…");
+                "Loading previewвЂ¦");
             return;
         }
         float const fit=std::min(float(width())/displayed_.width(),
@@ -437,12 +553,15 @@ protected:
             yaw_+=float(delta.x())*.011f;
             pitch_=std::clamp(pitch_+float(delta.y())*.009f,-1.42f,1.42f);
             dirty_=true;
+            ++render_sequence_;
+            setProperty("previewRendered",false);
         } else offset_+=delta;
         update();
     }
     void mouseReleaseEvent(QMouseEvent* event) override {
         if(event->button()==Qt::LeftButton) {
             dragging_=false;unsetCursor();
+            if(drawable_) { dirty_=true;update(); }
         }
     }
     void mouseDoubleClickEvent(QMouseEvent*) override {reset();}
@@ -456,14 +575,69 @@ protected:
     }
     void resizeEvent(QResizeEvent* event) override {
         QWidget::resizeEvent(event);
+        if(gpu_viewport_)gpu_viewport_->setGeometry(rect());
         dirty_=true;
     }
 private:
+    void updateGpuLight() {
+        if(!gpu_scene_)return;
+        auto& components=gpu_scene_->components;
+        components.erase(std::remove_if(components.begin(),components.end(),
+            [](SceneComponentBlob const& c){return c.type=="engine.render.light";}),
+            components.end());
+        // One studio rig for both Vulkan and D3D12. Global ambient/key/fill
+        // are never radius-culled. The rim point follows the drawable bounds
+        // instead of remaining near (0,0,0) when the prefab is translated.
+        studio_preview::apply_lighting(*gpu_scene_,
+            {gpu_target_.x,gpu_target_.y,gpu_target_.z},
+            gpu_distance_/1.7f,light_intensity_);
+        if(gpu_active_ && gpu_viewport_) {
+            gpu_viewport_->setScene(&*gpu_scene_);
+            if(gpu_viewport_->renderGpuNow()) {
+                setProperty("gpuAssetSummary",gpu_viewport_->gpuAssetSummary());
+                setProperty("gpuRenderRevision",++gpu_frame_revision_);
+                setProperty("previewRendered",true);
+            }
+        }
+    }
+    void beginDrawableRender(int dimension) {
+        if(!drawable_ || render_in_flight_ ||
+           (model_image_.size()==QSize(dimension,dimension) &&
+            last_completed_sequence_==render_sequence_))return;
+        render_in_flight_=true;
+        active_render_sequence_=render_sequence_;
+        auto const geometry=drawable_;
+        auto const material_data=drawable_materials_;
+        auto const yaw=yaw_,pitch=pitch_,zoom=std::clamp(zoom_,.35f,7.f);
+        auto const wireframe=wireframe_;
+        auto const light=light_intensity_;
+        // Sampling scattered triangles breaks watertight meshes.
+        // Always preserve every face, including during camera movement.
+        auto const step=1u;
+        auto future=QtConcurrent::run([geometry,material_data,dimension,yaw,
+                                       pitch,zoom,wireframe,light,step]() {
+            return editor_tools::preview_drawable(
+                *geometry,dimension,dimension,yaw,pitch,zoom,wireframe,
+                material_data.get(),light,step);
+        });
+        render_watcher_.setFuture(future);
+    }
     std::optional<shared_assets::Texture> texture_;
-    std::optional<shared_assets::Drawable> drawable_;
+    std::shared_ptr<shared_assets::Drawable const> drawable_;
     std::optional<shared_assets::Material> material_;
     std::vector<shared_assets::ResolvedAsset<shared_assets::Texture>> material_textures_;
-    std::vector<MaterialDefinition> drawable_materials_;
+    std::shared_ptr<std::vector<MaterialDefinition> const> drawable_materials_;
+    QFutureWatcher<editor_tools::AssetPreviewImage> render_watcher_;
+    std::uint64_t render_sequence_=0,active_render_sequence_=0,
+                  last_completed_sequence_=0;
+    int last_render_dimension_=0;
+    bool render_in_flight_=false;
+    QtEditorViewport* gpu_viewport_=nullptr;
+    std::optional<Scene> gpu_scene_;
+    Vector3 gpu_target_{0.f,0.f,0.f};
+    float gpu_distance_=4.2f;
+    bool gpu_pending_=false,gpu_active_=false;
+    std::uint64_t gpu_frame_revision_=0;
     QImage external_,displayed_,model_image_;
     int current_mip_=0;
     float yaw_=.62f,pitch_=.27f,zoom_=1.f,light_intensity_=1.f;
@@ -476,6 +650,7 @@ private:
 struct NativeRigInspection {
     std::optional<Skeleton> skeleton;
     std::vector<shared_assets::AnimationClipInfo> clips;
+    std::vector<shared_assets::DictionaryEntry> particles;
     QString failure;
 };
 NativeRigInspection inspectRig(fs::path const& root,
@@ -513,7 +688,13 @@ NativeRigInspection inspectRig(fs::path const& root,
         if(!input.read(reinterpret_cast<char*>(bytes.data()),
                        static_cast<std::streamsize>(bytes.size())))
             throw std::runtime_error("Incomplete NEF8 payload");
-        if(kind==AssetKind::skeleton) {
+        if(kind==AssetKind::particle) {
+            result.particles=shared_assets::list_dictionary_entries(bytes,relative);
+            if(!selected.empty() &&
+               std::none_of(result.particles.begin(),result.particles.end(),
+                    [&](auto const& entry){return entry.name==selected;}))
+                throw std::runtime_error("YPT particle entry not found");
+        } else if(kind==AssetKind::skeleton) {
             result.skeleton=load_skeleton_from_bytes(bytes);
             if(!selected.empty()) {
                 const auto& joints=result.skeleton->joints;
@@ -536,9 +717,12 @@ NativeRigInspection inspectRig(fs::path const& root,
 int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
                            std::string const& reference,AssetKind kind) {
     QDialog dialog(parent);
-    dialog.setObjectName("nativeRigClipPreviewDialog");
-    dialog.setWindowTitle(QString(kind==AssetKind::skeleton?
-        "NorthStar Skeleton Inspector — ":"NorthStar Animation Inspector — ")+
+    dialog.setObjectName(kind==AssetKind::particle?
+        "nativeParticleDictionaryPreviewDialog":"nativeRigClipPreviewDialog");
+    dialog.setWindowTitle(QString(kind==AssetKind::particle?
+        "NorthStar Particle Dictionary Inspector вЂ” ":
+        kind==AssetKind::skeleton?
+        "NorthStar Skeleton Inspector вЂ” ":"NorthStar Animation Inspector вЂ” ")+
         qt(reference));
     dialog.resize(1040,680);
     dialog.setStyleSheet(
@@ -556,10 +740,13 @@ int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
     QFont heading=title->font();heading.setBold(true);heading.setPointSize(13);
     title->setFont(heading);layout->addWidget(title);
     auto* tree=new QTreeWidget(&dialog);
-    tree->setObjectName(kind==AssetKind::skeleton?
+    tree->setObjectName(kind==AssetKind::particle?
+        "particleEntryList":kind==AssetKind::skeleton?
         "skeletonHierarchyTree":"animationClipList");
     tree->setAlternatingRowColors(true);
-    if(kind==AssetKind::skeleton)
+    if(kind==AssetKind::particle)
+        tree->setHeaderLabels({"Particle entry","Container format","Runtime kind"});
+    else if(kind==AssetKind::skeleton)
         tree->setHeaderLabels({"Joint hierarchy","Parent","Bind position","Index"});
     else
         tree->setHeaderLabels({"Clip","Frames","FPS","Tracks","Duration","Loop"});
@@ -572,7 +759,7 @@ int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
     details->setMinimumHeight(64);
     layout->addWidget(details);
     auto* row=new QHBoxLayout;
-    auto* status=new QLabel("Read-only • Native engine codec",&dialog);
+    auto* status=new QLabel("Read-only вЂў Native engine codec",&dialog);
     status->setStyleSheet("color:#86b3d0");
     row->addWidget(status,1);
     auto* copy=new QPushButton("Copy reference",&dialog);
@@ -596,7 +783,22 @@ int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
             auto const separator=reference.find('@');
             auto const selected=separator==std::string::npos?
                 std::string{}:reference.substr(separator+1);
-            if(kind==AssetKind::skeleton && data.skeleton) {
+            if(kind==AssetKind::particle) {
+                for(auto const& particle:data.particles) {
+                    auto* item=new QTreeWidgetItem(tree,{
+                        qt(particle.name),"NVPT / NEF16",
+                        particle.name.rfind("effect.",0)==0?"Effect":
+                        particle.name.rfind("emitter.",0)==0?"Emitter":"Particle"});
+                    if(particle.name==selected)tree->setCurrentItem(item);
+                }
+                tree->resizeColumnToContents(0);
+                details->setText(QString(
+                    "Native YPT: %1 indexed particle entries.\n"
+                    "Metadata inspector only. Rendering emitters and particle\n"
+                    "simulation requires the runtime particle renderer.")
+                    .arg(data.particles.size()));
+                status->setText("YPT / NEF16 dictionary metadata validated");
+            }else if(kind==AssetKind::skeleton && data.skeleton) {
                 auto const& rig=*data.skeleton;
                 std::vector<QTreeWidgetItem*> items;
                 items.reserve(rig.joints.size());
@@ -621,9 +823,9 @@ int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
                 if(!selected.empty()&&tree->currentItem())
                     tree->scrollToItem(tree->currentItem());
                 details->setText(QString(
-                    "Skeleton: %1 joints   •   Eye height: %2 m   •   "
+                    "Skeleton: %1 joints   вЂў   Eye height: %2 m   вЂў   "
                     "Inverse bind matrices: %3\n"
-                    "Mirrored helper pairs: %4   •   Secondary constraints: %5")
+                    "Mirrored helper pairs: %4   вЂў   Secondary constraints: %5")
                     .arg(rig.joints.size())
                     .arg(rig.eye_height,0,'f',2)
                     .arg(rig.inverse_bind.size())
@@ -659,6 +861,8 @@ int openNativeRigInspector(QWidget* parent,fs::path const& content_root,
 
 int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                           std::string const& asset_reference,AssetKind kind) {
+    if(kind==AssetKind::particle)
+        return openParticleSimulationPreview(parent,content_root,asset_reference);
     if(kind==AssetKind::skeleton || kind==AssetKind::animation)
         return openNativeRigInspector(parent,content_root,asset_reference,kind);
     if(kind==AssetKind::material_function)
@@ -703,7 +907,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
         QObject::connect(wire,&QCheckBox::toggled,preview,
             [preview](bool enabled){preview->setWireframe(enabled);});
         side->addWidget(wire);
-        auto* light_label=new QLabel("Studio key light: 100%",&dialog);
+        auto* light_label=new QLabel("Studio lighting: 100%",&dialog);
         side->addWidget(light_label);
         auto* key_light=new QSlider(Qt::Horizontal,&dialog);
         key_light->setObjectName("prefabPreviewKeyLight");
@@ -711,7 +915,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
         key_light->setValue(100);
         QObject::connect(key_light,&QSlider::valueChanged,preview,
             [preview,light_label](int value) {
-                light_label->setText(QString("Studio key light: %1%").arg(value));
+                light_label->setText(QString("Studio lighting: %1%").arg(value));
                 preview->setLightIntensity(float(value)*.01f);
             });
         side->addWidget(key_light);
@@ -739,7 +943,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
         auto* watcher=new QFutureWatcher<LoadedPrefab>(&dialog);
         QObject::connect(watcher,&QFutureWatcher<LoadedPrefab>::finished,
                          &dialog,[watcher,preview,meta,prefabWarnings,
-                                  asset_reference] {
+                                  asset_reference,content_root] {
             LoadedPrefab loaded;
             try {loaded=watcher->result();}
             catch(std::exception const& e) {loaded.error=qt(e.what());}
@@ -774,6 +978,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                 if(!composition.drawable.meshes.empty()) {
                     preview->setDrawable(std::move(composition.drawable),
                                          std::move(composition.materials));
+                    preview->setGpuScene(prefab,content_root);
                     preview->setProperty("previewMode","prefab-composition");
                     preview->setProperty("prefabActorCount",
                         static_cast<int>(prefab.objects.size()));
@@ -781,7 +986,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                         "\n\n3D model: orbit with mouse, zoom with wheel":
                         "\n\n3D composition: orbit with mouse, zoom with wheel");
                     information+="\nNative YDD/YDR meshes and YMAT/YTD textures"
-                                 "\nSoftware studio lighting (not GPU PBR)";
+                                 "\nengine.render GPU orbit (CPU fallback if unavailable)";
                 }else {
                     preview->setImage(prefab_preview::thumbnail(prefab,640));
                     information+="\nNo visible 3D geometry";
@@ -815,7 +1020,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
                 loaded.prefab=prefab_preview::load(content_root,
                                                    asset_reference);
                 AssetManager assets;
-                prefab_preview::mount_preview_assets(assets,content_root);
+                assets.mount_content_assets(content_root);
                 loaded.composition=prefab_preview::load_composition(
                     *loaded.prefab,assets);
             } catch(std::exception const& e) {
@@ -827,7 +1032,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
     }
     QDialog dialog(parent);
     dialog.setObjectName("assetPreviewDialog");
-    dialog.setWindowTitle("NorthStar Asset Preview — "+qt(asset_reference));
+    dialog.setWindowTitle("NorthStar Asset Preview вЂ” "+qt(asset_reference));
     dialog.setModal(true);
     dialog.resize(1150,785);
     dialog.setMinimumSize(790,535);
@@ -873,7 +1078,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
     auto* caption=new QLabel("ASSET DETAILS");
     caption->setStyleSheet("color:#75bce3;font-weight:bold;font-size:12px");
     right->addWidget(caption);
-    auto* information=new QLabel("Reading asset…");
+    auto* information=new QLabel("Reading assetвЂ¦");
     information->setObjectName("assetPreviewDetails");
     information->setAlignment(Qt::AlignLeft|Qt::AlignTop);
     information->setWordWrap(true);
@@ -917,7 +1122,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
     // compressed ListFile. Closing it disconnects all UI callbacks safely.
     auto* watcher=new QFutureWatcher<LoadedAsset>(&dialog);
     QObject::connect(watcher,&QFutureWatcher<LoadedAsset>::finished,
-                     &dialog,[watcher,canvas,information,warnings,mip,wire,actual,status,kind,ref=qt(asset_reference)] {
+                     &dialog,[watcher,canvas,information,warnings,mip,wire,actual,status,kind,content_root,asset_reference,ref=qt(asset_reference)] {
         LoadedAsset value;
         try {value=watcher->result();}
         catch(std::exception const& e){
@@ -934,7 +1139,7 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
             auto const count=value.texture->mips.size();
             mip->blockSignals(true);
             for(std::size_t i=0;i<count;++i)
-                mip->addItem(QString("%1 · %2 × %3")
+                mip->addItem(QString("%1 В· %2 Г— %3")
                     .arg(i).arg(value.texture->mips[i].width)
                     .arg(value.texture->mips[i].height));
             mip->setCurrentIndex(0);
@@ -946,7 +1151,18 @@ int openAssetPreviewModal(QWidget* parent,fs::path const& content_root,
             wire->setEnabled(true);
             canvas->setDrawable(std::move(*value.drawable),
                                 std::move(value.drawable_materials));
-            status->setText("3D model / Orbit view");
+            Scene gpuScene;
+            gpuScene.version=3;
+            gpuScene.name="Asset Preview";
+            gpuScene.layers.push_back({"Default",true});
+            SceneObject actor;
+            actor.node.id=1;
+            actor.node.layer="Default";
+            actor.name=asset_reference;
+            actor.node.asset=asset_reference;
+            gpuScene.objects.push_back(std::move(actor));
+            canvas->setGpuScene(std::move(gpuScene),content_root);
+            status->setText("3D model / GPU orbit (CPU fallback)");
         } else if(value.material) {
             canvas->setMaterial(std::move(*value.material),
                                 std::move(value.material_textures));

@@ -1,7 +1,0 @@
-NorthStarCpp.Scene 3
-scene "Rifle Mini-14"
-streaming 150 220 1
-stream_budget 64 64
-layer "Default" 1
-entity 1 0 "Rifle Mini-14" "Default" "" "" "models/weapon/rifle_mini14/rifle_mini14.ydd" 0 0 0 1.00 424954 0 0 0 0 0 1 1 1 0 1000000 1 0
-component 1 "northstar.animation.default" 1 "616e696d6174696f6e732f776561706f6e2f7269666c655f6d696e6931342f7269666c655f6d696e6931342e7963644069646c65"

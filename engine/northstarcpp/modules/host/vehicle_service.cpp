@@ -13,12 +13,20 @@ struct VehicleService::State {
             NORTHSTARCPP_VEHICLE_DYNAMICS_ABI);
     NorthStarVehicleCabinApi const* cabin=
         module.query_extension<NorthStarVehicleCabinApi>(NORTHSTARCPP_VEHICLE_CABIN_ABI);
+    NorthStarVehiclePowertrainApi const* powertrain=
+        module.query_extension<NorthStarVehiclePowertrainApi>(
+            NORTHSTARCPP_VEHICLE_POWERTRAIN_ABI);
     void* world{};
     State() {
         world=api.create_world();
         if(!world)throw module.error("engine.vehicle create world failed");
     }
     ~State() {if(world)api.destroy_world(world);}
+    NorthStarVehiclePowertrainApi const& require_powertrain() const {
+        if(!powertrain)throw std::runtime_error(
+            "Selected engine.vehicle provider lacks Powertrain ABI v4");
+        return *powertrain;
+    }
     NorthStarVehicleCabinApi const& require_cabin() const {
         if(!cabin)throw std::runtime_error(
             "Selected engine.vehicle provider lacks Cabin ABI v3");
@@ -31,6 +39,28 @@ struct VehicleService::State {
     }
 };
 bool VehicleService::supports_cabin() const noexcept {return state_->cabin!=nullptr;}
+bool VehicleService::supports_powertrain() const noexcept {
+    return state_->powertrain!=nullptr;
+}
+void VehicleService::configure_powertrain(std::uint32_t id,
+    NorthStarVehiclePowertrainConfig const& config) {
+    auto const& api=state_->require_powertrain();
+    if(!api.configure(state_->world,id,&config))
+        throw state_->module.error("engine.vehicle configure powertrain failed");
+}
+NorthStarVehiclePowertrainState VehicleService::powertrain(std::uint32_t id) const {
+    auto const& api=state_->require_powertrain();
+    NorthStarVehiclePowertrainState out{};
+    out.size=sizeof(out);
+    if(!api.state(state_->world,id,&out) || out.size<sizeof(out))
+        throw state_->module.error("engine.vehicle powertrain telemetry unavailable");
+    return out;
+}
+void VehicleService::select_gear(std::uint32_t id,int gear) {
+    auto const& api=state_->require_powertrain();
+    if(!api.select_gear(state_->world,id,gear))
+        throw state_->module.error("engine.vehicle gear selection failed");
+}
 void VehicleService::configure_doors(std::uint32_t id,
     std::vector<NorthStarVehicleDoorConfig> const& doors) {
     auto const& api=state_->require_cabin();
@@ -87,16 +117,19 @@ NorthStarVehicleState VehicleService::state(std::uint32_t id) const {
 }
 std::vector<NorthStarVehicleState> VehicleService::states() const {
     std::vector<NorthStarVehicleState> result;
+    states_into(result);
+    return result;
+}
+void VehicleService::states_into(std::vector<NorthStarVehicleState>& result) const {
     auto const n=count();
-    result.reserve(n);
+    result.resize(n);
     for(std::uint32_t ordinal=0;ordinal<n;++ordinal) {
         NorthStarVehicleState out{};out.size=sizeof(out);
         if(!state_->api.at(state_->world,ordinal,&out) ||
            out.size<sizeof(out) || out.entity_index>=16384)
             throw state_->module.error("engine.vehicle enumeration failed");
-        result.push_back(out);
+        result[ordinal]=out;
     }
-    return result;
 }
 std::uint32_t VehicleService::count() const{return state_->api.count(state_->world);}
 bool VehicleService::supports_dynamics() const noexcept {return state_->extended!=nullptr;}

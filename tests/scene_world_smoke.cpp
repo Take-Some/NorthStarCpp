@@ -5,8 +5,10 @@
 
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/scene_world.hpp>
+#include <northstarcpp/scene_camera_frustum.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -110,6 +112,63 @@ int main(int argc, char** argv)
         auto const root=fs::u8path(argv[1]);
         fs::create_directories(root);
         auto original=build();
+        // Repeated dense-bucket migrations must preserve source indices and
+        // sorted/unique query results after swap-erase relocation.
+        {
+            Scene stress;
+            stress.version=3;
+            stress.name="Spatial Index Stress";
+            for (std::size_t i=0;i<256;++i) {
+                SceneObject object;
+                object.name="Mover "+std::to_string(i);
+                object.node.id=i+1;
+                object.position={float(i%16),0.f,float(i/16)};
+                stress.objects.push_back(std::move(object));
+            }
+            SceneSpatialIndex spatial(stress,16.f);
+            auto live=stress;
+            for (std::size_t pass=0;pass<12;++pass) {
+                std::vector<std::size_t> expected_near,expected_far;
+                for (std::size_t i=0;i<live.objects.size();++i) {
+                    bool const far=(i+pass)%3==0;
+                    live.objects[i].position={float(i%16)+(far?128.f:0.f),
+                                               0.f,float(i/16)};
+                    (far?expected_far:expected_near).push_back(i);
+                }
+                spatial.update_dynamic_positions(live);
+                check(spatial.query_box({-1.f,-1.f,-1.f},{20.f,1.f,20.f})==expected_near,
+                      "dense spatial relocation lost or duplicated near objects");
+                check(spatial.query_box({127.f,-1.f,-1.f},{148.f,1.f,20.f})==expected_far,
+                      "dense spatial relocation lost or duplicated far objects");
+            }
+        }
+        // A downstream portal can lie inside the camera's original frustum
+        // but outside the visible aperture of the preceding portal.
+        {
+            Scene interior;
+            interior.version=3;
+            interior.name="Recursive Portal Occlusion";
+            SceneObject a,b,c;
+            a.node.id=1;a.node.room="RoomA";
+            b.node.id=2;b.node.room="RoomB";b.position={0.f,0.f,15.f};
+            c.node.id=3;c.node.room="RoomC";c.position={8.f,0.f,24.f};
+            interior.objects={a,b,c};
+            interior.portals={
+                {"AB","RoomA","RoomB",{-1.f,-1.f,9.9f},{1.f,1.f,10.1f},true},
+                {"BC","RoomB","RoomC",{7.f,-1.f,19.9f},{9.f,1.f,20.1f},true}
+            };
+            SceneWorld clipped(interior);
+            auto const wide=make_scene_view_frustum(CameraPose{},16.f/9.f);
+            clipped.set_view_frustum(wide);
+            clipped.update({0.f,0.f,0.f},{},"RoomA");
+            check(clipped.object_visible(0) && clipped.object_visible(1) &&
+                  !clipped.object_visible(2),
+                  "recursive portal clip exposed a room outside entrance aperture");
+            clipped.clear_view_frustum();
+            clipped.update({0.f,0.f,0.f},{},"RoomA");
+            check(clipped.object_visible(2),
+                  "legacy portal connectivity not restored after frustum removal");
+        }
         auto const bytes=serialize_scene_v3(original);
         check(bytes.rfind("NorthStarCpp.Scene 3\n",0)==0,
               "v3 header incorrect");
@@ -128,12 +187,34 @@ int main(int argc, char** argv)
               "v3 entity hierarchy/asset/transform lost");
         auto const destination=root/"Expanded.nscn";
         save_scene(parsed,destination);
+        // Identical bytes must not rewrite the scene or trigger file watchers.
+        auto const previous_time=fs::last_write_time(destination);
+        fs::last_write_time(destination,previous_time-std::chrono::hours(2));
+        auto const stable_time=fs::last_write_time(destination);
+        save_scene(parsed,destination);
+        check(fs::last_write_time(destination)==stable_time,
+              "idempotent scene save modified an unchanged file");
+        // Changed authoring data must still be committed atomically.
+        auto changed=parsed;
+        changed.name="Changed Scene";
+        save_scene(changed,destination);
+        check(load_scene(destination).name==changed.name,
+              "modified scene save did not update authored data");
+        save_scene(parsed,destination);
         auto reopened=load_scene(destination);
         check(serialize_scene_v3(reopened)==bytes,
               "v3 roundtrip is not deterministic");
 
         SceneWorld world(reopened);
         world.update({0.f,0.f,0.f},{0.f,0.f,0.f},"Lobby");
+        check(world.cell_telemetry().size()==2 &&
+              world.cell_telemetry()[0].name=="Watson" &&
+              world.cell_telemetry()[0].authored_entities==3 &&
+              world.cell_telemetry()[0].unique_authored_assets==2 &&
+              world.cell_telemetry()[0].loaded &&
+              world.cell_telemetry()[0].resident_entities==3 &&
+              !world.cell_telemetry()[1].loaded,
+              "streaming per-cell scene telemetry incorrect");
         check(world.cell_loaded("Watson") && !world.cell_loaded("Westbrook") &&
               world.loaded_cell_count()==1, "near cell residence incorrect");
         check(world.object_visible(0) && world.object_visible(1) &&
@@ -156,6 +237,22 @@ int main(int argc, char** argv)
               deps[1]=="props/table.ydd",
               "active virtual asset dependencies were not prioritized");
 
+        // Optional conservative camera-frustum portal gate. Legacy callers
+        // without a view frustum retain connectivity-only semantics.
+        SceneViewFrustum frustum;
+        for(auto& plane:frustum.planes) {
+            plane.normal={1.f,0.f,0.f};
+            plane.offset=-100.f; // portal box x=-2..2 entirely behind plane
+        }
+        world.set_view_frustum(frustum);
+        world.update({0.f,0.f,0.f},{0.f,0.f,0.f},"Lobby");
+        check(world.object_visible(0) && !world.object_visible(1) &&
+              world.streaming_diagnostics().portals_frustum_rejected>0,
+              "camera frustum failed to reject hidden portal traversal");
+        world.clear_view_frustum();
+        world.update({0.f,0.f,0.f},{0.f,0.f,0.f},"Lobby");
+        check(world.object_visible(1),
+              "portal traversal did not recover after frustum removal");
         world.set_portal_open("Hall Exterior",true);
         world.update({0.f,0.f,0.f},{0.f,0.f,0.f},"Lobby");
         check(world.object_visible(4),"open portal failed to reveal exterior");

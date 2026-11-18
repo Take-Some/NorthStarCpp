@@ -36,6 +36,9 @@ struct FrameSample {
     double interval_ms = 0;
     // CPU wall time spent inside App::frame, including renderer submission/Present.
     double wall_ms = 0;
+    // Optional hardware GPU frame timestamp; 0 is not considered a sample.
+    double gpu_frame_ms = 0;
+    bool gpu_valid = false;
     std::array<double, static_cast<std::size_t>(FrameStage::count)> stage_ms{};
 };
 
@@ -67,6 +70,18 @@ public:
         if (frames < 1 || frames > 1000000)
             throw std::invalid_argument("Invalid frame profiler sample count");
         samples_.reserve(frames);
+    }
+
+    // QA-only partial report when the application exits before its frame goal.
+    // Production mode emits no partial report or additional allocations.
+    ~FrameProfiler() noexcept
+    {
+        auto const* enabled = std::getenv("NORTHSTARCPP_PROFILE_PARTIAL");
+        if (!enabled || enabled[0] != '1' || samples_.empty() || !active())
+            return;
+        std::fprintf(stderr, "[WARN] [engine.profile] incomplete_frames=%zu target=%zu\n",
+                     samples_.size(), target_);
+        try { report(stderr); } catch (...) {}
     }
 
     static std::size_t requested_frames()
@@ -109,6 +124,19 @@ public:
 
     FrameStatistics statistics_interval() const { return statistics([](FrameSample const& s) { return s.interval_ms; }); }
     FrameStatistics statistics_wall() const { return statistics([](FrameSample const& s) { return s.wall_ms; }); }
+    std::size_t gpu_samples() const noexcept
+    {
+        return static_cast<std::size_t>(std::count_if(samples_.begin(), samples_.end(),
+            [](FrameSample const& s) { return s.gpu_valid; }));
+    }
+    FrameStatistics statistics_gpu() const
+    {
+        std::vector<double> values;
+        values.reserve(samples_.size());
+        for (auto const& sample : samples_)
+            if (sample.gpu_valid) values.push_back(sample.gpu_frame_ms);
+        return summarize_frames(std::move(values));
+    }
     FrameStatistics statistics_stage(FrameStage stage) const
     {
         return statistics([stage](FrameSample const& s) {
@@ -123,11 +151,12 @@ public:
 
     void report(std::FILE* out) const
     {
-        // Print a machine-readable, one-line report for CI capture.
-        // No claim of GPU timing is made; rendering includes potential vsync.
+        // CPU and GPU clocks are independent. Hardware timing is optional.
+        auto const valid_gpu = gpu_samples();
         std::fprintf(out, "{\"event\":\"northstarcpp.frame_profile\","
-            "\"frames\":%zu,\"units\":\"ms\",\"gpu_timestamps\":false,\"metrics\":{",
-            samples_.size());
+            "\"frames\":%zu,\"units\":\"ms\","
+            "\"gpu_timestamps\":%s,\"gpu_samples\":%zu,\"metrics\":{",
+            samples_.size(), valid_gpu ? "true" : "false", valid_gpu);
         auto print = [&](char const* name, FrameStatistics const& value, bool comma) {
             std::fprintf(out,
                 "%s\"%s\":{\"p50\":%.5f,\"p95\":%.5f,\"p99\":%.5f,\"max\":%.5f}",
@@ -135,6 +164,7 @@ public:
         };
         print("raw_frame_interval", statistics_interval(), false);
         print("frame_cpu_wall", statistics_wall(), true);
+        print("gpu_frame", statistics_gpu(), true);
         for (std::size_t i = 0; i < frame_stage_names.size(); ++i)
             print(frame_stage_names[i], statistics_stage(static_cast<FrameStage>(i)), true);
         std::fputs("},\"memory\":{\"coverage\":\"instrumented_buffers\",\"stages\":{",out);
@@ -202,6 +232,15 @@ public:
         } catch (...) {
             // Profiling cannot cause a gameplay failure on allocation/IO errors.
         }
+    }
+
+    // Record only valid hardware timestamps in explicit GPU profiling mode.
+    void record_gpu_timing(double milliseconds) noexcept
+    {
+        if (!profiler_ || !std::isfinite(milliseconds) ||
+            milliseconds <= 0.0 || milliseconds >= 10000.0) return;
+        sample_.gpu_frame_ms = milliseconds;
+        sample_.gpu_valid = true;
     }
 
     template<class F>

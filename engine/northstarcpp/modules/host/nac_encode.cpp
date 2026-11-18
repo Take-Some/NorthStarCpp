@@ -25,7 +25,7 @@ bool encode(std::vector<Track> const& tracks,std::vector<std::uint8_t>& bytes,
             auto const position=schema::align16(pcm.size());
             auto const length=track.samples.size()*sizeof(std::int16_t);
             if(position+length>schema::max_body)
-                throw std::runtime_error("NAC NEF8: expanded body exceeds 64 MiB");
+                throw std::runtime_error("NAC: the combined PCM exceeds the 256 MiB container capacity");
             pcm.resize(static_cast<std::size_t>(position+length),0);
             for(std::size_t s=0;s<track.samples.size();++s)
                 wire::write(pcm.data()+position+s*2,

@@ -75,14 +75,11 @@ def scene():
         records.append(entity(name, next_id, x, y, z, size, color, mass, **props))
         next_id += 1
 
-    # A 50x50m floor with normal Jolt collisions. Body positions use bottom
-    # centre; each 10m cubic tile rises exactly to the y=0 walk surface.
-    for x in (-20, -10, 0, 10, 20):
-        for z in (-20, -10, 0, 10, 20):
-            color = 0x253B4E if (x+z)//10 % 2 else 0x314D62
-            if x == 0: color = 0x3A697B
-            add(f"Deck {x:+03d} {z:+03d}", x, -10, z,
-                10, color)
+    # One continuous 50x50m walk surface: no shared coplanar sides,
+    # no tile seams, one static Jolt collider. Scene cubes are bottom
+    # anchored, hence y=-50 puts the entire top surface at exactly y=0.
+    # Vulkan must near-clip the triangles of this large platform.
+    add("Firing Range Floor", 0, -50, 0, 50, 0x314D62)
 
     # Real physical targets so a physics sweep can hit and push them.
     for index, (x, z) in enumerate(
@@ -132,7 +129,7 @@ def scene():
         struct.pack("<Ifff",0,0.,0.,0.)))
     records.append(component(mesh_id,
         "northstar.gameplay.skeletal_mesh",
-        b'0 0 0 0 "" "" "prefabs/abby.nprefab"'))
+        b'0 0 0 0 "" "" "prefabs/characters/abby.nprefab"'))
     data = pack_listfile(records,record_versions={2:2})
     assert validate_nef8_scene(data) == len(records)
     assert len(scene_entity_references(data)) == next_id - 1
@@ -160,8 +157,11 @@ def manifest():
         "genre": "first-person-shooter-prototype",
         "level": "Skydome Firing Range",
         "asset_root": "assets",
+        "ui": {"default": "ui/weapon_hud.nui", "format": "northstar.ui/xml/3"},
         "scripting": {"runtime": "V8", "entry": "scripts/main.js"},
         "providers": {"engine.physics": "jolt", "engine.render": "d3d12"},
+        "sky": {"mode": "procedural", "cloudCoverage": .72,
+                "haze": .46, "fogDensity": .045, "timeOfDay": 12.0},
     }
 
 
@@ -178,31 +178,38 @@ def setup():
         (temp / "northstarcpp.project.json").write_text(
             json.dumps(manifest(),ensure_ascii=False,indent=2)+"\n",
             encoding="utf-8")
-        (temp / "scripts").mkdir()
-        (temp / "scripts" / "main.js").write_text(script_source(),encoding="utf-8")
+        (temp / "assets" / "scripts").mkdir(parents=True,exist_ok=True)
+        (temp / "assets" / "scripts" / "main.js").write_text(script_source(),encoding="utf-8")
         template=ROOT/"tools/templates/abby_pistol_demo"
         src_config=(template/"scripts/playerConfig.js").read_text("utf-8")
-        (temp/"scripts/playerConfig.js").write_text(src_config,encoding="utf-8")
-        (temp/"prefabs").mkdir()
-        name="pistol.nprefab"
-        prefab=(template/"prefabs"/name).read_text("utf-8")
-        if not prefab.rstrip().endswith("1 0"):
-            raise RuntimeError("Weapon prefab must disable collision")
-        (temp/"prefabs"/name).write_text(prefab,encoding="utf-8")
+        (temp/"assets/scripts/playerConfig.js").write_text(src_config,encoding="utf-8")
+        # Weapon prefabs belong exclusively to the engine sharedAssets.
+        shared_prefabs=ROOT/"engine/northstarcpp/resources/sharedAssets/prefabs"
+        pistol=shared_prefabs/"weapon/pistol.nprefab"
+        if not pistol.is_file() or not pistol.read_text("utf-8").rstrip().endswith("1 1"):
+            raise RuntimeError("Missing canonical engine pistol prefab")
         # Characters are shared, reusable, animation-driven resources.
         # They do not belong to a Player, weapon, or individual game project.
-        for name in ("abby.nprefab",):
-            if not (ROOT/"sharedAssets"/"prefabs"/name).is_file():
+        for name in ("characters/abby.nprefab",):
+            if not (ROOT/"engine/northstarcpp/resources/sharedAssets"/"prefabs"/name).is_file():
                 raise RuntimeError("Missing independent character prefab: "+name)
         # Only sky assets are copied: Abby and pistol are resolved from
         # sharedAssets (60+ MiB of character resources), preventing duplication.
         for relative in SKY:
-            source=ROOT/"sharedAssets"/relative
+            source=ROOT/"engine/northstarcpp/resources/sharedAssets"/relative
             if not source.is_file():
                 raise RuntimeError("Missing native skydome asset: "+relative)
             dest=temp/"assets"/relative
             dest.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(source,dest)
+        # UI assets are first-class authored resources. The generated demo
+        # loads the same .nui that can be edited in Content Browser.
+        ui_source=template/"assets/ui/weapon_hud.nui"
+        if not ui_source.is_file():
+            raise RuntimeError("Missing weapon HUD UI document template")
+        ui_target=temp/"assets/ui/weapon_hud.nui"
+        ui_target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(ui_source,ui_target)
         readme=(template/"README.md").read_text("utf-8")
         (temp/"README.md").write_text(readme,encoding="utf-8")
         run_cmd = r"""@echo off
@@ -211,9 +218,9 @@ for %%I in ("%~dp0..\..") do set "ROOT=%%~fI"
 if defined NORTHSTARCPP_PLAYER_EXE (
   set "PLAYER=%NORTHSTARCPP_PLAYER_EXE%"
 ) else (
-  set "PLAYER=%ROOT%\_qa_editor_mixed\northstarcpp_player.exe"
-  if not exist "%PLAYER%" set "PLAYER=%ROOT%\_qa_content_browser_p2\_abby_prefab_isolated\northstarcpp_player.exe"
-  if not exist "%PLAYER%" set "PLAYER=%ROOT%\..\cache\qt-pie-icons-build\northstarcpp_player.exe"
+  set "PLAYER=%ROOT%\out\build\northstarcpp_player.exe"
+  rem Legacy scattered QA build locations are no longer searched.
+  rem Use the single canonical CMake build; override only via NORTHSTARCPP_PLAYER_EXE.
 )
 if not exist "%PLAYER%" (
   echo [ERROR] NorthStarCpp player not found. Build it or set NORTHSTARCPP_PLAYER_EXE.
@@ -222,7 +229,7 @@ if not exist "%PLAYER%" (
 set "NORTHSTARCPP_PHYSICS_PROVIDER=jolt"
 set "NORTHSTARCPP_RENDER_PROVIDER=d3d12"
 cd /d "%ROOT%"
-"%PLAYER%" --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\sharedAssets" %*
+"%PLAYER%" --explore --scene "%~dp0main.nscn" --shared-assets "%ROOT%\engine\northstarcpp\resources\sharedAssets" %*
 exit /b %ERRORLEVEL%
 """
         (temp/"run.cmd").write_text(run_cmd,encoding="utf-8")
@@ -237,8 +244,8 @@ exit /b %ERRORLEVEL%
         (temp/"jsconfig.json").write_text(
             json.dumps({"compilerOptions":{"checkJs":True,"target":"ES2022",
               "baseUrl":".","paths":{"@northstar/engine":[
-                  "../../sharedAssets/api/types/northstar-engine.d.ts"]}},
-              "include":["scripts/**/*.js"]},indent=2)+"\n",encoding="utf-8")
+                  "../../engine/northstarcpp/resources/sharedAssets/api/types/northstar-engine.d.ts"]}},
+              "include":["assets/scripts/**/*.js"]},indent=2)+"\n",encoding="utf-8")
         temp.rename(TARGET)
         print(json.dumps({"created":str(TARGET),"scene_objects":objects,
             "sky_assets":list(SKY),"script_bytes":len(script_source())}))
@@ -252,6 +259,12 @@ def verify():
     scene_data=(TARGET/"main.nscn").read_bytes()
     count=validate_nef8_scene(scene_data)
     records=read_nef8_scene_records(scene_data)
+    # The NEF8 container CRC/BLAKE3 can pass even when the embedded
+    # component payload-length field is stale (e.g. after direct editing).
+    from tools.dev.scene_component_length_check import mismatches
+    errors=mismatches(records)
+    if errors:
+        raise RuntimeError("Invalid scene ECS payload lengths: "+repr(errors))
     ids={eid for kind,eid,_ in records if kind==2}
     comps=[(eid,value) for kind,eid,value in records if kind==7]
     names_by_id={}
@@ -266,7 +279,7 @@ def verify():
     if (pawn!={1} or len(motor)!=1 or len(camera)!=1 or
         len(controller)!=1 or not motor.isdisjoint(pawn) or
         not camera.isdisjoint(pawn) or not controller.isdisjoint(pawn) or
-        not motor.isdisjoint(camera) or len(ids)<38):
+        not motor.isdisjoint(camera) or len(ids)<20):
         raise RuntimeError("Controller/Motor/Camera must be separate Scene Entities")
     if names_by_id.get("northstar.gameplay.camera_attachment")!=camera:
         raise RuntimeError("Camera Entity missing camera attachment metadata")
@@ -282,26 +295,28 @@ def verify():
     if (visual_entity is None or
         b"characters/abby/models/abby.ydd" not in visual_entity or
         visual_component is None or
-        b"prefabs/abby.nprefab" not in visual_component):
+        b"prefabs/characters/abby.nprefab" not in visual_component):
         raise RuntimeError("Authored SkeletalMesh has no Abby visual prefab")
-    pistol=(TARGET/"prefabs"/"pistol.nprefab").read_text("utf-8")
-    if not pistol.rstrip().endswith("1 0"):
+    pistol=(ROOT/"engine/northstarcpp/resources/sharedAssets/prefabs/weapon/pistol.nprefab").read_text("utf-8")
+    if not pistol.rstrip().endswith("1 1"):
         raise RuntimeError("Invalid optional pistol prefab")
-    for name in ("abby.nprefab",):
-        content=(ROOT/"sharedAssets"/"prefabs"/name).read_text("utf-8")
+    for name in ("characters/abby.nprefab",):
+        content=(ROOT/"engine/northstarcpp/resources/sharedAssets"/"prefabs"/name).read_text("utf-8")
         if any(word in content for word in ("northstar.gameplay.pawn",
                 "northstar.gameplay.character_motor","camera_rig","pistol.ydd")):
             raise RuntimeError("Character prefab must be model/animation only")
         if 'northstar.animation.default' not in content or "abby.ydd" not in content:
             raise RuntimeError("Character prefab missing native rig/animation: "+name)
-    authored=(TARGET/"scripts/main.js").read_text("utf-8")
-    config=(TARGET/"scripts/playerConfig.js").read_text("utf-8")
+    authored=(TARGET/"assets/scripts/main.js").read_text("utf-8")
+    config=(TARGET/"assets/scripts/playerConfig.js").read_text("utf-8")
     for action in ("class CharacterVisual","definition.prefab",
             "Scene.setVisualMode","Scene.playAnimation",
-            "new PistolWeapon(character)"):
+            "Factory.weapon("):
         if action not in authored:
             raise RuntimeError("Missing independent character/weapon composition: "+action)
-    for action in ('prefab: "prefabs/abby.nprefab"',):
+    if "class PistolWeapon" in authored:
+        raise RuntimeError("Weapon firing/reload/VFX must be engine-owned, not project-owned")
+    for action in ('prefab: "prefabs/characters/abby.nprefab"',):
         if action not in config:
             raise RuntimeError("Demo character must reference reusable prefabs: "+action)
     if any(x in config for x in ("armsPrefab","bodyPrefab","firstPersonPrefab")):
@@ -310,15 +325,15 @@ def verify():
         if action not in config:
             raise RuntimeError("Missing native pistol YCD clip: "+action)
     for rel in SKY:
-        if (TARGET/"assets"/rel).read_bytes()!=(ROOT/"sharedAssets"/rel).read_bytes():
+        if (TARGET/"assets"/rel).read_bytes()!=(ROOT/"engine/northstarcpp/resources/sharedAssets"/rel).read_bytes():
             raise RuntimeError("Corrupted skydome: "+rel)
     for rel in ("characters/abby/models/abby.ydd",
                 "models/weapon/pistol/pistol.ydd",
                 "audio/weapon/pistol/pistol.nac"):
-        if not (ROOT/"sharedAssets"/rel).is_file():
+        if not (ROOT/"engine/northstarcpp/resources/sharedAssets"/rel).is_file():
             raise RuntimeError("Missing shared resource: "+rel)
     from tools.pack_pistol_xvag import verify as verify_nac
-    audio=verify_nac((ROOT/"sharedAssets/audio/weapon/pistol/pistol.nac").read_bytes())
+    audio=verify_nac((ROOT/"engine/northstarcpp/resources/sharedAssets/audio/weapon/pistol/pistol.nac").read_bytes())
     if audio["tracks"] != 29:
         raise RuntimeError("Pistol NAC missing audio tracks")
     assert manifest()["startup_scene"] == "main.nscn"

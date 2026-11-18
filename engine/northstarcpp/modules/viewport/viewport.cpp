@@ -1,880 +1,33 @@
-// NorthStarCpp
-// Author: Kayla Verner
-// Updated: 2026
-
-#include "viewport.hpp"
-#include "../shared/frame_profiler.hpp"
-#include <northstarcpp/collision_wireframe.hpp>
-#include "viewport_collision_wireframe.hpp"
-#include "viewport_material_batches.hpp"
-#include "viewport_skin_cache.hpp"
-#include "viewport_skeletal_animation.hpp"
-#include "editor_character_marker.hpp"
-#include "editor_grid.hpp"
-#include <northstarcpp/scene_world.hpp>
-
-#include <northstarcpp/physics.hpp>
-#include <northstarcpp/fps_game.hpp>
-#include <northstarcpp/camera.hpp>
-#include <northstarcpp/shared_assets.hpp>
-#include <northstarcpp/procedural_environment.hpp>
-#include <northstarcpp/render_plugin.h>
-#include <northstarcpp/render_ui_api.h>
-#include <northstarcpp/ui.hpp>
-#include <northstarcpp/render_editor_grid_api.h>
-#include <northstarcpp/render_pick_api.h>
-#include <northstarcpp/render_feature_requirements.hpp>
-#include <northstarcpp/render_triangles_api.h>
-#include <northstarcpp/render_materials_api.h>
-#include <northstarcpp/render_shader_reload_api.h>
-#include <northstarcpp/render_postfx_api.h>
-#include <northstarcpp/render_lights_api.h>
-#include "../render/shared/render_light_components.hpp"
-#include <northstarcpp/material.hpp>
-#include <northstarcpp/render_surfaces_api.h>
-#include <northstarcpp/render_character_api.h>
-#include <northstarcpp/character.hpp>
-#include <northstarcpp/player_character_components.hpp>
-#include <northstarcpp/scene_pawn.hpp>
-#include <northstarcpp/mesh_asset.hpp>
-#include <northstarcpp/native_model.hpp>
-#include <northstarcpp/geometry_scene.hpp>
-#include <northstarcpp/geometry_service.hpp>
-#include <northstarcpp/assets.hpp>
-#include "module_loader.hpp"
-
-#include <array>
-#include <utility>
-#include <vector>
-#include <algorithm>
-#include <cmath>
-#include <cctype>
-#include <cstring>
-#include <cstdlib>
-#include <cstdio>
-#include <stdexcept>
-#include <unordered_map>
-#include <unordered_set>
-#include <filesystem>
-#include <optional>
-#include <functional>
-#include <sstream>
-#include <chrono>
+#include "viewport_internal.hpp"
+#include "viewport_sky_layers.hpp"
+#include <northstarcpp/sky_project_config.hpp>
 
 namespace northstarcpp {
 
-namespace {
-// Browser passes a validated comma-delimited list of strict project
-// requirements to the Editor/Viewport child. A directly launched Editor can
-// also supply it manually; unknown or duplicated feature identifiers fail.
-std::vector<std::string> renderer_requirements_from_environment()
-{
-    std::array<char,4096> buffer{};
-    auto const bytes=GetEnvironmentVariableA(
-        "NORTHSTARCPP_RENDER_REQUIRED_FEATURES",
-        buffer.data(),static_cast<DWORD>(buffer.size()));
-    if(bytes>=buffer.size())
-        throw std::runtime_error("GPU feature requirements environment is too long");
-    std::vector<std::string> requirements;
-    if(!bytes)return requirements;
-    std::string value(buffer.data(),bytes);
-    for(std::size_t start=0;start<value.size();) {
-        auto end=value.find(',',start);
-        if(end==std::string::npos)end=value.size();
-        requirements.push_back(value.substr(start,end-start));
-        start=end+1;
-    }
-    render::validate_feature_requirements(requirements);
-    return requirements;
-}
-void require_provider_render_features(
-    Module const& provider,const std::vector<std::string>& required)
-{
-    if(required.empty())return;
-    std::uint64_t apis=0;
-    if(provider.query_extension<NorthStarRenderTrianglesApi>(
-        NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_COLORED_GEOMETRY;
-    if(provider.query_extension<NorthStarRenderMaterialsApi>(
-        NORTHSTARCPP_RENDER_MATERIALS_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_TEXTURED_MATERIALS;
-    if(provider.query_extension<NorthStarRenderMaterialsApiV2>(
-        NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_MATERIAL_GRAPH;
-    if(provider.query_extension<NorthStarRenderSkinnedMaterialsApi>(
-        NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_GPU_SKINNING;
-    if(provider.query_extension<NorthStarRenderSurfacesApi>(
-        NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_WORLD_SURFACES;
-    if(provider.query_extension<NorthStarRenderCharacterApi>(
-        NORTHSTARCPP_RENDER_CHARACTER_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_CHARACTER;
-    if(provider.query_extension<NorthStarRenderLightsApi>(
-        NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_DYNAMIC_LIGHTS;
-    if(provider.query_extension<NorthStarRenderTimingApi>(
-        NORTHSTARCPP_RENDER_TIMING_MODULE_ABI))
-        apis|=NS_RENDER_FEATURE_GPU_TIMING;
-    auto features=provider.query_extension<NorthStarRenderFeaturesApi>(
-        NORTHSTARCPP_RENDER_FEATURES_MODULE_ABI);
-    auto missing=render::missing_feature_requirements(
-        required,apis,features?features->implemented_features:0,features!=nullptr);
-    if(!missing.empty()) {
-        std::string message="Render provider '"+provider.provider()+
-            "' does not satisfy mandatory project GPU features:";
-        for(auto const& id:missing)message+=" "+id;
-        throw std::runtime_error(message);
-    }
-}
-struct Character {
-    Character(AssetStore const& assets, CharacterAssetSpec const& spec)
-        : skeleton(load_skeleton(assets,spec.skeleton)),
-          model(load_character_model(assets,spec.model,skeleton)),
-          pose(skeleton),
-          skeleton_to_mesh(math::invert4x3(model.mesh_to_skeleton))
-    {
-        if (spec.animations.empty())
-            throw std::invalid_argument("A skeletal character requires animation clips");
-        for (auto const& resource : spec.animations) {
-            auto loaded=load_skeletal_clips(assets,resource.source,
-                {resource.clip},skeleton);
-            if (loaded.size()!=1 || !clips.emplace(resource.name,
-                std::move(loaded.front())).second)
-                throw std::invalid_argument("Duplicate or missing skeletal animation");
-        }
-        for (auto const& part : model.parts)
-            vertex_count += part.mesh.vertices.size();
-        vertices.resize(vertex_count);
-        // The skeleton mapping and palette storage are stable across frames.
-        // Reuse these buffers for every pose instead of allocating per tick.
-        matrices.reserve(skeleton.joints.size());
-    }
-
-    Skeleton skeleton;
-    CharacterModel model;
-    SkeletonPose pose;
-    math::float4x4 skeleton_to_mesh;
-    std::vector<math::float4x4> matrices;
-    std::unordered_map<std::string,SkeletalClip> clips;
-    std::size_t vertex_count = 0;
-    std::vector<NorthStarCharacterVertex> vertices;
-    // Retained across first-person/third-person geometry mode switches.
-    std::vector<CharacterAppearance> appearance;
-    std::vector<std::vector<std::uint32_t>> arm_indices;
-    std::string active_animation;
-    float seconds = 0;
-};
-}
-
-struct Viewport::State {
-    State(HWND window, bool software)
-        : window_handle(window), software_renderer(software)
-    {
-        // A project-selected provider must never silently fall back to
-        // another backend: unsupported ABI/features must remain visible.
-        std::array<char,128> selected{};
-        auto const selection_length=GetEnvironmentVariableA(
-            "NORTHSTARCPP_RENDER_PROVIDER",selected.data(),
-            static_cast<DWORD>(selected.size()));
-        if(selection_length>=selected.size())
-            throw std::runtime_error("Selected renderer provider ID is too long");
-        auto const required=renderer_requirements_from_environment();
-        std::vector<std::string> providers;
-        if(selection_length)providers.emplace_back(selected.data());
-        else providers={"d3d12","d3d11"}; // Existing automatic fallback.
-        for(std::size_t i=0;i<providers.size();++i) {
-            try {
-                auto candidate=std::make_unique<Module>(
-                    NORTHSTARCPP_CAPABILITY_RENDER,providers[i]);
-                auto const* candidate_api=
-                    candidate->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
-                require_provider_render_features(*candidate,required);
-                void* instance=candidate_api->create(window, software?1u:0u);
-                if(!instance)throw candidate->error("Cannot create viewport");
-                module=std::move(candidate);
-                api=candidate_api;
-                renderer=instance;
-                break;
-            }catch(std::exception const&) {
-                if(i+1==providers.size())throw;
-            }
-        }
-        triangle_api = module->query_extension<NorthStarRenderTrianglesApi>(
-            NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI);
-        if (!triangle_api) {
-            auto const query = module->symbol<NorthStarRenderGetTrianglesApi>(
-                "northstar_render_get_triangles_api");
-            auto const* candidate = query ? query(NORTHSTARCPP_RENDER_TRIANGLES_ABI) : nullptr;
-            if (candidate && valid_api(*candidate))
-                triangle_api = candidate;
-        }
-        surface_api=module->query_extension<NorthStarRenderSurfacesApi>(
-            NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI);
-        material_api=module->query_extension<NorthStarRenderMaterialsApi>(
-            NORTHSTARCPP_RENDER_MATERIALS_MODULE_ABI);
-        material_api_v2=module->query_extension<NorthStarRenderMaterialsApiV2>(
-            NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI);
-        shader_reload_api=module->query_extension<NorthStarRenderShaderReloadApi>(
-            NORTHSTARCPP_RENDER_SHADER_RELOAD_MODULE_ABI);
-        shader_reload_v2=module->query_extension<NorthStarRenderShaderReloadApiV2>(
-            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI);
-        postfx_api=module->query_extension<NorthStarRenderPostFxApi>(
-            NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI);
-        timing_api=module->query_extension<NorthStarRenderTimingApi>(
-            NORTHSTARCPP_RENDER_TIMING_MODULE_ABI);
-        skinned_material_api=module->query_extension<NorthStarRenderSkinnedMaterialsApi>(
-            NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI);
-        lights_api=module->query_extension<NorthStarRenderLightsApi>(
-            NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI);
-        editor_grid_api=module->query_extension<NorthStarRenderEditorGridApi>(
-            NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI);
-        pick_api=module->query_extension<NorthStarRenderPickApi>(
-            NORTHSTARCPP_RENDER_PICK_MODULE_ABI);
-        pick_v2_api=module->query_extension<NorthStarRenderPickApiV2>(
-            NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI);
-        pick_async_api=module->query_extension<NorthStarRenderPickAsyncApi>(
-            NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI);
-        try {
-            cubes.reserve(max_scene_objects);
-            surface_ids.reserve(max_scene_objects);
-        } catch (...) {
-            api->destroy(renderer);
-            throw;
-        }
-    }
-
-    ~State() {
-        if(ui_context&&ui_api)ui_api->destroy_context(ui_context);
-        if(renderer)api->destroy(renderer);
-    }
-    void prepare_ui_overlay(bool gameplay) {
-        // A generic UI document authored by scripts, never a mission-specific
-        // structure. The optional demo uses the same element-tree contract.
-        UiDocument demo;
-        auto const* document=&ui_document;
-        const char* enabled=std::getenv("NORTHSTARCPP_UI_DEMO");
-        if(ui_document.nodes.empty() && gameplay && enabled &&
-           std::strcmp(enabled,"1")==0) {
-            UiDocumentNode panel;
-            panel.id="demoPanel";
-            panel.kind=NORTHSTAR_UI_PANEL;
-            panel.properties={
-                {"width",{NORTHSTAR_UI_VALUE_NUMBER,320}},
-                {"height",{NORTHSTAR_UI_VALUE_NUMBER,65}},
-                {"background",{NORTHSTAR_UI_VALUE_COLOR_RGBA8,0,0x0b1423d9}}
-            };
-            UiDocumentNode label;
-            label.id="demoText";
-            label.parent="demoPanel";
-            label.kind=NORTHSTAR_UI_TEXT;
-            UiPropertyValue text;
-            text.kind=NORTHSTAR_UI_VALUE_STRING;
-            text.text="NORTHSTAR UI NATIVE";
-            label.properties={{"text",std::move(text)}};
-            demo.nodes={std::move(panel),std::move(label)};
-            document=&demo;
-        }
-        if(document->nodes.empty()) {
-            ui_fx_target_id.clear();
-            ui_fx_id.clear();
-            ui_fx_hover=false;
-            ui_fx_pressed=false;
-            ui_fx_press_burst=false;
-            if(ui_effects_api && ui_effects_api->set_hover_fx)
-                ui_effects_api->set_hover_fx(renderer,nullptr);
-            if(ui_render_api && ui_active &&
-               !ui_render_api->set_rgba(renderer,nullptr,0,0,0))
-                throw module->error("Cannot clear UI composition");
-            ui_active=false;
-            if(ui_context&&ui_api) {
-                ui_api->destroy_context(ui_context);
-                ui_context=nullptr;
-                ui_handles.clear();
-                ui_names_by_handle.clear();
-                ui_events.clear();
-                ui_applied_document={};
-            }
-            return;
-        }
-        if(!ui_render_api) {
-            ui_render_api=module->query_extension<NorthStarRenderUiApi>(
-                NORTHSTARCPP_RENDER_UI_MODULE_ABI);
-            ui_effects_api=module->query_extension<NorthStarRenderUiEffectsApi>(
-                NORTHSTARCPP_RENDER_UI_EFFECTS_MODULE_ABI);
-            ui_shaders_api=module->query_extension<NorthStarRenderUiShadersApi>(
-                NORTHSTARCPP_RENDER_UI_SHADERS_MODULE_ABI);
-        }
-        if(!ui_render_api)
-            throw std::runtime_error(
-                "Active engine.render provider has no GPU UI compositor");
-        if(!ui_project_shaders_loaded && project_assets && ui_shaders_api) {
-            // Renderer selection is independent of project styling. VFS can
-            // read loose files and packed archives using the same asset IDs.
-            ui_project_shaders_loaded=true;
-            // Shader asset IDs are authored by the project UI document.
-            auto shaderPath=[&](char const* key)->std::string {
-                for(auto const& node:document->nodes)
-                    for(auto const& [property,value]:node.properties)
-                        if(property==key && value.kind==NORTHSTAR_UI_VALUE_STRING)
-                            return value.text;
-                return {};
-            };
-            auto loadShader=[&](char const* path)->std::vector<std::uint8_t> {
-                try {
-                    if(project_assets->size(path)==0)return {};
-                    return project_assets->read(path);
-                } catch(std::exception const& error) {
-                    warn_asset("Project UI shader",path,error);
-                    return {};
-                }
-            };
-            if(ui_shaders_api->set_hlsl) {
-                auto path=shaderPath("ui_shader_hlsl");
-                auto source=path.empty()?std::vector<std::uint8_t>{}:loadShader(path.c_str());
-                if(!source.empty()) {
-                    if(source.size()>262144 ||
-                       !ui_shaders_api->set_hlsl(renderer,
-                         reinterpret_cast<char const*>(source.data()),
-                         static_cast<std::uint32_t>(source.size()))) {
-                        std::fprintf(stderr,
-                            "[NorthStarCpp] Warning: invalid project UI HLSL %s: %s\n",
-                            path.c_str(),module->error("Project shader error").what());
-                    } else {
-                        std::fprintf(stderr,
-                            "[NorthStarCpp] Project UI shader loaded: %s\n",path.c_str());
-                    }
-                }
-            }
-            if(ui_shaders_api->set_spirv) {
-                auto path=shaderPath("ui_shader_spirv");
-                auto bytes=path.empty()?std::vector<std::uint8_t>{}:loadShader(path.c_str());
-                if(!bytes.empty()) {
-                    if(bytes.size()>1048576 || bytes.size()%4!=0) {
-                        std::fprintf(stderr,
-                            "[NorthStarCpp] Warning: invalid project UI SPIR-V %s\n",path.c_str());
-                    } else {
-                        std::vector<std::uint32_t> words(bytes.size()/4);
-                        std::memcpy(words.data(),bytes.data(),bytes.size());
-                        if(!ui_shaders_api->set_spirv(renderer,words.data(),
-                                static_cast<std::uint32_t>(words.size()))) {
-                            std::fprintf(stderr,
-                                "[NorthStarCpp] Warning: project UI SPIR-V rejected: %s\n",
-                                path.c_str());
-                        } else {
-                            std::fprintf(stderr,
-                                "[NorthStarCpp] Project UI shader loaded: %s\n",path.c_str());
-                        }
-                    }
-                }
-            }
-        }
-        if(!ui_module) {
-            ui_module=std::make_unique<Module>(NORTHSTARCPP_CAPABILITY_UI);
-            ui_api=ui_module->query<NorthStarUIApi>(NORTHSTARCPP_UI_ABI);
-            ui_raster=ui_module->query_extension<NorthStarUIRasterApi>(
-                NORTHSTARCPP_UI_RASTER_ABI);
-            ui_raster_layers=ui_module->query_extension<NorthStarUIRasterLayersApi>(
-                NORTHSTARCPP_UI_RASTER_LAYERS_MODULE_ABI);
-            ui_input_api=ui_module->query_extension<NorthStarUIInputApi>(
-                NORTHSTARCPP_UI_INPUT_ABI);
-            if(!ui_raster)
-                throw std::runtime_error("Active engine.ui cannot rasterize");
-        }
-        auto set=[&](NorthStarUIHandle handle,
-                     std::pair<std::string,UiPropertyValue> const& property) {
-            auto const& input=property.second;
-            NorthStarUIValue value{};
-            switch(input.kind) {
-            case NORTHSTAR_UI_VALUE_NUMBER: value=ui::number(input.number);break;
-            case NORTHSTAR_UI_VALUE_BOOL: value=ui::boolean(input.boolean);break;
-            case NORTHSTAR_UI_VALUE_STRING: value=ui::text(input.text);break;
-            case NORTHSTAR_UI_VALUE_COLOR_RGBA8:
-                value={sizeof(NorthStarUIValue),NORTHSTAR_UI_VALUE_COLOR_RGBA8,
-                    0,input.rgba,0,{}};break;
-            default:throw std::invalid_argument("Invalid UI property value type");
-            }
-            if(ui_api->set_property(ui_context,handle,ui::string(property.first),
-                &value)!=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot apply UI property");
-        };
-        bool same_structure=ui_context &&
-            document->nodes.size()==ui_applied_document.nodes.size();
-        if(same_structure) {
-            for(std::size_t i=0;i<document->nodes.size();++i) {
-                const auto& current=document->nodes[i];
-                const auto& previous=ui_applied_document.nodes[i];
-                if(current.id!=previous.id || current.parent!=previous.parent ||
-                   current.kind!=previous.kind ||
-                   current.properties.size()!=previous.properties.size()) {
-                    same_structure=false;break;
-                }
-                for(std::size_t j=0;j<current.properties.size();++j)
-                    if(current.properties[j].first!=previous.properties[j].first ||
-                       current.properties[j].second.kind!=
-                       previous.properties[j].second.kind) {
-                        same_structure=false;break;
-                    }
-                if(!same_structure)break;
-            }
-        }
-        if(!same_structure) {
-            if(ui_context) {
-                ui_api->destroy_context(ui_context);
-                ui_context=nullptr;
-                ui_handles.clear();
-                ui_names_by_handle.clear();
-                ui_events.clear();
-            }
-            NorthStarUIConfig cfg{sizeof(NorthStarUIConfig),0,nullptr};
-            if(ui_api->create_context(&cfg,&ui_context)!=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot create UI context");
-            // Provider callbacks are synchronous during pump_events().
-            // Buffer the event; script callbacks run later, never reentrantly
-            // inside the C ABI UI provider.
-            if(ui_api->set_event_callback(ui_context,
-                    [](void* owner,const NorthStarUIEvent* event) {
-                        if(!owner||!event)return;
-                        auto& state=*static_cast<State*>(owner);
-                        try {
-                            if(state.ui_events.size()>=1024)return;
-                            auto it=state.ui_names_by_handle.find(event->target);
-                            if(it==state.ui_names_by_handle.end())return;
-                            UiInteractionEvent next;
-                            next.id=it->second;
-                            next.kind=event->kind;
-                            next.value_kind=event->value.kind;
-                            next.number=event->value.number;
-                            next.boolean=event->value.boolean!=0;
-                            if(event->name.data && event->name.length<=64)
-                                next.name.assign(event->name.data,
-                                                 static_cast<size_t>(event->name.length));
-                            if(event->value.kind==NORTHSTAR_UI_VALUE_STRING &&
-                               event->value.string.data &&
-                               event->value.string.length<=4096)
-                                next.text.assign(event->value.string.data,
-                                                 static_cast<size_t>(event->value.string.length));
-                            state.ui_events.push_back(std::move(next));
-                        } catch(...) {
-                            // Never throw through an external provider callback.
-                        }
-                    },this)!=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot register UI event sink");
-            auto root=ui::element(NORTHSTAR_UI_ROOT,0,"screen");
-            NorthStarUIHandle root_handle=0;
-            if(ui_api->create_element(ui_context,&root,&root_handle)!=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot create UI root");
-            ui_handles.emplace("",root_handle);
-            for(auto const& node:document->nodes) {
-                auto parent=ui_handles.find(node.parent);
-                if(parent==ui_handles.end())
-                    throw std::invalid_argument("UI node parent must precede child");
-                auto descriptor=ui::element(node.kind,parent->second,node.id);
-                NorthStarUIHandle handle=0;
-                if(ui_api->create_element(ui_context,&descriptor,&handle)!=NORTHSTAR_UI_OK)
-                    throw ui_module->error("Cannot create UI node");
-                ui_handles.emplace(node.id,handle);
-                ui_names_by_handle.emplace(handle,node.id);
-            }
-            ui_last_width=ui_last_height=0;
-        }
-        if(!same_structure || !(*document==ui_applied_document)) {
-            for(std::size_t i=0;i<document->nodes.size();++i) {
-                const auto& node=document->nodes[i];
-                const auto& previous=same_structure?
-                    ui_applied_document.nodes[i]:node;
-                const auto handle=ui_handles.at(node.id);
-                for(std::size_t j=0;j<node.properties.size();++j)
-                    if(!same_structure ||
-                       !(node.properties[j].second==previous.properties[j].second))
-                        set(handle,node.properties[j]);
-            }
-            ui_applied_document=*document;
-            ui_dirty=true;
-        }
-        RECT rect{};
-        if(!GetClientRect(window_handle,&rect) ||
-           rect.right<=rect.left||rect.bottom<=rect.top)return;
-        const auto width=static_cast<std::uint32_t>(rect.right-rect.left);
-        const auto height=static_cast<std::uint32_t>(rect.bottom-rect.top);
-        if(width>4096||height>4096 ||
-           static_cast<std::uint64_t>(width)*height*4>64ull*1024*1024)return;
-        // Keep the last isolated layer during the short hover fade-out.
-        const float fxElapsed=std::chrono::duration<float>(
-            std::chrono::steady_clock::now()-ui_fx_changed).count();
-        if(!ui_fx_hover && !ui_fx_target_id.empty() && fxElapsed>=0.22f) {
-            ui_fx_target_id.clear();
-            ui_dirty=true;
-        }
-        auto layerHandle=ui_handles.find(ui_fx_target_id);
-        const bool layered=ui_raster_layers && ui_effects_api &&
-            layerHandle!=ui_handles.end() &&
-            static_cast<std::uint64_t>(width)*height*8<=64ull*1024*1024 &&
-            height<=4096;
-        // GPU hover animation advances without rerasterizing the UI texture.
-        if(ui_effects_api && ui_effects_api->set_hover_fx) {
-            const auto elapsed=std::chrono::duration<float>(
-                std::chrono::steady_clock::now()-ui_fx_changed).count();
-            const float fade=std::clamp(elapsed/0.22f,0.f,1.f);
-            const float ease=fade*fade*(3.f-2.f*fade);
-            const float strength=ui_fx_hover?ease:1.f-ease;
-            NorthStarRenderUiHoverFx fx{};
-            // 150-ms release pulse remains visible even if the click completes
-            // between two rendered frames.
-            const float pressAge=std::chrono::duration<float>(
-                std::chrono::steady_clock::now()-ui_fx_press_changed).count();
-            const float releaseFade=std::clamp(1.f-pressAge/0.150f,0.f,1.f);
-            const float pressBurst=ui_fx_pressed?1.f:
-                (ui_fx_press_burst?releaseFade*releaseFade:0.f);
-            fx.layered=layered?1.f:0.f;
-            // Time must advance even without hover so the project can animate
-            // a very faint resting shimmer without CPU re-rasterization.
-            fx.seconds=std::chrono::duration<float>(
-                std::chrono::steady_clock::now()-ui_fx_clock_start).count();
-            // Initialize position even on the first hover frame (fade=0).
-            if(layered && ui_fx_rect.width>0 && ui_fx_rect.height>0) {
-                fx.x=ui_fx_rect.x/static_cast<float>(width);
-                fx.y=ui_fx_rect.y/static_cast<float>(height);
-                fx.width=ui_fx_rect.width/static_cast<float>(width);
-                fx.height=ui_fx_rect.height/static_cast<float>(height);
-                fx.strength=strength;
-                fx.pressed=pressBurst;
-                fx.primary=ui_fx_primary?1.f:0.f;
-                fx.origin_slot=ui_fx_origin_slot;
-                fx.seed=ui_fx_seed;
-                fx.layered=layered?1.f:0.f;
-                // Hover age also synchronizes the short entry flicker
-                // with the pointer-enter event that starts the NAC cue.
-                fx.reserved=elapsed;
-            }
-            if(!layered)fx.strength=0.f;
-            if(!ui_effects_api->set_hover_fx(renderer,&fx))
-                throw module->error("Cannot update UI hover shader parameters");
-        }
-        if(ui_active && ui_last_width==width && ui_last_height==height &&
-           !ui_dirty)return;
-        if(ui_api->resize(ui_context,width,height,1.f)!=NORTHSTAR_UI_OK)
-            throw ui_module->error("Cannot resize UI context");
-        const auto screenBytes=static_cast<std::size_t>(width)*height*4;
-        ui_pixels.resize(screenBytes*(layered?2u:1u));
-        if(layered) {
-            // Base layer omits ONLY the target; the second layer contains the
-            // button surface, bevels, glyphs and alpha with transparent space.
-            if(ui_raster_layers->draw_filtered_rgba(ui_context,
-                ui_pixels.data(),width*4,width,height,layerHandle->second,1)
-                !=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot rasterize UI base without button");
-            if(ui_raster_layers->draw_filtered_rgba(ui_context,
-                ui_pixels.data()+screenBytes,width*4,width,height,
-                layerHandle->second,2)!=NORTHSTAR_UI_OK)
-                throw ui_module->error("Cannot rasterize isolated UI button");
-        } else if(ui_raster->draw_rgba(ui_context,ui_pixels.data(),
-                     width*4,width,height)!=NORTHSTAR_UI_OK)
-            throw ui_module->error("Cannot rasterize UI document");
-        // Project-authored UI images are separate asset-backed layers.
-        // Backgrounds composite UNDER the existing premultiplied UI;
-        // logos/foreground images composite OVER it with their own alpha.
-        // The second isolated-button atlas layer remains untouched.
-        for(auto const& node:ui_applied_document.nodes) {
-            if(node.kind!=NORTHSTAR_UI_IMAGE || !project_assets)continue;
-            auto getString=[&](char const* key)->std::string {
-                auto found=std::find_if(node.properties.begin(),node.properties.end(),
-                    [&](auto const& item){return item.first==key &&
-                        item.second.kind==NORTHSTAR_UI_VALUE_STRING;});
-                return found!=node.properties.end()?found->second.text:std::string{};
-            };
-            auto const source=getString("source");
-            if(source.empty())continue;
-            auto found=ui_image_cache.find(source);
-            if(found==ui_image_cache.end()) {
-                UiCachedImage asset;
-                try {
-                    auto at=source.rfind('@');
-                    if(at==std::string::npos || at<4 || at+1>=source.size() ||
-                       source.find("..")!=std::string::npos || source[0]=='/' ||
-                       source.find(':')!=std::string::npos ||
-                       source.substr(at-4,4)!=".ytd")
-                        throw std::invalid_argument(
-                            "UI source must be project-relative .ytd@entry");
-                    auto textures=shared_assets::load_textures(
-                        *project_assets,source.substr(0,at));
-                    auto chosen=std::find_if(textures.begin(),textures.end(),
-                        [&](auto const& texture){
-                            return texture.name==source.substr(at+1);
-                        });
-                    if(chosen==textures.end() || chosen->format_id!=1 ||
-                       chosen->mips.empty())
-                        throw std::runtime_error("YTD RGBA8 UI entry missing");
-                    auto const& mip=chosen->mips.front();
-                    if(!mip.width || !mip.height || mip.width>4096 ||
-                       mip.height>4096 ||
-                       mip.size!=static_cast<std::size_t>(mip.width)*mip.height*4 ||
-                       mip.offset>chosen->data.size() ||
-                       mip.size>chosen->data.size()-mip.offset)
-                        throw std::runtime_error("Invalid YTD UI image mip");
-                    asset.width=mip.width;
-                    asset.height=mip.height;
-                    asset.rgba.assign(
-                        chosen->data.begin()+static_cast<std::ptrdiff_t>(mip.offset),
-                        chosen->data.begin()+static_cast<std::ptrdiff_t>(mip.offset+mip.size));
-                    std::fprintf(stderr,
-                        "[NorthStarCpp] UI image loaded: %s (%ux%u)\n",
-                        source.c_str(),mip.width,mip.height);
-                } catch(std::exception const& error) {
-                    warn_asset("UI image",source,error);
-                }
-                found=ui_image_cache.emplace(source,std::move(asset)).first;
-            }
-            auto const& asset=found->second;
-            if(asset.rgba.empty() || !asset.width || !asset.height)continue;
-            auto handle=ui_handles.find(node.id);
-            if(handle==ui_handles.end())continue;
-            NorthStarUIRect rect{};
-            if(ui_raster->get_rect(ui_context,handle->second,&rect)!=NORTHSTAR_UI_OK)
-                continue;
-            const int srcW=static_cast<int>(asset.width);
-            const int srcH=static_cast<int>(asset.height);
-            int bx=static_cast<int>(rect.x),by=static_cast<int>(rect.y);
-            int bw=std::max(1,static_cast<int>(rect.width));
-            int bh=std::max(1,static_cast<int>(rect.height));
-            int cropW=srcW,cropH=srcH,offX=0,offY=0;
-            if(getString("fit")=="contain") {
-                // Preserve aspect ratio and transparency, especially logos.
-                if(static_cast<std::int64_t>(bw)*srcH <
-                   static_cast<std::int64_t>(bh)*srcW)
-                    bh=std::max(1,bw*srcH/srcW);
-                else bw=std::max(1,bh*srcW/srcH);
-                bx+= (static_cast<int>(rect.width)-bw)/2;
-                by+= (static_cast<int>(rect.height)-bh)/2;
-            } else {
-                // CSS cover: crop from the centre, never resample on disk.
-                if(static_cast<std::int64_t>(bw)*srcH >
-                   static_cast<std::int64_t>(bh)*srcW) {
-                    cropH=std::max(1,srcW*bh/bw);
-                    offY=(srcH-cropH)/2;
-                } else {
-                    cropW=std::max(1,srcH*bw/bh);
-                    offX=(srcW-cropW)/2;
-                }
-            }
-            const bool underlay=getString("layer")!="foreground";
-            for(int y=std::max(0,by);
-                y<std::min(static_cast<int>(height),by+bh);++y) {
-                auto sy=std::clamp(offY+(y-by)*cropH/bh,0,srcH-1);
-                for(int x=std::max(0,bx);
-                    x<std::min(static_cast<int>(width),bx+bw);++x) {
-                    auto sx=std::clamp(offX+(x-bx)*cropW/bw,0,srcW-1);
-                    auto src=(static_cast<std::size_t>(sy)*srcW+sx)*4;
-                    auto dst=(static_cast<std::size_t>(y)*width+x)*4;
-                    unsigned alpha=asset.rgba[src+3];
-                    if(!alpha)continue;
-                    unsigned dstAlpha=ui_pixels[dst+3];
-                    unsigned factor=underlay?((255u-dstAlpha)*alpha+127)/255:
-                                               alpha;
-                    for(unsigned c=0;c<3;++c) {
-                        unsigned contribution=(unsigned(asset.rgba[src+c])*factor+127)/255;
-                        unsigned existing=underlay?ui_pixels[dst+c]:
-                            (unsigned(ui_pixels[dst+c])*(255u-alpha)+127)/255;
-                        ui_pixels[dst+c]=static_cast<std::uint8_t>(
-                            std::min(255u,existing+contribution));
-                    }
-                    ui_pixels[dst+3]=underlay?
-                        static_cast<std::uint8_t>(std::min(255u,dstAlpha+factor)):
-                        static_cast<std::uint8_t>(std::min(255u,
-                            alpha+(dstAlpha*(255u-alpha)+127)/255));
-                }
-            }
-        }
-        if(!ui_render_api->set_rgba(renderer,ui_pixels.data(),
-                width,layered?height*2:height,width*4))
-            throw module->error("Cannot upload GPU UI document");
-        ui_last_width=width;
-        ui_last_height=height;
-        ui_active=true;
-        ui_dirty=false;
-    }
-    #include "viewport_world_ui_raster.inc"
-    void fallback_to_d3d11() {
-        if (module && module->provider()!="d3d12") return;
-        std::array<char,8> selected{};
-        if(GetEnvironmentVariableA("NORTHSTARCPP_RENDER_PROVIDER",
-             selected.data(),static_cast<DWORD>(selected.size()))>0)
-            throw std::runtime_error(
-                "Selected renderer lacks character support; explicit provider fallback disabled");
-        auto next_module=std::make_unique<Module>(NORTHSTARCPP_CAPABILITY_RENDER,"d3d11");
-        require_provider_render_features(*next_module,
-            renderer_requirements_from_environment());
-        auto next_api=next_module->query<NorthStarRenderApi>(NORTHSTARCPP_RENDER_ABI);
-        // DXGI only permits one active flip-model swapchain per HWND.
-        // Release the D3D12 swapchain before creating the replacement.
-        if(renderer)api->destroy(renderer);
-        renderer=nullptr;
-        auto next_renderer=next_api->create(window_handle,software_renderer?1u:0u);
-        if(!next_renderer)throw next_module->error("Cannot initialize D3D11 fallback");
-        renderer=next_renderer;api=next_api;module=std::move(next_module);
-        ui_render_api=nullptr;
-        ui_effects_api=nullptr;
-        ui_shaders_api=nullptr;
-        ui_project_shaders_loaded=false;
-        triangle_api=module->query_extension<NorthStarRenderTrianglesApi>(
-            NORTHSTARCPP_RENDER_TRIANGLES_MODULE_ABI);
-        if(!triangle_api) {
-            auto query=module->symbol<NorthStarRenderGetTrianglesApi>(
-                "northstar_render_get_triangles_api");
-            auto candidate=query?query(NORTHSTARCPP_RENDER_TRIANGLES_ABI):nullptr;
-            if(candidate&&valid_api(*candidate))triangle_api=candidate;
-        }
-        surface_api=module->query_extension<NorthStarRenderSurfacesApi>(
-            NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI);
-        material_api=module->query_extension<NorthStarRenderMaterialsApi>(
-            NORTHSTARCPP_RENDER_MATERIALS_MODULE_ABI);
-        material_api_v2=module->query_extension<NorthStarRenderMaterialsApiV2>(
-            NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI);
-        shader_reload_api=module->query_extension<NorthStarRenderShaderReloadApi>(
-            NORTHSTARCPP_RENDER_SHADER_RELOAD_MODULE_ABI);
-        shader_reload_v2=module->query_extension<NorthStarRenderShaderReloadApiV2>(
-            NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_MODULE_ABI);
-        postfx_api=module->query_extension<NorthStarRenderPostFxApi>(
-            NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI);
-        timing_api=module->query_extension<NorthStarRenderTimingApi>(
-            NORTHSTARCPP_RENDER_TIMING_MODULE_ABI);
-        skinned_material_api=module->query_extension<NorthStarRenderSkinnedMaterialsApi>(
-            NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI);
-        lights_api=module->query_extension<NorthStarRenderLightsApi>(
-            NORTHSTARCPP_RENDER_LIGHTS_MODULE_ABI);
-        editor_grid_api=module->query_extension<NorthStarRenderEditorGridApi>(
-            NORTHSTARCPP_RENDER_EDITOR_GRID_MODULE_ABI);
-        pick_api=module->query_extension<NorthStarRenderPickApi>(
-            NORTHSTARCPP_RENDER_PICK_MODULE_ABI);
-        pick_v2_api=module->query_extension<NorthStarRenderPickApiV2>(
-            NORTHSTARCPP_RENDER_PICK_V2_MODULE_ABI);
-        pick_async_api=module->query_extension<NorthStarRenderPickAsyncApi>(
-            NORTHSTARCPP_RENDER_PICK_ASYNC_MODULE_ABI);
-    }
-    HWND window_handle=nullptr;
-    bool software_renderer=false;
-    std::unique_ptr<Module> module;
-    NorthStarRenderApi const* api = nullptr;
-    NorthStarRenderUiApi const* ui_render_api = nullptr;
-    NorthStarRenderUiEffectsApi const* ui_effects_api = nullptr;
-    NorthStarRenderUiShadersApi const* ui_shaders_api = nullptr;
-    bool ui_project_shaders_loaded=false;
-    std::unique_ptr<Module> ui_module;
-    NorthStarUIApi const* ui_api = nullptr;
-    NorthStarUIRasterApi const* ui_raster = nullptr;
-    NorthStarUIRasterLayersApi const* ui_raster_layers = nullptr;
-    NorthStarUIInputApi const* ui_input_api = nullptr;
-    void* ui_context = nullptr;
-    std::vector<std::uint8_t> ui_pixels;
-    struct UiCachedImage {
-        std::vector<std::uint8_t> rgba;
-        std::uint32_t width=0,height=0;
-    };
-    std::unordered_map<std::string,UiCachedImage> ui_image_cache;
-    UiDocument ui_document{};
-    UiDocument ui_applied_document{};
-    std::unordered_map<std::string,WorldUiLayer> world_ui;
-    std::unordered_map<std::string,NorthStarUIHandle> ui_handles;
-    std::unordered_map<NorthStarUIHandle,std::string> ui_names_by_handle;
-    std::vector<UiInteractionEvent> ui_events;
-    std::uint32_t ui_last_width=0,ui_last_height=0;
-    bool ui_dirty=true,ui_active=false,ui_was_hovering=false;
-    std::string ui_fx_id;
-    std::string ui_fx_target_id;
-    NorthStarUIRect ui_fx_rect{};
-    bool ui_fx_hover=false,ui_fx_primary=false,ui_fx_pressed=false;
-    bool ui_fx_press_burst=false;
-    std::chrono::steady_clock::time_point ui_fx_press_changed=
-        std::chrono::steady_clock::now();
-    float ui_fx_origin_slot=0.f,ui_fx_seed=0.f;
-    float ui_fx_pointer_x=0.5f,ui_fx_pointer_y=0.5f;
-    std::string ui_raster_hover_id;
-    std::chrono::steady_clock::time_point ui_fx_changed=
-        std::chrono::steady_clock::now();
-    // Universal GPU-UI timebase. Only the project shader decides its style;
-    // the default engine compositor remains entirely neutral.
-    std::chrono::steady_clock::time_point ui_fx_clock_start=
-        std::chrono::steady_clock::now();
-
-    std::vector<NorthStarRenderCube> cubes;
-    ViewportAssetStats asset_stats;
-    std::string detail_level="cinematic";
-    std::vector<std::uint32_t> surface_ids;
-    NorthStarRenderSurfacesApi const* surface_api = nullptr;
-    NorthStarRenderShaderReloadApi const* shader_reload_api=nullptr;
-    NorthStarRenderShaderReloadApiV2 const* shader_reload_v2=nullptr;
-    NorthStarRenderPostFxApi const* postfx_api=nullptr;
-    NorthStarRenderTimingApi const* timing_api=nullptr;
-    std::unordered_map<std::string,std::uint64_t> reload_pending;
-    NorthStarRenderMaterialsApi const* material_api = nullptr;
-    NorthStarRenderMaterialsApiV2 const* material_api_v2=nullptr;
-    NorthStarRenderSkinnedMaterialsApi const* skinned_material_api=nullptr;
-    NorthStarRenderLightsApi const* lights_api=nullptr;
-    NorthStarRenderEditorGridApi const* editor_grid_api=nullptr;
-    NorthStarRenderPickApi const* pick_api=nullptr;
-    NorthStarRenderPickApiV2 const* pick_v2_api=nullptr;
-    NorthStarRenderPickAsyncApi const* pick_async_api=nullptr;
-    std::uint64_t pick_generation=0, next_pick_request=1;
-    std::unordered_map<std::uint64_t,int> pick_entity_actor;
-    bool pick_scene_complete=false;
-    std::vector<int> cube_actor_map;
-    bool warned_missing_light_provider=false;
-    std::unordered_map<std::string,MaterialDefinition> cached_materials;
-    // Failed resources are quarantined for this VFS mount, not retried in
-    // every frame. Changing mounted asset sources clears the quarantine.
-    std::unordered_set<std::string> invalid_materials;
-    std::unordered_set<std::string> invalid_meshes;
-    std::unordered_set<std::uint64_t> warned_unbound_players;
-    void warn_asset(char const* type,std::string const& path,
-                    std::exception const& error) const {
-        std::fprintf(stderr,"[WARN] [engine.assets] Skipping invalid %s '%s': %s\n",
-            type,path.c_str(),error.what());
-    }
-    std::optional<shared_assets::DrawableResources> retained_sky;
-    bool world_surfaces_ready = false;
-    NorthStarRenderCharacterApi const* character_api = nullptr;
-    std::unique_ptr<Character> character;
-    bool character_arm_mode=false;
-    std::unique_ptr<AssetStore> project_assets;
-    std::filesystem::path source_project_root;
-    std::unordered_map<std::string,MeshAsset> cached_meshes;
-    // Reuse original YDD eight-weight influences, YMT bind skeleton and
-    // decoded YCD clips. GPU providers receive a CPU-deformed PBR mesh.
-    struct NativeRig {
-        Skeleton skeleton;
-        std::vector<SkinWeights> weights;
-        math::float4x4 mesh_to_skeleton{};
-        // Bounded one-time mask for optional arm-only native viewmodels.
-        std::vector<std::uint8_t> first_person_arm_vertices;
-        std::unordered_map<std::string,SkeletalClip> clips;
-        std::unordered_set<std::string> invalid_clips;
-        std::optional<viewport_detail::PreparedSkinSections> gpu_sections;
-        std::optional<viewport_detail::PreparedSkinSections> gpu_arm_sections;
-    };
-    std::unordered_map<std::string,NativeRig> cached_native_skins;
-    struct NativePlayback {
-        std::string clip_reference;
-        std::string mesh_source;
-        float seconds=0.f;
-        std::unique_ptr<SkeletonPose> pose;
-        MeshAsset cpu_mesh; // Persistent, per-actor scratch with cached topology.
-    };
-    std::unordered_map<std::uint64_t,NativePlayback> native_playback;
-    std::unordered_set<std::uint64_t> reported_socket_attachments;
-    std::unordered_set<std::uint64_t> reported_grip_attachments;
-    std::chrono::steady_clock::time_point last_native_frame{};
-    std::unordered_map<std::string,GeometryData> cached_geometry;
-    std::unique_ptr<GeometryService> geometry_service;
-    std::vector<NorthStarRenderTriangleVertex> mesh_vertices;
-    viewport_detail::SkinFrameBatches skin_batches;
-    viewport_detail::SkeletalSceneFrame skeletal_frame;
-    std::filesystem::path skin_cache_dir=viewport_detail::skin_cache_directory();
-    NorthStarRenderTrianglesApi const* triangle_api = nullptr;
-    void* renderer = nullptr;
-};
-
 Viewport::Viewport(HWND window, bool software) : state(std::make_unique<State>(window, software)) {}
 Viewport::~Viewport() = default;
+
+void Viewport::set_scene_animation_override(
+    std::uint64_t entity_id, std::string const& clip_reference, float playback_rate) {
+    if(!entity_id || !std::isfinite(playback_rate) ||
+       playback_rate<0.1f || playback_rate>4.f)
+        throw std::invalid_argument("Invalid skeletal animation playback rate/entity");
+    if(clip_reference.empty()) {
+        state->script_animation_overrides.erase(entity_id);
+        return;
+    }
+    auto const at=clip_reference.rfind('@');
+    if(clip_reference.size()>512 || at==std::string::npos || at<4 ||
+       at+1>=clip_reference.size() ||
+       clip_reference.substr(at-4,4)!=".ycd" ||
+       clip_reference.find("..")!=std::string::npos ||
+       clip_reference.find('\\')!=std::string::npos ||
+       clip_reference.find(':')!=std::string::npos)
+        throw std::invalid_argument("Invalid native YCD animation reference");
+    auto& active=state->script_animation_overrides[entity_id];
+    active.clip_reference=clip_reference;
+    active.playback_rate=playback_rate;
+}
 
 void Viewport::set_detail_level(std::string_view value) {
     if(value!="balanced" && value!="high" && value!="ultra" &&
@@ -889,9 +42,33 @@ std::string Viewport::detail_level() const {
     return state->detail_level;
 }
 
+bool Viewport::request_scene_frame_capture() {
+    if(!state || !state->capture_api || !state->renderer)return false;
+    return state->capture_api->request(state->renderer)!=0;
+}
+std::optional<Viewport::CapturedFrame> Viewport::read_scene_frame_capture() const {
+    if(!state || !state->capture_api || !state->renderer)return std::nullopt;
+    std::uint32_t w=0,h=0;
+    auto const* api=state->capture_api;
+    if(!api->read(state->renderer,nullptr,0,&w,&h)||
+       w<64 || h<64 || w>3840 || h>2160)return std::nullopt;
+    CapturedFrame image;
+    image.width=w;image.height=h;
+    image.rgba.resize(std::size_t(w)*h*4u);
+    if(!api->read(state->renderer,image.rgba.data(),
+                  static_cast<std::uint32_t>(image.rgba.size()),&w,&h))
+        return std::nullopt;
+    return image;
+}
+
 std::string Viewport::renderer_provider_name() const
 {
     return state->module->provider();
+}
+
+bool Viewport::supports_shader_hot_reload() const noexcept {
+    return state && state->renderer &&
+        (state->shader_reload_v2 || state->shader_reload_api);
 }
 
 std::string Viewport::renderer_provider_version() const
@@ -935,6 +112,20 @@ std::optional<Viewport::PickResult> Viewport::poll_actor_gpu_pick(
         return PickResult{PickStatus::Ready,it->second};
     return PickResult{PickStatus::Stale,-1}; // entity removed during GPU work
 }
+std::optional<Vector3> Viewport::attached_local_point(
+    std::uint64_t child_entity,Vector3 weapon_local_point,
+    CameraPose const* camera_pose) const
+{
+    if(!state || !child_entity || !weapon_local_point.valid())
+        return std::nullopt;
+    auto const found=state->skeletal_frame.attachments.find(child_entity);
+    if(found==state->skeletal_frame.attachments.end())return std::nullopt;
+    auto const transform=state->skeletal_frame.attachment_transform(
+        found->second,camera_pose);
+    if(!transform)return std::nullopt;
+    auto const result=transform->transform_position(weapon_local_point);
+    return result.valid()?std::optional<Vector3>{result}:std::nullopt;
+}
 std::optional<int> Viewport::pick_actor_gpu(
     std::uint32_t x,std::uint32_t y) const {
     if(!state || !state->renderer)return std::nullopt;
@@ -963,6 +154,15 @@ std::optional<int> Viewport::pick_actor_gpu(
     if(static_cast<std::size_t>(draw_index)>=state->cube_actor_map.size())
         return std::nullopt;
     return state->cube_actor_map[static_cast<std::size_t>(draw_index)];
+}
+void Viewport::set_preview_static_cache(bool enabled) {
+    if(state->preview_static_cache_enabled==enabled)return;
+    state->preview_static_cache_enabled=enabled;
+    state->preview_material_cache.clear();
+    state->preview_cache_vertices=0;
+}
+std::pair<std::size_t,std::size_t> Viewport::preview_cache_frame_stats() const noexcept {
+    return {state->preview_frame_hits,state->preview_frame_vertices};
 }
 ViewportAssetStats Viewport::asset_stats() const noexcept
 {
@@ -1106,7 +306,9 @@ void Viewport::pose_character(Vector3 foot, float heading, float dt,
         Vector3{eye.x+std::sin(heading)*std::cos(pitch)*0.47f,
                 eye.y-1.37f+std::sin(pitch)*0.47f,
                 eye.z+std::cos(heading)*std::cos(pitch)*0.47f}:foot;
-    auto const to_world = actor.skeleton_to_mesh * create_rotation_y(-heading) *
+    auto const to_world = actor.skeleton_to_mesh *
+        viewport_detail::skeletal_presentation_basis(to_skeleton) *
+        create_rotation_y(-heading) *
         (first_person_arms?create_rotation_x(-pitch):create_rotation_x(0.f)) *
         create_translation({anchor.x,anchor.y,anchor.z});
     auto& matrices = actor.matrices;
@@ -1323,27 +525,9 @@ void Viewport::set_asset_sources(std::filesystem::path const& root,
                                  std::filesystem::path const& shared_root)
 {
     namespace fs = std::filesystem;
-    auto common=shared_root;
-    if (common.empty()) {
-        auto search_ancestors=[](fs::path from)->fs::path {
-            for (auto dir=std::move(from); !dir.empty();) {
-                auto const candidate=dir/"engine/northstarcpp/resources/sharedAssets";
-                if (fs::is_directory(candidate)) return candidate;
-                auto const parent=dir.parent_path();
-                if (parent==dir) break;
-                dir=parent;
-            }
-            return {};
-        };
-        if (!root.empty()) common=search_ancestors(fs::absolute(root));
-        if (common.empty()) {
-            std::array<wchar_t,32768> executable{};
-            auto length=GetModuleFileNameW(nullptr,executable.data(),
-                static_cast<DWORD>(executable.size()));
-            if (length && length<executable.size())
-                common=search_ancestors(fs::path(executable.data()).parent_path());
-        }
-    }
+    auto const common=shared_root.empty()?
+        asset_paths::locate_shared_root(root,asset_paths::executable_dir()):
+        shared_root;
     auto assets=std::make_unique<AssetStore>();
     if (!archive.empty()) {
         assets->mount_runtime_archives();
@@ -1352,7 +536,84 @@ void Viewport::set_asset_sources(std::filesystem::path const& root,
     } else if (!root.empty()) {
         assets->mount_project_assets(root,common);
     }
+    // Old project keys must not alias a new project's GPU geometry.
+    if(state->rigid_api &&
+       !state->rigid_api->clear_meshes(state->renderer))
+        throw state->module->error("Cannot reset rigid GPU mesh residency");
+    state->uploaded_rigid_meshes.clear();
+    state->rigid_inactive_frames.clear();
+    state->rejected_rigid_meshes.clear();
+    state->rigid_opaque_materials.clear();
+    state->preview_material_cache.clear();
+    state->preview_cache_vertices=0;
+    // Stop and join the old project's decode worker BEFORE destroying its VFS.
+    // A new project never sees stale results from the previous asset mount.
+    state->native_model_preloader.reset();
     state->project_assets=std::move(assets);
+    // Project switches invalidate the previous world's sky and GPU atlas.
+    state->retained_sky.reset();
+    state->sky_gpu_uploaded=false;
+    if(!state->api->set_sky(state->renderer,nullptr))
+        throw state->module->error("Cannot invalidate previous project sky");
+    // Sky source images are owned by the currently mounted VFS, never global.
+    state->sky_source_layers.reset();
+    state->sky_source_preset.clear();
+    state->sky_source_checked=false;
+    state->native_model_preloader=std::make_unique<
+        viewport_detail::NativeModelPreloader>(
+        [store=state->project_assets.get()](std::string const& name) {
+            return load_native_model_resource(*store,name,true);
+        });
+    state->vehicle_models_prewarm_queued=false;
+    // Must validate against the NEW mount, not the previous project root.
+    state->source_project_root=archive.empty()?
+        std::filesystem::absolute(root):std::filesystem::path{};
+    // Generic project-owned prefetch hints are small XML data, not gameplay
+    // policy. They allow MT28 and other large models to decode while a menu
+    // is displayed, before the first visible frame of the destination scene.
+    try {
+        constexpr char manifest[]="preload/models.xml";
+        std::uint64_t bytes=0;
+        try {bytes=state->project_assets->size(manifest);}
+        catch(std::runtime_error const&) {
+            // Optional on all other projects; absence is not a warning.
+        }
+        if(bytes>0 && bytes<=65536) {
+            auto raw=state->project_assets->read(manifest);
+            std::string xml(raw.begin(),raw.end());
+            if(xml.find("<!DOCTYPE")!=std::string::npos ||
+               xml.find("<!ENTITY")!=std::string::npos)
+                throw std::invalid_argument("Prefab preload DTD not allowed");
+            boost::property_tree::ptree tree;
+            std::istringstream input(xml);
+            boost::property_tree::read_xml(input,tree,
+                boost::property_tree::xml_parser::trim_whitespace);
+            auto const& root=tree.get_child("NorthStarPreload");
+            if(root.get<int>("<xmlattr>.version")!=1)
+                throw std::invalid_argument("Unsupported model preload version");
+            std::size_t total=0;
+            for(auto const& element:root) {
+                if(element.first!="Model")continue;
+                auto const name=element.second.get<std::string>(
+                    "<xmlattr>.asset","");
+                if(!viewport_detail::safe_native_preload_reference(
+                    name,state->source_project_root))
+                    throw std::invalid_argument("Unsafe model preload path");
+                state->native_model_preloader->enqueue(name);
+                if(++total>=24)break;
+            }
+            if(total) {
+                state->vehicle_models_prewarm_queued=true;
+                std::fprintf(stderr,
+                    "[INFO] [engine.assets] scheduled %zu full-res model preloads\n",
+                    total);
+            }
+        }
+    } catch(std::exception const& e) {
+        std::fprintf(stderr,
+            "[WARN] [engine.assets] Model prefetch manifest ignored: %s\n",
+            e.what());
+    }
     // Never keep the previous project's shader when mounting a new project.
     if(state->renderer && state->ui_shaders_api) {
         if(state->ui_shaders_api->set_hlsl)
@@ -1366,12 +627,20 @@ void Viewport::set_asset_sources(std::filesystem::path const& root,
     state->source_project_root=archive.empty() ? std::filesystem::absolute(root) :
         std::filesystem::path{};
     state->cached_meshes.clear();
+    state->cached_hlod_meshes.clear();
+    state->hlod_unbakeable_assets.clear();
+    state->active_mesh_residency.clear();
     state->warned_unbound_players.clear();
     state->cached_native_skins.clear();
     state->native_playback.clear();
+    state->script_animation_overrides.clear();
     state->reported_socket_attachments.clear();
     state->last_native_frame={};
     state->cached_materials.clear();
+    // Project remount invalidates authored names and frees retained geometry
+    // from the previous scene; normal frames keep their scratch capacity.
+    state->frame_scratch.reset_project();
+    state->frame_builder.reset_project();
     state->invalid_meshes.clear();
     state->invalid_materials.clear();
     state->mesh_vertices.clear();
@@ -1448,11 +717,176 @@ void Viewport::set_asset_sources(std::filesystem::path const& root,
 }
 
 
+void Viewport::set_sky_asset_reference(std::string const& drawable) {
+    if(drawable.empty()) {
+        state->retained_sky.reset();
+        state->sky_gpu_uploaded=false;
+        if(!state->api->set_sky(state->renderer,nullptr))
+            throw state->module->error("Cannot clear authored project sky");
+        return;
+    }
+    project_sky::validate_drawable_reference(drawable);
+    if(!state->project_assets)
+        throw std::runtime_error("Project sky needs a mounted VFS");
+    // The asset system resolves the caller-supplied drawable ID, YMAT and YTD.
+    // No file names or dictionary entries are selected by the renderer.
+    auto decoded=state->project_assets->load_drawable_resources(drawable);
+    set_sky(decoded);
+}
+
+void Viewport::configure_project_sky(std::string_view scene) {
+    project_sky::Configuration profile;
+    if(state->project_assets && !scene.empty()) {
+        try {
+            profile=project_sky::load(*state->project_assets,scene);
+        } catch(std::exception const& error) {
+            state->warn_asset("sky configuration",std::string(scene),error);
+        }
+    }
+    // Clear the previous profile before uploading drawable-only textures;
+    // the renderer selects a different color space for atmospheric data.
+    set_sky_asset_reference({});
+    set_sky_environment(SkyEnvironment{});
+    if(!profile.drawable.empty()) {
+        try {
+            set_sky_asset_reference(profile.drawable);
+        } catch(std::exception const& error) {
+            state->warn_asset("sky drawable",profile.drawable,error);
+            set_sky_asset_reference({});
+        }
+    }
+    if(profile.settings.enabled)
+        set_sky_environment(SkyEnvironment(profile.settings));
+}
+
+bool Viewport::supports_gpu_sky() const noexcept {
+    return state && state->sky_gpu_api &&
+        state->sky_gpu_api->abi_version==NORTHSTARCPP_RENDER_SKY_ABI &&
+        state->sky_gpu_api->struct_size>=sizeof(NorthStarRenderSkyApi) &&
+        state->sky_gpu_api->set_uniforms;
+}
+void Viewport::set_sky_environment(SkyEnvironment const& environment) {
+    state->sky_environment=environment;
+    const bool gpu=supports_gpu_sky();
+    if(gpu) {
+        auto const snap=environment.snapshot();
+        NorthStarGpuSkyUniforms uniforms{};
+        uniforms.sun_direction[0]=snap.sun_direction.x;
+        uniforms.sun_direction[1]=snap.sun_direction.y;
+        uniforms.sun_direction[2]=snap.sun_direction.z;
+        uniforms.sun_direction[3]=float(snap.settings.fog_density);
+        uniforms.moon_direction[0]=snap.moon_direction.x;
+        uniforms.moon_direction[1]=snap.moon_direction.y;
+        uniforms.moon_direction[2]=snap.moon_direction.z;
+        uniforms.atmosphere[0]=float(snap.daylight);
+        uniforms.atmosphere[1]=float(snap.settings.haze);
+        uniforms.atmosphere[2]=float(snap.settings.sun_intensity);
+        uniforms.atmosphere[3]=float(snap.settings.moon_intensity);
+        uniforms.cloud[0]=float(snap.settings.cloud_coverage);
+        uniforms.cloud[1]=float(snap.settings.cloud_speed);
+        uniforms.cloud[2]=float(snap.flow_phase);
+        uniforms.cloud[3]=float(snap.moon_illumination);
+        uniforms.flags[0]=snap.settings.enabled?1.f:0.f;
+        uniforms.flags[1]=snap.settings.sun?1.f:0.f;
+        uniforms.flags[2]=snap.settings.moon?1.f:0.f;
+        uniforms.flags[3]=snap.settings.clouds?1.f:0.f;
+        // Renderer supplies the live camera each frame; the snapshot is
+        // world weather state and deliberately contains no camera position.
+        if(!state->sky_gpu_api->set_uniforms(state->renderer,&uniforms))
+            throw state->module->error("GPU Sky constant update failed");
+        // One small UBO update per frame; no shader recompilation or texture
+        // re-upload when only sun/cloud motion changes.
+        if(snap.settings.enabled && state->sky_gpu_uploaded &&
+           state->sky_source_preset==snap.settings.preset)return;
+    }
+    if(!environment.settings().enabled) {
+        state->sky_gpu_uploaded=false;
+        if(state->retained_sky)set_sky(*state->retained_sky);
+        else if(!state->api->set_sky(state->renderer,nullptr))
+            throw state->module->error("Cannot clear engine.sky");
+        return;
+    }
+    // Decode authored sky-layered.fx texture slots just once per VFS mount
+    // and source preset. The exact same CPU-composited RGBA8 is sent to
+    // Vulkan and D3D12; neither provider reads a separate sky atlas.
+    auto const preset=environment.settings().preset;
+    if(!state->sky_source_checked || state->sky_source_preset!=preset) {
+        state->sky_source_checked=true;
+        state->sky_source_preset=preset;
+        state->sky_source_layers.reset();
+        if(state->project_assets) {
+            try {
+                state->sky_source_layers=viewport_detail::load_sky_source_layers(
+                    *state->project_assets,preset);
+                std::fprintf(stderr,
+                    "[INFO] [engine.sky] loaded sky.ytd/clouds.ytd preset=%s "
+                    "source_layers=4 provider=%s\\n",
+                    preset.c_str(),state->module->provider().c_str());
+            } catch(std::exception const& error) {
+                state->warn_asset("sky preset",preset,error);
+            }
+        }
+    }
+    if(state->retained_sky) {
+        set_sky(*state->retained_sky);
+        state->sky_gpu_uploaded=gpu;
+        return;
+    }
+    // A project may enable engine.sky before providing a sky model. Use a
+    // regular UV sphere with the same provider-neutral NorthStarSky contract,
+    // not a second D3D12/Vulkan-specific rendering path.
+    if(state->procedural_sky_vertices.empty()) {
+        constexpr int columns=64,rows=32;
+        constexpr float radius=180.f;
+        constexpr float pi=3.14159265358979323846f;
+        auto& vertices=state->procedural_sky_vertices;
+        auto& indices=state->procedural_sky_indices;
+        vertices.reserve((columns+1)*(rows+1));
+        indices.reserve(columns*rows*6);
+        for(int y=0;y<=rows;++y) {
+            const auto v=float(y)/rows;
+            const auto altitude=(v-.5f)*pi;
+            for(int x=0;x<=columns;++x) {
+                const auto u=float(x)/columns;
+                const auto azimuth=u*2.f*pi;
+                const auto cos_alt=std::cos(altitude);
+                vertices.push_back({radius*cos_alt*std::sin(azimuth),
+                    radius*std::sin(altitude),
+                    radius*cos_alt*std::cos(azimuth),u,v});
+            }
+        }
+        for(int y=0;y<rows;++y)for(int x=0;x<columns;++x) {
+            const auto a=std::uint32_t(y*(columns+1)+x);
+            const auto b=a+1u;
+            const auto c=a+columns+1u;
+            indices.insert(indices.end(),{a,c,b,b,c,c+1u});
+        }
+    }
+    constexpr std::uint32_t width=512u,height=256u;
+    auto pixels=gpu?
+        SkyEnvironment::render_gpu_cloud_rgba(width,height,
+            state->sky_source_layers?&*state->sky_source_layers:nullptr):
+        environment.render_rgba(width,height,nullptr,
+            state->sky_source_layers?&*state->sky_source_layers:nullptr);
+    auto const& vertices=state->procedural_sky_vertices;
+    auto const& indices=state->procedural_sky_indices;
+    NorthStarSky const sky{vertices.data(),
+        static_cast<std::uint32_t>(vertices.size()),
+        indices.data(),static_cast<std::uint32_t>(indices.size()),
+        pixels.data(),width,height,1.f,1.f,1.f};
+    if(!state->api->set_sky(state->renderer,&sky))
+        throw state->module->error("Cannot submit procedural engine.sky dome");
+    state->sky_gpu_uploaded=gpu;
+}
+
 void Viewport::set_sky(shared_assets::DrawableResources const& resources)
 {
     // Preserve authored sky resources across an optional render-provider
     // fallback when material-capable geometry first enters the scene.
-    state->retained_sky=resources;
+    // Subsequent atmosphere refreshes reuse the retained asset rather than
+    // cloning the full YDD/YTD sky package on every time-of-day update.
+    if(!state->retained_sky || &resources!=&*state->retained_sky)
+        state->retained_sky=resources;
     if (resources.drawable.meshes.size() != 1 || resources.materials.empty())
         throw std::runtime_error("Skydome requires one authored mesh and its YMAT material");
     auto const& mesh = resources.drawable.meshes.front();
@@ -1496,6 +930,23 @@ void Viewport::set_sky(shared_assets::DrawableResources const& resources)
         procedural_clouds=make_perlin_cloud_rgba(settings);
         pixels=procedural_clouds.data();
     }
+    std::vector<std::uint8_t> atmosphere_pixels;
+    if(state->sky_environment.settings().enabled) {
+        if(supports_gpu_sky()) {
+            // GPU shaders consume an immutable cloud field map, not the
+            // already-coloured CPU atmosphere as a false cloud mask.
+            width=1024u;height=512u;
+            atmosphere_pixels=SkyEnvironment::render_gpu_cloud_rgba(
+                width,height,
+                state->sky_source_layers?&*state->sky_source_layers:nullptr);
+        }else {
+            atmosphere_pixels=state->sky_environment.render_rgba(
+                width,height,pixels,
+                state->sky_source_layers?&*state->sky_source_layers:nullptr);
+        }
+        pixels=atmosphere_pixels.data();
+        tint[0]=tint[1]=tint[2]=1.f;
+    }
     NorthStarSky const sky{verts.data(), static_cast<std::uint32_t>(verts.size()),
         mesh.indices.data(), static_cast<std::uint32_t>(mesh.indices.size()),
         pixels, width, height,
@@ -1510,1381 +961,6 @@ void Viewport::set_sky(shared_assets::DrawableResources const& resources)
 }
 
 
-// Optional per-entity authoring component uses one of the native YTD
-// albedo entry names. Unspecified map proxies derive their surface from
-// existing scene layer/actor names without changing collision or transforms.
-static std::uint32_t world_surface_category(std::string name) {
-    std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if(name=="rock_moss" || name.find("rock")!=std::string::npos ||
-       name.find("cliff")!=std::string::npos ||
-       name.find("perimeter")!=std::string::npos)return 2;
-    if(name=="terrain_forest_floor" ||
-       name.find("forest")!=std::string::npos ||
-       name.find("grass")!=std::string::npos)return 3;
-    if(name=="ground_sand" || name.find("sand")!=std::string::npos ||
-       name.find("terrain")!=std::string::npos ||
-       name.find("ground")!=std::string::npos ||
-       name.find("deck")!=std::string::npos ||
-       name.find("platform")!=std::string::npos)return 1;
-    return 0;
-}
-
-void Viewport::draw(Scene const& scene, int selected, bool verify_pixels, PhysicsScene const* physics,
-                    FpsArena const* fps, bool paused, CameraPose const* camera_pose,
-                    SceneWorld const* scene_world, bool show_fps_overlay,
-                    bool show_streaming_debug, ViewportGizmo const* gizmo)
-{
-    // One animation clock per Viewport; paused scenes freeze their pose.
-    auto const now=std::chrono::steady_clock::now();
-    float delta=0.f;
-    if(state->last_native_frame!=std::chrono::steady_clock::time_point{})
-        delta=std::clamp(std::chrono::duration<float>(
-            now-state->last_native_frame).count(),0.f,0.1f);
-    state->last_native_frame=now;
-    if(paused)delta=0.f;
-    auto& skeletal_frame=state->skeletal_frame;
-    diagnostics::FrameProfileScope::measure_current(diagnostics::FrameStage::animation,
-        [&] { skeletal_frame.prepare(scene); });
-    if(skeletal_frame.has_cycles)
-        std::fprintf(stderr,"[WARN] [engine.scene] Cyclic bone attachment ignored\n");
-    auto const& animation_bindings=skeletal_frame.animations;
-    struct FirstPersonView {
-        float forward=0.55f, drop=0.98f, arm_pitch=55.f;
-    };
-    std::unordered_map<std::uint64_t,FirstPersonView> fps_visuals;
-
-    std::unordered_set<std::uint64_t> active_entities;
-    active_entities.reserve(scene.objects.size());
-    for(auto const& entity:scene.objects)
-        if(entity.node.id)active_entities.insert(entity.node.id);
-    for(auto it=state->native_playback.begin();
-        it!=state->native_playback.end();) {
-        if(!active_entities.count(it->first))
-            it=state->native_playback.erase(it);
-        else ++it;
-    }
-    // Presentation-only. The same persistent Entity/YDD/YMT/YCD is
-    // rendered using its arm-weighted triangles when the camera enters FPS.
-    // Never mutate the world scene, entity identity, or animation playback.
-    if(camera_pose && !gizmo)
-        for(auto const& component:scene.components) {
-            if(component.type!="engine.model.visual_mode" ||
-               component.version!=1 || !component.entity_id ||
-               component.payload.size()>128)continue;
-            std::istringstream input(component.payload);
-            std::string mode,extra;
-            FirstPersonView view;
-            if(!(input>>mode>>view.forward>>view.drop>>view.arm_pitch) ||
-               mode!="first_person_arms" ||
-               (input>>extra) ||
-               !std::isfinite(view.forward) || view.forward<0.f ||
-               view.forward>3.f || !std::isfinite(view.drop) ||
-               view.drop<0.f || view.drop>3.f ||
-               !std::isfinite(view.arm_pitch) ||
-               std::abs(view.arm_pitch)>180.f)continue;
-            fps_visuals[component.entity_id]=view;
-        }
-    for(auto it=state->native_playback.begin();
-        it!=state->native_playback.end();) {
-        if(!animation_bindings.count(it->first))
-            it=state->native_playback.erase(it);
-        else ++it;
-    }
-    state->asset_stats={};
-    // A camera/scene redraw makes old GPU picking snapshots obsolete.
-    // Invalidate logically; provider keeps in-flight resources until its fence.
-    ++state->pick_generation;
-    if(state->pick_async_api &&
-       !state->pick_async_api->invalidate_before(
-           state->renderer,state->pick_generation))
-        throw state->module->error("Cannot invalidate stale GPU pick requests");
-    state->pick_entity_actor.clear();
-    state->pick_scene_complete=false;
-    auto& cubes = state->cubes;
-    cubes.clear();
-    state->cube_actor_map.clear();
-    auto& surface_ids = state->surface_ids;
-    surface_ids.clear();
-    std::unordered_map<std::uint64_t,std::uint32_t> surface_overrides;
-    if(state->world_surfaces_ready) {
-        for(auto const& component:scene.components) {
-            if(component.type=="engine.world.surface" &&
-               component.version==1 && component.entity_id!=0 &&
-               component.payload.size()<=48) {
-                std::string const name(component.payload.begin(),
-                                       component.payload.end());
-                // Plugin authoring uses exact dictionary entry names.
-                // Keep heuristic name matching only for legacy scene actors.
-                auto const id=name=="ground_sand"?1u:
-                    name=="rock_moss"?2u:
-                    name=="terrain_forest_floor"?3u:0u;
-                if(id)surface_overrides[component.entity_id]=id;
-            }
-        }
-    }
-    auto& mesh_vertices=state->mesh_vertices;
-    mesh_vertices.clear();
-    bool const collect_pick=state->pick_v2_api && gizmo && camera_pose && !fps;
-    bool pick_complete=true;
-    std::vector<NorthStarRenderPickVertex> pick_triangles;
-    std::vector<std::uint64_t> pick_cube_entities;
-    std::uint64_t current_pick_entity=0;
-    auto add_pick=[&](Vector3 const& position) {
-        if(!collect_pick || !current_pick_entity || !pick_complete)return;
-        if(pick_triangles.size()>=180000u) {pick_complete=false;return;}
-        pick_triangles.push_back({position.x,position.y,position.z,0,
-                                  current_pick_entity});
-    };
-    // Authored object materials remain a separate triangle stream with
-    // preserved normals/UVs. The renderer may be replaced by a plugin
-    // exporting the same optional versioned materials ABI.
-    std::unordered_map<std::uint64_t,std::string> assigned_materials;
-    for(auto const& component:scene.components) {
-        if(component.type!="northstarcpp.editor.material" ||
-           component.version!=1 || !component.entity_id || component.payload.empty())
-            continue;
-        if(component.payload.size()>1024)
-            throw std::runtime_error("Oversized scene material reference");
-        assigned_materials[component.entity_id]=component.payload;
-    }
-    // Native drawable sections carry their own YMAT references; they must
-    // be rendered through UV/PBR batches even without an authored override.
-    bool has_native_materials=false;
-    if(state->project_assets) for(auto const& object:scene.objects) {
-        auto path=object.node.asset.substr(0,object.node.asset.find('@'));
-        if(path.size()>=4 &&
-           (path.compare(path.size()-4,4,".ydd")==0 ||
-            path.compare(path.size()-4,4,".ydr")==0)) {
-            has_native_materials=true;
-            break;
-        }
-    }
-    if((!assigned_materials.empty() || has_native_materials) &&
-       !state->material_api && !state->material_api_v2) {
-        if(state->module->provider()=="d3d12") {
-            // D3D12 retains its native skydome/HUD path for scenes without
-            // authored PBR assets. Until its optional material extension
-            // is present, use D3D11 rather than drawing UV-less proxies.
-            state->fallback_to_d3d11();
-            if(state->retained_sky) {
-                auto original_sky=*state->retained_sky;
-                set_sky(original_sky);
-            }
-        }
-        if(!state->material_api && !state->material_api_v2)
-            throw std::runtime_error(
-                "Active engine.render provider lacks native UV/PBR materials ABI");
-    }
-    std::vector<std::pair<std::string,std::vector<NorthStarMaterialVertex>>> material_draws;
-    auto& skin_batches=state->skin_batches;
-    skin_batches.begin_frame();
-    std::unordered_map<std::string,std::size_t> material_indices;
-    auto material_vertices=[&](std::string const& ref)
-        ->std::vector<NorthStarMaterialVertex>& {
-        auto [it,created]=material_indices.emplace(ref,material_draws.size());
-        if(created) {
-            if(material_draws.size()>=NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES)
-                throw std::runtime_error("Too many distinct material batches");
-            material_draws.emplace_back(ref,std::vector<NorthStarMaterialVertex>{});
-        }
-        return material_draws[it->second].second;
-    };
-    auto transformed=[&](Vector3 v,NorthStarRenderCube const& cube,
-                         Vector3 const& origin) {
-        return Vector3{
-            origin.x+cube.rotation[0]*v.x+cube.rotation[1]*v.y+cube.rotation[2]*v.z,
-            origin.y+cube.rotation[3]*v.x+cube.rotation[4]*v.y+cube.rotation[5]*v.z,
-            origin.z+cube.rotation[6]*v.x+cube.rotation[7]*v.y+cube.rotation[8]*v.z};
-    };
-    auto normal_direction=[&](Vector3 v,NorthStarRenderCube const& c) {
-        Vector3 n{c.rotation[0]*v.x+c.rotation[1]*v.y+c.rotation[2]*v.z,
-                  c.rotation[3]*v.x+c.rotation[4]*v.y+c.rotation[5]*v.z,
-                  c.rotation[6]*v.x+c.rotation[7]*v.y+c.rotation[8]*v.z};
-        auto const len=std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);
-        return len>1.e-6f?Vector3{n.x/len,n.y/len,n.z/len}:
-              Vector3{0.f,1.f,0.f};
-    };
-    auto push_material=[&](std::vector<NorthStarMaterialVertex>& dst,
-                           Vector3 position,Vector3 normal,float u,float v) {
-        if(dst.size()>=NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES)
-            throw std::runtime_error("Material mesh vertex limit exceeded");
-        dst.push_back({position.x,position.y,position.z,
-                       normal.x,normal.y,normal.z,u,v});
-        add_pick(position);
-    };
-    auto emit_procedural=[&](std::vector<NorthStarMaterialVertex>& dst,
-                             GeometryData const& data,SceneObject const& object,
-                             NorthStarRenderCube const& cube) {
-        if(data.indices.size()%3)
-            throw std::invalid_argument("Invalid procedural triangle topology");
-        for(std::size_t k=0;k<data.indices.size();k+=3) {
-            Vector3 local[3],world[3];
-            for(unsigned v=0;v<3;++v) {
-                auto const off=std::size_t(data.indices[k+v])*3;
-                if(off+2>=data.xyz.size())
-                    throw std::invalid_argument("Invalid procedural mesh index");
-                local[v]={data.xyz[off],data.xyz[off+1],data.xyz[off+2]};
-                world[v]=transformed({local[v].x*object.size,
-                    local[v].y*object.size,local[v].z*object.size},cube,
-                    object.position);
-            }
-            auto const u=Vector3{world[1].x-world[0].x,
-                world[1].y-world[0].y,world[1].z-world[0].z};
-            auto const v=Vector3{world[2].x-world[0].x,
-                world[2].y-world[0].y,world[2].z-world[0].z};
-            auto const cross=Vector3{u.y*v.z-u.z*v.y,
-                u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x};
-            auto const len=std::sqrt(cross.x*cross.x+cross.y*cross.y+cross.z*cross.z);
-            auto const n=len>1.e-6f?Vector3{cross.x/len,cross.y/len,cross.z/len}:
-                Vector3{0.f,1.f,0.f};
-            for(unsigned idx=0;idx<3;++idx) {
-                // Procedural geometry has positions only. Construct stable
-                // planar face UVs; authored OBJ UVs below are never replaced.
-                auto const& p=local[idx];
-                float tu,tv;
-                if(std::abs(n.y)>=std::max(std::abs(n.x),std::abs(n.z)))
-                    {tu=p.x;tv=p.z;}
-                else if(std::abs(n.x)>std::abs(n.z))
-                    {tu=p.z;tv=p.y;}
-                else {tu=p.x;tv=p.y;}
-                push_material(dst,world[idx],n,tu,tv);
-            }
-        }
-    };
-
-    // Components are serialized by stable authored ID. This lookup is
-    // shared by both the Qt GPU Editor and Player frame composition.
-    std::unordered_map<std::uint64_t,SceneComponentBlob const*> procedural;
-    for(auto const& component:scene.components)
-        if(component.type==geometry_primitive_component && component.entity_id)
-            procedural.emplace(component.entity_id,&component);
-    auto focus = Vector3(0.f, 0.f, 0.f);
-    int selected_render_index = -1;
-    bool const streaming = scene_world && scene_world->update_generation() > 0 &&
-        scene_world->source().objects.size() <= scene.objects.size();
-    auto const authored_count = physics ? physics->authored_object_count() :
-        (scene_world ? scene_world->source().objects.size() : scene.objects.size());
-    if (streaming) {
-        // Per-scene CPU mesh storage must obey verified cell residency.
-        // The D3D11 provider uploads the currently submitted triangle list
-        // each frame; it does not own persistent per-entity OBJ GPU handles.
-        // Drop cached OBJ meshes not used by the current visible frame, while
-        // retaining the selected item in editor authoring mode.
-        std::unordered_set<std::string> active_meshes;
-        auto include_mesh=[&](std::size_t i) {
-            auto const& path=scene.objects[i].node.asset;
-            auto const selector=path.find('@');
-            auto const extension=path.substr(0,selector);
-            if(extension.size()>=4 &&
-                (extension.compare(extension.size()-4,4,".obj")==0 ||
-                 extension.compare(extension.size()-4,4,".ydd")==0 ||
-                 extension.compare(extension.size()-4,4,".ydr")==0))
-                active_meshes.insert(path);
-        };
-        for(auto const i:scene_world->visible_indices())include_mesh(i);
-        // Spawned objects are persistent runtime entities, not authored cells.
-        for(std::size_t i=authored_count;i<scene.objects.size();++i)
-            if(scene.objects[i].node.visible) include_mesh(i);
-        if(selected>=0 && static_cast<std::size_t>(selected)<scene.objects.size())
-            include_mesh(static_cast<std::size_t>(selected));
-        for(auto it=state->cached_meshes.begin();it!=state->cached_meshes.end();) {
-            if(!active_meshes.count(it->first)) {
-                state->cached_native_skins.erase(it->first);
-                it=state->cached_meshes.erase(it);
-            } else ++it;
-        }
-    }
-    std::unordered_set<std::uint64_t> character_entities;
-    if(gizmo) for(auto const& c:scene.components)
-        if(c.type==player_character::pawn_type && c.entity_id)
-            character_entities.insert(c.entity_id);
-    // A visualized Pawn must not render a solid placeholder capsule on top of
-    // its own SkeletalMesh. Its collider is drawn separately by the collision
-    // debug overlay, and its child visual owns the render/picking triangles.
-    std::unordered_set<std::uint64_t> visualized_pawns;
-    if(gizmo && !character_entities.empty()) {
-        std::unordered_map<std::uint64_t,std::uint64_t> parents;
-        parents.reserve(scene.objects.size());
-        for(auto const& object:scene.objects)
-            parents.emplace(object.node.id,object.node.parent);
-        for(auto const& object:scene.objects) {
-            if(!object.node.visible || object.node.asset.empty() ||
-               state->invalid_meshes.count(object.node.asset))continue;
-            auto parent=object.node.parent;
-            for(std::size_t depth=0;parent && depth<scene.objects.size();++depth) {
-                if(character_entities.count(parent)) {
-                    visualized_pawns.insert(parent);
-                    break;
-                }
-                auto it=parents.find(parent);
-                if(it==parents.end() || it->second==parent)break;
-                parent=it->second;
-            }
-        }
-    }
-
-    for (auto const i : skeletal_frame.order) {
-        // Keep the selected editor entity editable even when HLOD substitutes
-        // its authored draw; the proxy is still allowed behind selection.
-        if (streaming && i<authored_count && !scene_world->object_visible(i) &&
-            (selected<0 || i!=static_cast<std::size_t>(selected)))
-            continue;
-        auto const& object = scene.objects[i];
-        current_pick_entity=object.node.id;
-        if(collect_pick && current_pick_entity &&
-           !state->pick_entity_actor.emplace(current_pick_entity,
-               static_cast<int>(i)).second)
-            pick_complete=false; // duplicated stable ECS identity
-        // Visibility is an authored actor property, not only a runtime-spawn
-        // flag. In particular, the Editor Outliner's eye must hide original
-        // NSCN objects as well as newly spawned ones.
-        if (!object.node.visible) continue;
-        // Detail controls native asset draw distance, never mesh reduction.
-        // Cinematic renders the original triangles at all authored distances.
-        if(camera_pose && !gizmo && state->detail_level!="cinematic" &&
-           !scene_pawn::is_local(scene,object)) {
-            auto const& asset=object.node.asset;
-            auto const path=asset.substr(0,asset.find('@'));
-            bool const native=path.size()>=4 &&
-                (path.compare(path.size()-4,4,".ydr")==0 ||
-                 path.compare(path.size()-4,4,".ydd")==0);
-            if(native) {
-                float const max_distance=state->detail_level=="balanced"?180.f:
-                    state->detail_level=="high"?480.f:1200.f;
-                auto const dx=object.position.x-camera_pose->position.x;
-                auto const dy=object.position.y-camera_pose->position.y;
-                auto const dz=object.position.z-camera_pose->position.z;
-                if(dx*dx+dy*dy+dz*dz>max_distance*max_distance)continue;
-            }
-        }
-        if ((fps || (camera_pose && selected==-2)) && scene_pawn::is_local(scene,object)) continue;
-        Vector3 position = object.position;
-        auto const view=fps_visuals.find(object.node.id);
-        bool const fps_arms=view!=fps_visuals.end() && camera_pose;
-        if(fps_arms) {
-            auto const yaw=camera_pose->yaw,pitch=camera_pose->pitch;
-            auto const d=view->second.forward;
-            // The camera is a separate scene/rig entity. Only the submitted
-            // mesh transform follows its view; the actor remains at its Pawn.
-            position={
-                camera_pose->position.x+std::sin(yaw)*std::cos(pitch)*d,
-                camera_pose->position.y-view->second.drop+std::sin(pitch)*d,
-                camera_pose->position.z+std::cos(yaw)*std::cos(pitch)*d
-            };
-        }
-        NorthStarRenderCube cube{position.x, position.y, position.z, object.size, object.color,
-            {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f}};
-        if (physics) {
-            auto const rotation = physics->orientation(i);
-            for (unsigned axis = 0; axis < 3; ++axis)
-                for (unsigned component = 0; component < 3; ++component)
-                    cube.rotation[axis * 3 + component] = rotation.elements[axis][component];
-        }
-        if (scene.version == 3) {
-            // Static authored transforms use Euler XYZ. Dynamic bodies retain
-            // their provider-authoritative physics orientation.
-            if (!physics || object.mass == 0.f) {
-                constexpr float radians = 0.01745329251994329577f;
-                float const x = object.node.rotation.x * radians;
-                float const y = object.node.rotation.y * radians;
-                float const z = object.node.rotation.z * radians;
-                float const sx = std::sin(x), cx = std::cos(x);
-                float const sy = std::sin(y), cy = std::cos(y);
-                float const sz = std::sin(z), cz = std::cos(z);
-                float const basis[9] = {
-                    cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
-                    sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
-                    -sy, cy * sx, cy * cx
-                };
-                std::copy(std::begin(basis), std::end(basis),
-                          std::begin(cube.rotation));
-            }
-            if(fps_arms) {
-                // Same authored mesh and skeletal animation; only view-space
-                // orientation changes. No second arms asset is loaded.
-                auto const yaw=camera_pose->yaw;
-                auto const pitch=view->second.arm_pitch*0.01745329251994329577f
-                    -camera_pose->pitch;
-                float const sx=std::sin(pitch),cx=std::cos(pitch);
-                float const sy=std::sin(yaw),cy=std::cos(yaw);
-                float const basis[9]={
-                    cy, sy*sx, sy*cx,
-                    0.f, cx, -sx,
-                    -sy, cy*sx, cy*cx
-                };
-                std::copy(std::begin(basis),std::end(basis),
-                          std::begin(cube.rotation));
-            }
-            float const scale[3] = {object.node.scale.x, object.node.scale.y,
-                                    object.node.scale.z};
-            for (unsigned row = 0; row != 3; ++row)
-                for (unsigned column = 0; column != 3; ++column)
-                    cube.rotation[row * 3 + column] *= scale[column];
-        }
-        // Child geometry remains local to its own YDD pivot; the parent hand
-        // provides the complete world-space rotation and translation.
-        if(auto it=skeletal_frame.attachments.find(object.node.id);
-           it!=skeletal_frame.attachments.end()) {
-            auto const& a=it->second;
-            const auto resolved=skeletal_frame.attachment_transform(a,camera_pose);
-            if(!resolved)continue;
-            auto const& transform=*resolved;
-            position={transform.elements[3][0],
-                      transform.elements[3][1],
-                      transform.elements[3][2]};
-            cube.x=position.x;cube.y=position.y;cube.z=position.z;
-            if(object.size<=0.f)continue;
-            if(state->reported_socket_attachments.insert(object.node.id).second)
-                std::fprintf(stderr,
-                    "[INFO] [engine.scene] bone_attachment=PASS child=%llu parent=%llu joint=%s at=(%.3f,%.3f,%.3f) axis_z=(%.3f,%.3f,%.3f)\n",
-                    static_cast<unsigned long long>(object.node.id),
-                    static_cast<unsigned long long>(a.parent),
-                    a.bone.c_str(),position.x,position.y,position.z,
-                    transform.elements[2][0],
-                    transform.elements[2][1],
-                    transform.elements[2][2]);
-            for(unsigned row=0;row<3;++row)
-                for(unsigned col=0;col<3;++col)
-                    cube.rotation[row*3+col]=
-                        transform.elements[col][row]/object.size;
-        }
-        auto const material_it=assigned_materials.find(object.node.id);
-        bool const has_material=material_it!=assigned_materials.end();
-        // First-party foundation geometry, authored from the active Qt
-        // Editor palette. The GPU triangle stream is shared with game runtime
-        // and remains behind WorldPartition's verified visibility check.
-        auto const native_shape=procedural.find(object.node.id);
-        if(state->triangle_api && native_shape!=procedural.end() &&
-           object.node.asset.empty()) {
-            auto const& component=*native_shape->second;
-            auto found=state->cached_geometry.find(component.payload);
-            if(found==state->cached_geometry.end()) {
-                NorthStarGeometryRequest request{};
-                if(!decode_geometry_primitive_component(component,request))
-                    throw std::runtime_error("Unsupported engine.geometry component");
-                if(!state->geometry_service)
-                    state->geometry_service=std::make_unique<GeometryService>();
-                if(state->cached_geometry.size()>=128)
-                    state->cached_geometry.clear();
-                auto geometry=state->geometry_service->generate(request);
-                found=state->cached_geometry.emplace(component.payload,
-                                                       std::move(geometry)).first;
-            }
-            auto const& geometry=found->second;
-            if(has_material) {
-                auto& batch=material_vertices(material_it->second);
-                emit_procedural(batch,geometry,object,cube);
-                if(static_cast<int>(i)==selected || (selected==-2 && scene_pawn::is_local(scene,object)))
-                    focus=position;
-                continue;
-            }
-            if(geometry.indices.size()%3!=0 ||
-               mesh_vertices.size()+geometry.indices.size()>300000)
-                throw std::runtime_error("Scene procedural geometry triangle budget exceeded");
-            std::uint32_t const color=static_cast<int>(i)==selected ?
-                0xffd474u : object.color;
-            for(auto const vertex:geometry.indices) {
-                auto const offset=static_cast<std::size_t>(vertex)*3u;
-                float const x=geometry.xyz[offset]*object.size;
-                float const y=geometry.xyz[offset+1u]*object.size;
-                float const z=geometry.xyz[offset+2u]*object.size;
-                mesh_vertices.push_back({
-                    object.position.x+cube.rotation[0]*x+cube.rotation[1]*y+
-                        cube.rotation[2]*z,
-                    object.position.y+cube.rotation[3]*x+cube.rotation[4]*y+
-                        cube.rotation[5]*z,
-                    object.position.z+cube.rotation[6]*x+cube.rotation[7]*y+
-                        cube.rotation[8]*z,
-                    color});
-                auto const& v=mesh_vertices.back();
-                add_pick({v.x,v.y,v.z});
-            }
-            if(static_cast<int>(i)==selected || (selected==-2 && scene_pawn::is_local(scene,object)))
-                focus=position;
-            continue;
-        }
-        // Do not silently use an unrelated sample character for an actor
-        // without an authored model. The Inspector is the source of truth
-        // for player geometry, including prefab child nodes. In the editor,
-        // an unbound player remains selectable in Outliner but is not a cube.
-        std::string resource_path=object.node.asset;
-        if(resource_path.empty() && gizmo &&
-           visualized_pawns.count(object.node.id)) {
-            if(static_cast<int>(i)==selected)focus=position;
-            continue; // a genuine child model represents this logical Pawn
-        }
-        if(resource_path.empty() && gizmo &&
-           character_entities.count(object.node.id) &&
-           native_shape==procedural.end()) {
-            auto const marker_start=mesh_vertices.size();
-            if(state->triangle_api &&
-               editor_character_marker::append(mesh_vertices,object,
-                   static_cast<int>(i)==selected)) {
-                for(auto k=marker_start;k<mesh_vertices.size();++k) {
-                    auto const& v=mesh_vertices[k];
-                    add_pick({v.x,v.y,v.z});
-                }
-                if(static_cast<int>(i)==selected)focus=position;
-                continue;
-            }
-            // Renderer extension unavailable or triangle budget exhausted;
-            // fall through to the old cube proxy rather than hiding the actor.
-            if(state->warned_unbound_players.insert(object.node.id).second)
-                std::fprintf(stderr,
-                    "[WARN] [editor.viewport] Pawn ID %llu has no model asset; "
-                    "using fallback proxy (assign a YDD/YDR/OBJ).\n",
-                    static_cast<unsigned long long>(object.node.id));
-            // Proceed to the fallback proxy.
-        }
-        auto const selector=resource_path.find('@');
-        auto const extpath=resource_path.substr(0,selector);
-        bool const is_scene_mesh=extpath.size()>4 &&
-            (extpath.compare(extpath.size()-4,4,".obj")==0 ||
-             extpath.compare(extpath.size()-4,4,".ydd")==0 ||
-             extpath.compare(extpath.size()-4,4,".ydr")==0);
-        // Never represent a referenced native mesh as a normal color cube:
-        // a missing renderer extension is a capability error, not a model.
-        if(is_scene_mesh && (!state->triangle_api || !state->project_assets))
-            throw std::runtime_error(
-                "Scene mesh requires engine.render triangles ABI and mounted "
-                "engine.assets VFS. Check the selected provider.");
-        if (state->triangle_api && state->project_assets && is_scene_mesh) {
-            if(state->invalid_meshes.count(resource_path)) {
-                ++state->asset_stats.invalid_meshes;
-                continue;
-            }
-            auto found=state->cached_meshes.find(resource_path);
-            if (found==state->cached_meshes.end()) {
-                try {
-                // Directory-backed projects must not follow symlink/junction
-                // redirections when loading authored mesh assets.
-                if (!state->source_project_root.empty()) {
-                    auto relative=std::filesystem::u8path(extpath);
-                    if(relative.is_absolute())
-                        throw std::invalid_argument("Invalid absolute scene OBJ reference");
-                    auto cursor=state->source_project_root;
-                    if(!std::filesystem::exists(cursor/relative))
-                        cursor/="assets";
-                    for (auto const& part:relative) {
-                        if (part=="." || part==".." || part.is_absolute())
-                            throw std::invalid_argument("Unsafe mesh virtual path");
-                        cursor/=part;
-                        if (std::filesystem::is_symlink(cursor))
-                            throw std::invalid_argument("Redirected OBJ mesh asset");
-                    }
-                }
-                if(extpath.compare(extpath.size()-4,4,".ydd")==0 ||
-                   extpath.compare(extpath.size()-4,4,".ydr")==0) {
-                    auto const t_native=std::chrono::steady_clock::now();
-                    auto native=load_native_model_resource(
-                        *state->project_assets,resource_path,true);
-                    auto const native_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now()-t_native).count();
-                    if(native_ms>100)std::fprintf(stderr,
-                        "[PERF] [engine.assets] native_model %s %lld ms\n",
-                        resource_path.c_str(),static_cast<long long>(native_ms));
-                    if(!native.unresolved_materials.empty())
-                        std::fprintf(stderr,
-                            "[WARN] [engine.assets] Model '%s': %zu unresolved YMAT slots; "
-                            "using neutral PBR fallbacks.\\n",
-                            resource_path.c_str(),native.unresolved_materials.size());
-                    for(auto& entry:native.materials)
-                        state->cached_materials.try_emplace(
-                            entry.first,std::move(entry.second));
-                    if(native.has_skin()) {
-                        State::NativeRig rig{};
-                        rig.skeleton=std::move(*native.skeleton);
-                        rig.weights=std::move(native.vertex_skin);
-                        rig.mesh_to_skeleton=native.mesh_to_skeleton;
-                        state->cached_native_skins.try_emplace(
-                            resource_path,std::move(rig));
-                    }
-                    found=state->cached_meshes.emplace(
-                        resource_path,std::move(native.mesh)).first;
-                } else {
-                    auto model=load_scene_mesh(
-                        *state->project_assets,resource_path);
-                    found=state->cached_meshes.emplace(
-                        resource_path,std::move(model)).first;
-                }
-                } catch(std::exception const& error) {
-                    ++state->asset_stats.invalid_meshes;
-                    if(state->invalid_meshes.insert(resource_path).second)
-                        state->warn_asset("mesh",resource_path,error);
-                    continue; // Only this authored mesh is omitted.
-                }
-            }
-            if(found->second.indices.empty()) {
-                ++state->asset_stats.invalid_meshes;
-                continue;
-            }
-            ++state->asset_stats.native_meshes;
-            // First-person arms are a native scene mesh, not an unsupported
-            // Character ABI or a billboard. Keep material UV and YCD skinning.
-            const bool first_person_arm_mesh=fps_arms ||
-                object.node.layer=="FirstPersonArms";
-            auto arms_skin=state->cached_native_skins.find(resource_path);
-            if(first_person_arm_mesh && arms_skin==state->cached_native_skins.end()) {
-                if(state->invalid_meshes.insert(resource_path+"#arms").second)
-                    std::fprintf(stderr,
-                        "[WARN] [engine.assets] Arm viewmodel has no native YMT skin: %s\n",
-                        resource_path.c_str());
-                continue;
-            }
-            if(first_person_arm_mesh &&
-               arms_skin->second.first_person_arm_vertices.empty()) {
-                auto& mask=arms_skin->second.first_person_arm_vertices;
-                auto const& rig=arms_skin->second;
-                auto const& joints=rig.skeleton.joints;
-                std::vector<bool> arm_joint(joints.size(),false);
-                for(std::size_t joint_index=0;joint_index<joints.size();++joint_index) {
-                    int ancestor=static_cast<int>(joint_index);
-                    for(std::size_t depth=0;ancestor>=0 && depth<joints.size();++depth) {
-                        auto const& j=joints[ancestor];
-                        if(j.name=="l_elbow" || j.name=="r_elbow" ||
-                           j.name=="l_elbow_helper" ||
-                           j.name=="r_elbow_helper") {
-                            arm_joint[joint_index]=true;break;
-                        }
-                        ancestor=j.parent;
-                    }
-                }
-                // FPS rendering intentionally begins at the elbow, not at the
-                // clavicle. Rendering the torso and shoulders under aggressive
-                // two-hand IK created long, stretched strips across the
-                // screen. Retain complete original forearm/hand triangles.
-                // Only include helper-driven vertices when both driving
-                // sources are distal arm bones; otherwise upper-arm/chest
-                // twist weights leak back into the first-person view.
-                for(std::size_t pass=0;pass<3;++pass) {
-                    for(auto const& [helper,source]:rig.skeleton.mirrored_helpers)
-                        if(helper<arm_joint.size() && source<arm_joint.size() &&
-                           arm_joint[source])arm_joint[helper]=true;
-                    for(auto const& rule:rig.skeleton.secondary_palette_constraints)
-                        if(rule.bone<arm_joint.size() &&
-                           rule.source_a<arm_joint.size() &&
-                           rule.source_b<arm_joint.size() &&
-                           (arm_joint[rule.source_a] && arm_joint[rule.source_b]))
-                            arm_joint[rule.bone]=true;
-                }
-                mask.resize(rig.weights.size());
-                std::size_t selected=0;
-                for(std::size_t vertex=0;vertex<mask.size();++vertex) {
-                    float w=0;
-                    for(unsigned inf=0;inf<8;++inf) {
-                        auto const joint=rig.weights[vertex].joints[inf];
-                        if(joint<arm_joint.size() && arm_joint[joint])
-                            w+=rig.weights[vertex].weights[inf];
-                    }
-                    // Imported Abby forearms include complex twist and finger helpers.
-                    // Viewmodel masking excludes mixed shoulder/chest vertices;
-                    // full model geometry and all eight weights remain intact.
-                    // Simple humanoid rigs retain the ordinary soft mask.
-                    const float min_arm_weight=
-                        rig.skeleton.secondary_palette_constraints.size()>32?
-                            .975f:.48f;
-                    mask[vertex]=w>=min_arm_weight?1u:0u;
-                    selected+=mask[vertex];
-                }
-                std::fprintf(stderr,
-                    "[INFO] [engine.character] Native first-person viewmodel arm vertices=%zu/%zu\n",
-                    selected,mask.size());
-            }
-            // Optional scene v1 component payload:
-            // animations/weapon/pistol/military-pistol.ycd@p-fire
-            // Only this entity animates; the shared native model is immutable.
-            MeshAsset const* selected_mesh=&found->second;
-            SkeletonPose const* gpu_skin_pose=nullptr;
-            math::float4x4 mesh_world;
-            std::optional<viewport_detail::SkinFrameBatches::Palette> gpu_skin_palette;
-            auto const animation=animation_bindings.find(object.node.id);
-            auto rig_it=state->cached_native_skins.find(resource_path);
-            if(animation!=animation_bindings.end() &&
-               rig_it!=state->cached_native_skins.end()) {
-                auto& rig=rig_it->second;
-                auto& play=state->native_playback[object.node.id];
-                if(play.mesh_source!=resource_path) {
-                    play.mesh_source=resource_path;
-                    play.pose.reset();
-                    play.cpu_mesh=MeshAsset{};
-                }
-                if(play.clip_reference!=animation->second) {
-                    play.clip_reference=animation->second;
-                    play.seconds=0.f;
-                } else play.seconds+=delta;
-                try {
-                    auto const& ref=play.clip_reference;
-                    auto const at=ref.rfind('@');
-                    if(at==std::string::npos || at<4 || at+1>=ref.size() ||
-                       ref.find("..")!=std::string::npos ||
-                       ref.find('\\')!=std::string::npos ||
-                       ref.find(':')!=std::string::npos ||
-                       ref.find('\0')!=std::string::npos ||
-                       ref.substr(at-4,4)!=".ycd")
-                        throw std::invalid_argument("Invalid native YCD clip reference");
-                    if(!rig.invalid_clips.count(ref)) {
-                        auto clip=rig.clips.find(ref);
-                        if(clip==rig.clips.end()) {
-                            auto const t_clip=std::chrono::steady_clock::now();
-                            auto loaded=load_skeletal_clips(*state->project_assets,
-                                ref.substr(0,at),{ref.substr(at+1)},rig.skeleton);
-                            auto const clip_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now()-t_clip).count();
-                            if(clip_ms>100)std::fprintf(stderr,
-                                "[PERF] [engine.animation] ycd %s %lld ms\n",
-                                ref.c_str(),static_cast<long long>(clip_ms));
-                            clip=rig.clips.emplace(ref,std::move(loaded.front())).first;
-                        }
-                        if(!play.pose)
-                            play.pose=std::make_unique<SkeletonPose>(rig.skeleton);
-                        auto& pose=*play.pose;
-                        mesh_world.identity();
-                        for(unsigned row=0;row<3;++row)
-                            for(unsigned col=0;col<3;++col)
-                                mesh_world.elements[row][col]=
-                                    cube.rotation[col*3+row]*object.size;
-                        mesh_world.elements[3][0]=position.x;
-                        mesh_world.elements[3][1]=position.y;
-                        mesh_world.elements[3][2]=position.z;
-                        std::optional<viewport_detail::GripView> grip;
-                        if(camera_pose && skeletal_frame.wants_hand_grip(object.node.id))
-                            grip=viewport_detail::GripView{camera_pose->yaw,camera_pose->pitch,fps_arms,camera_pose->position};
-                        diagnostics::FrameProfileScope::measure_current(diagnostics::FrameStage::animation,[&] {
-                            const viewport_detail::PoseInput input{rig.skeleton,clip->second,
-                                play.seconds,mesh_world,rig.mesh_to_skeleton,grip};
-                            const auto results=viewport_detail::evaluate_pose(input,pose);
-                            skeletal_frame.publish_sockets(object.node.id,rig.skeleton,pose,
-                                rig.mesh_to_skeleton,mesh_world);
-                            for(std::size_t hand=0;hand<results.size();++hand) {
-                                if(!results[hand] || !state->reported_grip_attachments.insert(
-                                        object.node.id*2+hand).second)continue;
-                                auto const& [target,actual,solved]=*results[hand];
-                                std::fprintf(stderr,
-                                    "[INFO] [engine.character] %s_grip=%s"
-                                    " target=(%.3f,%.3f,%.3f) wrist=(%.3f,%.3f,%.3f)"
-                                    " residual=%.3f\n",
-                                    fps_arms?"fps":"tps",solved?"SOLVED":"UNSOLVED",
-                                    target.x,target.y,target.z,actual.x,actual.y,actual.z,
-                                    (target-actual).magnitude());
-                            }
-                        });
-
-                        // GPU only for opaque materials supported by v1.
-                        // The CPU path remains mandatory for custom graphs,
-                        // transparent assets or external render providers.
-                        bool compatible=state->skinned_material_api &&
-                            rig.skeleton.joints.size()<=NORTHSTARCPP_SKIN_MAX_JOINTS &&
-                            rig.weights.size()==found->second.vertices.size() &&
-                            !found->second.sections.empty() &&
-                            skin_batches.draw_count()+found->second.sections.size()<=
-                                NORTHSTARCPP_RENDER_MATERIAL_MAX_BATCHES;
-                        if(compatible) {
-                            for(auto const& section:found->second.sections) {
-                                auto const& material_ref=has_material ?
-                                    material_it->second : section.material_reference;
-                                auto mat=state->cached_materials.find(material_ref);
-                                if(material_ref.empty() ||
-                                   mat==state->cached_materials.end() ||
-                                   !mat->second.graph_shader_defines.empty() ||
-                                   mat->second.blend_mode!=0 ||
-                                   mat->second.opacity!=1.f) {
-                                    compatible=false;
-                                    break;
-                                }
-                            }
-                        }
-                        if(compatible) {
-                            gpu_skin_pose=&pose;
-                        } else {
-                            skin_native_mesh_cpu_into(play.cpu_mesh,found->second,
-                                rig.skeleton,rig.weights,pose.palette(),
-                                first_person_arm_mesh?
-                                    &rig.first_person_arm_vertices:nullptr);
-                            selected_mesh=&play.cpu_mesh;
-                        }
-                    }
-                } catch(std::exception const& error) {
-                    if(rig.invalid_clips.insert(play.clip_reference).second)
-                        state->warn_asset("YCD animation",play.clip_reference,error);
-                }
-            }
-            auto const& mesh=*selected_mesh;
-            // Preserve each native MeshPart's YMAT slot and UV topology.
-            // The explicit scene material (if any) overrides every part.
-            auto arm_triangle=[&](std::size_t k) -> bool {
-                if(!first_person_arm_mesh)return true;
-                auto const& mask=arms_skin->second.first_person_arm_vertices;
-                if(k+2>=mesh.indices.size())return false;
-                for(unsigned v=0;v<3;++v) {
-                    auto const index=mesh.indices[k+v];
-                    if(index>=mask.size() || !mask[index])return false;
-                }
-                return true;
-            };
-            auto submit_range=[&](std::size_t begin,std::size_t count,
-                                  std::string const& material,std::size_t section_index) {
-                if(begin>mesh.indices.size() || count>mesh.indices.size()-begin ||
-                   count%3!=0)
-                    throw std::invalid_argument("Invalid scene mesh section range");
-                if(gpu_skin_pose) {
-                    auto& rig=rig_it->second;
-                    auto& cached=first_person_arm_mesh?rig.gpu_arm_sections:rig.gpu_sections;
-                    if(!cached) {
-                        const auto provider=state->module->provider();
-                        const auto version=state->module->version();
-                        diagnostics::FrameProfileScope::measure_current(
-                            diagnostics::FrameStage::asset_streaming,[&] {
-                                auto prepared=viewport_detail::prepare_skin_sections(
-                                    {mesh,rig.weights,first_person_arm_mesh?
-                                         &rig.first_person_arm_vertices:nullptr,provider,version},
-                                    state->skin_cache_dir);
-                                if(!state->skin_cache_dir.empty())
-                                    std::fprintf(stderr,"[INFO] [engine.assets] ydd_gpu_ddc=%s variant=%s %s\n",
-                                        prepared.cache_hit?"hit":"miss",
-                                        first_person_arm_mesh?"arms":"full",resource_path.c_str());
-                                cached=std::move(prepared.sections);
-                            });
-                    }
-                    auto const& vertices=cached->at(section_index);
-                    if(vertices.empty())return; // no arm triangles in this section
-                    if(!gpu_skin_palette)
-                        gpu_skin_palette=skin_batches.append_palette(
-                            gpu_skin_pose->palette(),mesh_world);
-                    // GPU picking has a hard budget. Never do the expensive
-                    // eight-weight CPU skin projection once that budget is
-                    // exceeded; preserve visible GPU geometry in full.
-                    if(collect_pick && pick_complete) {
-                        auto const* palette=skin_batches.palette_data(*gpu_skin_palette);
-                        for(auto const& point:vertices) {
-                            if(pick_triangles.size()>=180000u) {
-                                pick_complete=false;
-                                break;
-                            }
-                            // The visible skin shader uses world-space palette
-                            // matrices. Mirror only the position transform for
-                            // depth-correct selection; materials still use GPU skin.
-                            Vector3 weighted{};
-                            float total=0.f;
-                            for(unsigned joint=0;joint<8;++joint) {
-                                float const w=point.weights[joint];
-                                if(w<=0.f)continue;
-                                auto const index=point.joints[joint];
-                                if(index>=gpu_skin_palette->joint_count) {
-                                    pick_complete=false;break;
-                                }
-                                auto const* m=palette+std::size_t(index)*16;
-                                weighted.x+=w*(point.x*m[0]+point.y*m[4]+point.z*m[8]+m[12]);
-                                weighted.y+=w*(point.x*m[1]+point.y*m[5]+point.z*m[9]+m[13]);
-                                weighted.z+=w*(point.x*m[2]+point.y*m[6]+point.z*m[10]+m[14]);
-                                total+=w;
-                            }
-                            if(total<=1.e-5f)pick_complete=false;
-                            else add_pick(weighted);
-                        }
-                    }
-                    skin_batches.add_draw(state->cached_materials.at(material),
-                                          vertices,*gpu_skin_palette);
-                    return;
-                }
-                if(!material.empty()) {
-                    if(!state->material_api && !state->material_api_v2)
-                        throw std::runtime_error(
-                            "Native YDD/YDR requires render Materials ABI v1 or v2");
-                    auto& batch=material_vertices(material);
-                    for(std::size_t k=begin;k<begin+count;++k) {
-                        if(!arm_triangle(begin+((k-begin)/3)*3))continue;
-                        auto const& v=mesh.vertices.at(mesh.indices[k]);
-                        auto const point=transformed({
-                            v.position.x*object.size,v.position.y*object.size,
-                            v.position.z*object.size},cube,position);
-                        auto const normal=normal_direction(v.normal,cube);
-                        push_material(batch,point,normal,v.u,v.v);
-                    }
-                } else {
-                    if(mesh_vertices.size()+count>300000)
-                        throw std::runtime_error("Scene triangle budget exceeded");
-                    auto const color=static_cast<int>(i)==selected ?
-                        0xffd474u : object.color;
-                    for(std::size_t k=begin;k<begin+count;++k) {
-                        if(!arm_triangle(begin+((k-begin)/3)*3))continue;
-                        auto const& v=mesh.vertices.at(mesh.indices[k]);
-                        auto const world=transformed({
-                            v.position.x*object.size,v.position.y*object.size,
-                            v.position.z*object.size},cube,position);
-                        mesh_vertices.push_back({world.x,world.y,world.z,color});
-                        add_pick(world);
-                    }
-                }
-            };
-            if(!mesh.sections.empty()) {
-                for(std::size_t index=0;index<mesh.sections.size();++index) {
-                    auto const& section=mesh.sections[index];
-                    submit_range(section.first_index,section.index_count,
-                        has_material ? material_it->second : section.material_reference,index);
-                }
-            } else {
-                submit_range(0,mesh.indices.size(),
-                    has_material ? material_it->second : std::string{},0);
-            }
-            if (static_cast<int>(i)==selected || (selected==-2 && scene_pawn::is_local(scene,object)))
-                focus=position;
-            continue;
-        }
-        if(has_material) {
-            // The default scene cube also participates in the exact same
-            // material pipeline. Its six faces have independent 0..1 UVs.
-            // This is a real GPU material draw, not an assigned image on
-            // the old color-only cube proxy.
-            static constexpr float faces[6][4][3]{
-                {{-1,-1, 1},{ 1,-1, 1},{ 1, 1, 1},{-1, 1, 1}},
-                {{ 1,-1,-1},{-1,-1,-1},{-1, 1,-1},{ 1, 1,-1}},
-                {{-1, 1, 1},{ 1, 1, 1},{ 1, 1,-1},{-1, 1,-1}},
-                {{-1,-1,-1},{ 1,-1,-1},{ 1,-1, 1},{-1,-1, 1}},
-                {{ 1,-1, 1},{ 1,-1,-1},{ 1, 1,-1},{ 1, 1, 1}},
-                {{-1,-1,-1},{-1,-1, 1},{-1, 1, 1},{-1, 1,-1}}
-            };
-            static const Vector3 normals[6]{{0,0,1},{0,0,-1},
-                {0,1,0},{0,-1,0},{1,0,0},{-1,0,0}};
-            static constexpr unsigned triangles[6]{0,1,2,0,2,3};
-            static constexpr float uvs[4][2]{{0,1},{1,1},{1,0},{0,0}};
-            auto& batch=material_vertices(material_it->second);
-            auto const middle=Vector3{
-                object.position.x,object.position.y+object.size*.5f,
-                object.position.z};
-            for(unsigned face=0;face<6;++face) {
-                auto const normal=normal_direction(normals[face],cube);
-                for(auto const index:triangles) {
-                    auto const& v=faces[face][index];
-                    auto const point=transformed({
-                        v[0]*object.size*.5f,v[1]*object.size*.5f,
-                        v[2]*object.size*.5f},cube,middle);
-                    push_material(batch,point,normal,uvs[index][0],uvs[index][1]);
-                }
-            }
-            if(static_cast<int>(i)==selected ||
-               (selected==-2 && scene_pawn::is_local(scene,object)))focus=position;
-            continue;
-        }
-        if (static_cast<int>(i) == selected) {
-            selected_render_index = static_cast<int>(cubes.size());
-            focus = position;
-        } else if (selected == -2 && scene_pawn::is_local(scene,object)) {
-            focus = position;
-        }
-        if(state->world_surfaces_ready) {
-            auto const over=surface_overrides.find(object.node.id);
-            auto const id=over!=surface_overrides.end()?over->second:
-                world_surface_category(object.node.layer.empty()?object.name:
-                    object.node.layer+" "+object.name);
-            surface_ids.push_back(id);
-            if(id)cube.rgb=0xffffffu; // preserve source surface albedo
-        }
-        state->cube_actor_map.resize(cubes.size()+1,-1);
-        state->cube_actor_map.back()=static_cast<int>(i);
-        cubes.push_back(cube);
-        if(collect_pick)pick_cube_entities.push_back(current_pick_entity);
-        ++state->asset_stats.cube_proxies;
-    }
-
-    if (fps) focus = fps->eye(scene);
-    if (camera_pose) focus = camera_pose->position;
-
-    // Two-level runtime HLOD: one conservative AABB proxy replaces multiple
-    // distant static draw calls. Original physics/ECS objects are untouched.
-    if (streaming) {
-        for (auto const& proxy:scene_world->hlod_proxies()) {
-            if (cubes.size()>=max_scene_objects) break;
-            NorthStarRenderCube lod{};
-            lod.x=proxy.center.x;
-            lod.y=proxy.center.y-0.5f; // provider adds size*0.5 to Y
-            lod.z=proxy.center.z;
-            lod.size=1.f;
-            lod.rgb=proxy.color;
-            lod.rotation[0]=std::max(0.04f,proxy.half_extent.x*2.f);
-            lod.rotation[4]=std::max(0.04f,proxy.half_extent.y*2.f);
-            lod.rotation[8]=std::max(0.04f,proxy.half_extent.z*2.f);
-            cubes.push_back(lod);
-        }
-    }
-    // In-editor streaming visualization. Render 3D cell AABB edges through
-    // the same GPU provider, without exposing debug-specific ABI pointers.
-    // Limit work and draw distances to protect the frame budget.
-    if (streaming && show_streaming_debug && !fps) {
-        constexpr std::size_t max_cells=256;
-        std::size_t emitted=0;
-        auto edge=[&](Vector3 a,Vector3 b,std::uint32_t color) {
-            if (cubes.size()>=max_scene_objects) return;
-            NorthStarRenderCube line{};
-            line.x=(a.x+b.x)*0.5f;
-            line.y=(a.y+b.y)*0.5f-0.5f;
-            line.z=(a.z+b.z)*0.5f;
-            line.size=1.f;
-            line.rgb=color;
-            line.rotation[0]=std::max(0.09f,std::abs(b.x-a.x));
-            line.rotation[4]=std::max(0.09f,std::abs(b.y-a.y));
-            line.rotation[8]=std::max(0.09f,std::abs(b.z-a.z));
-            cubes.push_back(line);
-        };
-        for (auto const& cell:scene_world->source().cells) {
-            if (emitted>=max_cells || cubes.size()+12>=max_scene_objects) break;
-            auto const cx=(cell.minimum.x+cell.maximum.x)*0.5f;
-            auto const cz=(cell.minimum.z+cell.maximum.z)*0.5f;
-            auto const dx=cx-focus.x;
-            auto const dz=cz-focus.z;
-            if (dx*dx+dz*dz>600.f*600.f) continue;
-            ++emitted;
-            std::uint32_t color=cell.always_loaded ? 0x729bdfu :
-                scene_world->cell_loaded(cell.name) ? 0x51c68fu : 0xb66d75u;
-            auto const x0=cell.minimum.x,x1=cell.maximum.x;
-            auto const y0=cell.minimum.y,y1=cell.maximum.y;
-            auto const z0=cell.minimum.z,z1=cell.maximum.z;
-            edge({x0,y0,z0},{x1,y0,z0},color);
-            edge({x0,y0,z1},{x1,y0,z1},color);
-            edge({x0,y1,z0},{x1,y1,z0},color);
-            edge({x0,y1,z1},{x1,y1,z1},color);
-            edge({x0,y0,z0},{x0,y1,z0},color);
-            edge({x0,y0,z1},{x0,y1,z1},color);
-            edge({x1,y0,z0},{x1,y1,z0},color);
-            edge({x1,y0,z1},{x1,y1,z1},color);
-            edge({x0,y0,z0},{x0,y0,z1},color);
-            edge({x1,y0,z0},{x1,y0,z1},color);
-            edge({x0,y1,z0},{x0,y1,z1},color);
-            edge({x1,y1,z0},{x1,y1,z1},color);
-        }
-    }
-
-    // Authoring-only adaptive ground grid. The layout is computed by the
-    // same camera-relative grid algorithm as Qt's software Viewport. It
-    // follows the active camera indefinitely; no finite scene terrain
-    // limits, no ECS/physics objects, and no renderer ABI changes.
-    if(gizmo && gizmo->show_grid && camera_pose && !fps &&
-       !state->editor_grid_api) {
-        auto const layout=editor_grid::build(
-            *camera_pose,gizmo->grid_width,gizmo->grid_height);
-        auto const minor=std::clamp(layout.minor_step*.022f,.009f,20.f);
-        for(auto const& line:layout.lines) {
-            if(cubes.size()>=max_scene_objects)break;
-            NorthStarRenderCube strip{};
-            strip.size=1.f;
-            strip.rgb=line.color;
-            strip.x=(line.from.x+line.to.x)*.5f;
-            // The native provider positions its 1-unit cube +size/2
-            // on Y. A thin floating strip stays above the ground.
-            strip.y=.012f-.5f;
-            strip.z=(line.from.z+line.to.z)*.5f;
-            strip.rotation[0]=std::max(minor*.75f,std::abs(line.to.x-line.from.x));
-            strip.rotation[4]=std::max(.008f,minor*.25f);
-            strip.rotation[8]=std::max(minor*.75f,std::abs(line.to.z-line.from.z));
-            auto const thickness=line.origin?minor*2.f:
-                line.major?minor*1.35f:minor;
-            if(std::abs(line.to.x-line.from.x)>.01f)
-                strip.rotation[8]=thickness;
-            else strip.rotation[0]=thickness;
-            cubes.push_back(strip);
-        }
-    }
-
-    if(gizmo && gizmo->show_collisions && !fps)
-        viewport_debug::append_colliders(cubes,scene,selected);
-
-    // Editor transform overlay: colored axis handles and rotation rings. These
-    // are transient GPU draw commands, not scene/ECS objects or physics bodies.
-    if (gizmo && selected >= 0 &&
-        static_cast<std::size_t>(selected) < scene.objects.size() && !fps) {
-        auto const center=scene.objects[static_cast<std::size_t>(selected)].position;
-        auto const add=[](Vector3 a, Vector3 b)->Vector3 {
-            return {a.x+b.x,a.y+b.y,a.z+b.z};
-        };
-        auto const mul=[](Vector3 a,float t)->Vector3 {
-            return {a.x*t,a.y*t,a.z*t};
-        };
-        auto const cross=[](Vector3 a,Vector3 b)->Vector3 {
-            return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
-        };
-        auto const normalize=[](Vector3 v)->Vector3 {
-            float const length=std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
-            if (length<1e-5f) return {1.f,0.f,0.f};
-            return {v.x/length,v.y/length,v.z/length};
-        };
-        auto segment=[&](Vector3 a,Vector3 b,std::uint32_t rgb,float thickness) {
-            if (cubes.size()>=max_scene_objects) return;
-            auto const tangent=normalize({b.x-a.x,b.y-a.y,b.z-a.z});
-            auto const side=normalize(cross(tangent,std::abs(tangent.y)>.9f
-                ? Vector3{0.f,0.f,1.f} : Vector3{0.f,1.f,0.f}));
-            auto const up=cross(tangent,side);
-            float const length=std::sqrt((b.x-a.x)*(b.x-a.x)+
-                (b.y-a.y)*(b.y-a.y)+(b.z-a.z)*(b.z-a.z));
-            NorthStarRenderCube line{};
-            line.x=(a.x+b.x)*.5f;
-            line.y=(a.y+b.y)*.5f-.5f;
-            line.z=(a.z+b.z)*.5f;
-            line.size=1.f;
-            line.rgb=rgb;
-            line.rotation[0]=tangent.x*length; line.rotation[3]=tangent.y*length; line.rotation[6]=tangent.z*length;
-            line.rotation[1]=side.x*thickness; line.rotation[4]=side.y*thickness; line.rotation[7]=side.z*thickness;
-            line.rotation[2]=up.x*thickness; line.rotation[5]=up.y*thickness; line.rotation[8]=up.z*thickness;
-            cubes.push_back(line);
-        };
-        std::uint32_t const colors[3]{0xf46b73u,0x5ce4a1u,0x64a8ffu};
-        for (unsigned axis=0;axis<3;++axis) {
-            auto const direction=gizmo->axes[axis];
-            auto const color=gizmo->active_axis==static_cast<int>(axis) ?
-                0xffd66bu : colors[axis];
-            if (gizmo->mode==1) {
-                auto const u=normalize(cross(direction,
-                    std::abs(direction.y)>.9f ? Vector3{0.f,0.f,1.f} : Vector3{0.f,1.f,0.f}));
-                auto const v=cross(direction,u);
-                constexpr float tau=6.283185307179586f;
-                constexpr int segments=56;
-                for (int i=0;i<segments && cubes.size()<max_scene_objects;++i) {
-                    float const t0=tau*float(i)/float(segments);
-                    float const t1=tau*float(i+1)/float(segments);
-                    auto point=[&](float angle) {
-                        return add(center,add(mul(u,gizmo->length*.8333333f*std::cos(angle)),
-                            mul(v,gizmo->length*.8333333f*std::sin(angle))));
-                    };
-                    segment(point(t0),point(t1),color,
-                            std::max(.018f,gizmo->length*.028f));
-                }
-            } else {
-                auto const tip=add(center,mul(direction,gizmo->length));
-                segment(center,tip,color,
-                    std::max(.018f,gizmo->length*.025f));
-                if(gizmo->mode==0) {
-                    // Four short rods form a true spatial arrowhead, rather
-                    // than the old indistinguishable lines with no handles.
-                    auto const seed=std::abs(direction.y)>.9f?
-                        Vector3{0.f,0.f,1.f}:Vector3{0.f,1.f,0.f};
-                    auto const u=normalize(cross(direction,seed));
-                    auto const v=normalize(cross(direction,u));
-                    auto const base=add(tip,mul(direction,-gizmo->length*.19f));
-                    float const wing=gizmo->length*.095f;
-                    float const thickness=std::max(.018f,gizmo->length*.025f);
-                    for(auto const side:{u,mul(u,-1.f),v,mul(v,-1.f)})
-                        segment(add(base,mul(side,wing)),tip,color,thickness);
-                }else if (gizmo->mode==2 && cubes.size()<max_scene_objects) {
-                    // Scale is a solid square cube at the end of each axis,
-                    // consistently anchored along Y regardless of zoom.
-                    NorthStarRenderCube handle{};
-                    handle.size=std::max(.08f,gizmo->length*.19f);
-                    handle.x=tip.x;
-                    handle.y=tip.y-handle.size*.5f;
-                    handle.z=tip.z;
-                    handle.rgb=color;
-                    handle.rotation[0]=handle.rotation[4]=handle.rotation[8]=1.f;
-                    cubes.push_back(handle);
-                }
-            }
-        }
-    }
-
-    // The host resolves material resources through VFS; GPU plugins only
-    // see copied UV geometry, factors and bounded RGBA8 textures.
-    std::vector<std::string> gpu_material_refs;
-    std::vector<NorthStarMaterialBatch> gpu_materials;
-    gpu_materials.reserve(material_draws.size());
-    std::vector<NorthStarMaterialBatchV2> gpu_materials_v2;
-    gpu_materials_v2.reserve(material_draws.size());
-    bool needs_material_v2=false;
-    std::size_t material_vertex_total=0;
-    for(auto const& entry:material_draws) {
-        auto const& reference=entry.first;
-        auto const& geometry=entry.second;
-        if(geometry.empty())continue;
-        if(state->invalid_materials.count(reference)) {
-            pick_complete=false; // rejected material must not leave pick-only geometry
-            continue;
-        }
-        if(!state->project_assets) {
-            pick_complete=false;
-            if(state->invalid_materials.insert(reference).second)
-                std::fprintf(stderr,
-                    "[WARN] [engine.assets] Skipping material '%s': no VFS sources mounted\n",
-                    reference.c_str());
-            continue;
-        }
-        auto found=state->cached_materials.find(reference);
-        if(found==state->cached_materials.end()) {
-            try {
-                auto value=load_material_definition(*state->project_assets,reference);
-                found=state->cached_materials.emplace(reference,std::move(value)).first;
-            } catch(std::exception const& error) {
-                pick_complete=false;
-                if(state->invalid_materials.insert(reference).second)
-                    state->warn_asset("material",reference,error);
-                continue; // No placeholder material: skip only this batch.
-            }
-        }
-        material_vertex_total+=geometry.size();
-        if(material_vertex_total>NORTHSTARCPP_RENDER_MATERIAL_MAX_VERTICES)
-            throw std::runtime_error("Material geometry exceeds GPU batch budget");
-        auto const& material=found->second;
-        // A color-only ID pass cannot honor alpha-cutout textures or blended
-        // fragments yet. Use exact geometry raycast for such scenes.
-        if(material.blend_mode!=0 || material.opacity<0.999f)
-            pick_complete=false;
-        auto batch=viewport_detail::material_batch(material);
-        batch.vertices=geometry.data();
-        batch.vertex_count=static_cast<std::uint32_t>(geometry.size());
-        gpu_materials.push_back(batch);
-        ++state->asset_stats.material_batches;
-        for(auto const& texture:material.textures)
-            if(!texture.rgba8.empty()) {
-                ++state->asset_stats.textured_material_batches;
-                break;
-            }
-        NorthStarMaterialBatchV2 variant{};
-        variant.material=batch;
-        variant.graph_hlsl_defines=material.graph_shader_defines.empty()?nullptr:
-            material.graph_shader_defines.c_str();
-        variant.graph_hlsl_bytes=static_cast<std::uint32_t>(
-            material.graph_shader_defines.size());
-        variant.blend_mode=material.blend_mode;
-        variant.alpha_cutoff=material.alpha_cutoff;
-        variant.opacity=material.opacity;
-        needs_material_v2|=(variant.graph_hlsl_bytes!=0 ||
-            variant.blend_mode!=0 || variant.opacity!=1.f);
-        gpu_materials_v2.push_back(variant);
-        gpu_material_refs.push_back(reference);
-    }
-    #include "viewport_world_ui_batches.inc"
-    auto const& gpu_skinned_batches=skin_batches.build();
-    state->cube_actor_map.resize(cubes.size(),-1);
-    NorthStarRenderFrame const frame{cubes.data(), static_cast<uint32_t>(cubes.size()),
-        fps ? -1 : selected_render_index,
-        focus.x, focus.y, focus.z, verify_pixels ? 1u : 0u,
-        fps ? 1u : 0u,
-        camera_pose ? camera_pose->yaw : (fps ? fps->yaw() : 0.f),
-        camera_pose ? camera_pose->pitch : (fps ? fps->pitch() : 0.f),
-        fps ? fps->recoil_amount() : 0.f,
-        fps ? static_cast<uint32_t>(fps->health()) : 0u,
-        fps && show_fps_overlay ? static_cast<uint32_t>(fps->maximum_health()) : 0u,
-        fps ? static_cast<uint32_t>(fps->ammunition()) : 0u,
-        fps ? static_cast<uint32_t>(fps->magazine_size()) : 0u,
-        paused ? 1u : 0u,
-        camera_pose ? 1u : 0u,
-        camera_pose ? camera_pose->roll : 0.f,
-        camera_pose ? camera_pose->fov_y_degrees : 45.f,
-        camera_pose ? camera_pose->near_plane : 0.1f,
-        camera_pose ? camera_pose->far_plane :
-            (scene.version>=3 ? 1500.f : 250.f)};
-    // Optional backend-native analytic overlay. External ABI 5 providers
-    // without this capability keep the transient geometry fallback above.
-    // Explicitly disable on every non-editor / hidden-grid submission so
-    // provider state cannot leak between Editor and Player frames.
-    if(state->editor_grid_api) {
-        NorthStarRenderEditorGridSettings settings{};
-        settings.abi_version=NORTHSTARCPP_RENDER_EDITOR_GRID_ABI;
-        settings.enabled=(gizmo && gizmo->show_grid && camera_pose && !fps)?1u:0u;
-        if(settings.enabled) {
-            auto const layout=editor_grid::build(
-                *camera_pose,gizmo->grid_width,gizmo->grid_height);
-            settings.minor_step=layout.minor_step;
-            settings.opacity=.92f;
-            settings.fade_start=std::max(layout.radius*.5f,35.f);
-            settings.fade_end=std::max(layout.radius*1.7f,
-                                      settings.fade_start+10.f);
-        } else {
-            settings.minor_step=1.f;
-            settings.opacity=0.f;
-            settings.fade_start=1.f;
-            settings.fade_end=2.f;
-        }
-        if(!state->editor_grid_api->set_grid(state->renderer,&settings))
-            throw state->module->error("Cannot configure analytic editor grid");
-    }
-    auto const scene_lights=northstarcpp::render::scene_render_lights(scene);
-    if(collect_pick) {
-        pick_cube_entities.resize(cubes.size(),0); // debug/HLOD/gizmo are not actors
-        if(pick_triangles.size()%3 ||
-           pick_triangles.size()+cubes.size()*36u>200000u ||
-           state->asset_stats.invalid_meshes)
-            pick_complete=false;
-    }
-    auto submit=[&] {
-        auto* counters=diagnostics::frame_memory::counters;
-        const auto* memory_api=counters?state->module->query_extension<NorthStarRenderFrameMemoryApi>(
-            NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI):nullptr;
-        const diagnostics::frame_memory::Scope memory_scope(counters,memory_api);
-        if(state->pick_v2_api) {
-            // Always clear stale provider IDs, including after scene changes.
-            auto const* v=collect_pick && pick_complete &&
-                !pick_triangles.empty()?pick_triangles.data():nullptr;
-            auto const vc=collect_pick && pick_complete?
-                static_cast<std::uint32_t>(pick_triangles.size()):0u;
-            auto const* ids=collect_pick && pick_complete &&
-                !pick_cube_entities.empty()?pick_cube_entities.data():nullptr;
-            auto const nc=collect_pick && pick_complete?
-                static_cast<std::uint32_t>(pick_cube_entities.size()):0u;
-            if(!state->pick_v2_api->set_world_triangles(state->renderer,v,vc) ||
-               !state->pick_v2_api->set_cube_entities(state->renderer,ids,nc))
-                throw state->module->error("Cannot submit entity ID picking streams");
-            state->pick_scene_complete=collect_pick && pick_complete;
-        }
-        if(state->lights_api) {
-            if(!state->lights_api->set_lights(state->renderer,
-                scene_lights.empty()?nullptr:scene_lights.data(),
-                static_cast<std::uint32_t>(scene_lights.size())))
-                throw state->module->error("Cannot submit dynamic scene lights");
-        } else if(!scene_lights.empty()&&!state->warned_missing_light_provider) {
-            std::fprintf(stderr,"[WARN] [engine.render] %zu scene lights ignored: "
-                "render provider lacks optional dynamic-light ABI\n",scene_lights.size());
-            state->warned_missing_light_provider=true;
-        }
-        if(state->surface_api && state->world_surfaces_ready) {
-            surface_ids.resize(cubes.size(),0u); // debug/HLOD/gizmo neutral
-            if(!state->surface_api->set_cube_surfaces(state->renderer,
-                surface_ids.data(),static_cast<std::uint32_t>(surface_ids.size())))
-                throw state->module->error("Cannot submit world surface selectors");
-        }
-        if(state->triangle_api &&
-           !state->triangle_api->set_triangles(state->renderer,
-               mesh_vertices.empty()?nullptr:mesh_vertices.data(),
-               static_cast<std::uint32_t>(mesh_vertices.size())))
-            throw state->module->error("Cannot submit scene mesh triangles");
-        if(state->skinned_material_api &&
-           !state->skinned_material_api->set_batches(state->renderer,
-               gpu_skinned_batches.empty()?nullptr:gpu_skinned_batches.data(),
-               static_cast<std::uint32_t>(gpu_skinned_batches.size())))
-            throw state->module->error("Cannot upload native GPU skin batches");
-        if(needs_material_v2 && !state->material_api_v2)
-            throw std::runtime_error(
-                "Render provider has no Material Graph/Instance ABI v2");
-        if(state->material_api_v2) {
-            if(!state->material_api_v2->set_batches_v2(state->renderer,
-                gpu_materials_v2.empty()?nullptr:gpu_materials_v2.data(),
-                static_cast<std::uint32_t>(gpu_materials_v2.size())))
-                throw state->module->error("Cannot upload authored Material Graph batches");
-        }else if(state->material_api &&
-                 !state->material_api->set_batches(state->renderer,
-                    gpu_materials.empty()?nullptr:gpu_materials.data(),
-                    static_cast<std::uint32_t>(gpu_materials.size())))
-            throw state->module->error("Cannot upload authored GPU materials");
-        if(state->shader_reload_v2 || state->shader_reload_api) {
-            std::vector<const char*> keys;
-            keys.reserve(gpu_material_refs.size());
-            for(auto const& key:gpu_material_refs)keys.push_back(key.c_str());
-            if(!(state->shader_reload_v2?
-                 state->shader_reload_v2->set_material_references(
-                     state->renderer,keys.empty()?nullptr:keys.data(),
-                     static_cast<std::uint32_t>(keys.size())):
-                 state->shader_reload_api->set_material_references(
-                state->renderer,keys.empty()?nullptr:keys.data(),
-                static_cast<std::uint32_t>(keys.size()))))
-                throw state->module->error("Cannot bind material keys for shader reload");
-        }
-        state->prepare_ui_overlay(fps!=nullptr || !state->ui_document.nodes.empty());
-        return state->api->draw(state->renderer,&frame)!=0;
-    };
-    if(!submit()) {
-        if(state->module->provider()!="d3d12")
-            throw state->module->error("Cannot render frame");
-        state->fallback_to_d3d11();
-        if(!submit())throw state->module->error("Cannot render frame after D3D12 fallback");
-    }
-}
 
 bool Viewport::supports_postfx() const noexcept {
     return state && state->postfx_api &&
@@ -2920,6 +996,16 @@ std::optional<NorthStarRenderTimingStats> Viewport::gpu_frame_timing() const {
     return result;
 }
 
+std::optional<NorthStarRigidInstanceStats>
+Viewport::rigid_gpu_stats() const {
+    if(!state || !state->rigid_api || !state->rigid_api->read_stats)
+        return std::nullopt;
+    NorthStarRigidInstanceStats stats{};
+    stats.struct_size=sizeof(stats);
+    if(!state->rigid_api->read_stats(state->renderer,&stats))
+        return std::nullopt;
+    return stats;
+}
 std::size_t Viewport::queue_fragment_shader_reload(
     std::filesystem::path const& shader_file,
     std::vector<std::uint8_t> const& bytes)

@@ -18,7 +18,7 @@ let dynamicEntity = null;
 let ticks = 0;
 
 const save = (slot, value) =>
-    engine.save.write(slot, JSON.stringify(value));
+    engine.storage.saves.write(slot, JSON.stringify(value));
 
 Events.on("start", () => {
     if (typeof Entity !== "function" ||
@@ -78,7 +78,7 @@ Events.on("update", () => {
             throw new Error("Runtime dynamic body did not participate in gravity");
         save("scripting_update", {phase:"update",frames:ticks,
             dt:1/60, dynamicY:y, index: dynamicEntity.index});
-        engine.session.quit();
+        engine.session.lifecycle.quit();
     }
 });
 Events.on("stop", () => {
@@ -92,9 +92,9 @@ def verify(player: Path) -> None:
         root = Path(work)
         project = root / "project"
         shutil.copytree(ROOT / "Projects/NorthStarFirstPersonPlatform", project)
-        script = project / "scripts" / "main.js"
+        script = project / "assets" / "scripts" / "main.js"
         script.write_text(SCRIPT, encoding="utf-8")
-        (project / "scripts" / "playerConfig.js").write_text(
+        (project / "assets" / "scripts" / "playerConfig.js").write_text(
             "NorthStar.player.configure({enabled:false});\n", encoding="utf-8")
         # Project overrides are not included in archive; the camera-only
         # fixture must use the engine's shared scripts and core assets.

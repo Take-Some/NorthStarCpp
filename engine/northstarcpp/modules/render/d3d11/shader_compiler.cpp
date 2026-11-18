@@ -99,42 +99,21 @@ cbuffer SkyTint : register(b1) { float4 sky_tint; };
 Texture2D sky_texture : register(t0);
 SamplerState sky_sampler : register(s0);
 struct SkyVertex { float3 position : POSITION; float2 uv : TEXCOORD0; };
-struct SkyPixel { float4 position : SV_Position; float3 direction : TEXCOORD0; };
+struct SkyPixel { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 SkyPixel sky_vertex_main(SkyVertex v) {
     SkyPixel p;
     p.position = mul(float4(v.position * 100.0, 1.0), view_projection);
     // Sky UVs are not a photographic cloud map; the Perlin map is volumetric noise.
-    p.direction = v.position;
+    p.uv = v.uv;
     return p;
 }
-float sky_noise(float3 dir, float frequency) {
-    // Triplanar sampling avoids seam and pole artifacts.
-    float3 weights = pow(abs(dir), 4.0);
-    weights /= max(dot(weights, float3(1.0, 1.0, 1.0)), 0.0001);
-    float3 yz = sky_texture.Sample(sky_sampler, dir.yz * frequency).rgb;
-    float3 xz = sky_texture.Sample(sky_sampler, dir.xz * frequency).rgb;
-    float3 xy = sky_texture.Sample(sky_sampler, dir.xy * frequency).rgb;
-    float3 n = float3(dot(yz, float3(0.33333, 0.33333, 0.33334)),
-                      dot(xz, float3(0.33333, 0.33333, 0.33334)),
-                      dot(xy, float3(0.33333, 0.33333, 0.33334)));
-    return dot(n, weights);
-}
 float4 sky_pixel_main(SkyPixel p) : SV_Target {
-    float3 direction = normalize(p.direction);
-    float altitude = saturate(direction.y * 0.5 + 0.5);
-    float zenith = smoothstep(0.08, 0.97, altitude);
-    float3 color = lerp(float3(0.46, 0.65, 0.88),
-                        float3(0.075, 0.22, 0.47), zenith);
-    // The authored base_color grades the atmosphere, not the noise RGB.
-    color *= lerp(float3(1.0, 1.0, 1.0), sky_tint.rgb * 1.6, 0.18);
-    float density = sky_noise(direction, 2.1) * 0.78 +
-                    sky_noise(direction, 6.7) * 0.22;
-    float clouds = smoothstep(0.54, 0.75, density);
-    float visibility = smoothstep(0.02, 0.27, altitude);
-    float3 cloud_color = lerp(float3(0.68, 0.78, 0.89),
-                              float3(0.92, 0.94, 0.97), altitude);
-    color = lerp(color, cloud_color, clouds * visibility * 0.67);
-    return float4(saturate(color), 1.0);
+    // engine.sky composites the authored HDR/cloud projection/flow maps
+    // into one equirectangular RGBA8 source BEFORE the provider call.
+    // Sampling it directly keeps Vulkan and D3D12 on the same data path.
+    const float2 uv=float2(frac(p.uv.x),saturate(p.uv.y));
+    float3 source=sky_texture.Sample(sky_sampler,uv).rgb;
+    return float4(saturate(source*sky_tint.rgb),1.0);
 }
 )";
 

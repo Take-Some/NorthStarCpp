@@ -34,12 +34,20 @@
                 throw new TypeError("Prefab path must be a VFS path under prefabs/");
             if (!options || typeof options !== "object" || Array.isArray(options))
                 throw new TypeError("Prefab options must be an object");
-            const {position: anchor = {x: 0, y: 0, z: 0}} = options;
-            if (Object.keys(options).some(name => name !== "position") ||
-                ![anchor?.x, anchor?.y, anchor?.z].every(Number.isFinite))
-                throw new TypeError("Prefab anchor requires finite x/y/z");
+            const {
+                position: anchor = {x: 0, y: 0, z: 0},
+                collision = undefined,
+                physics = "authored"
+            } = options;
+            if (Object.keys(options).some(name =>
+                    !["position", "collision", "physics"].includes(name)) ||
+                ![anchor?.x, anchor?.y, anchor?.z].every(Number.isFinite) ||
+                (collision !== undefined && typeof collision !== "boolean") ||
+                !["authored", "visual"].includes(physics) ||
+                (physics === "visual" && collision === true))
+                throw new TypeError("Prefab instance requires valid anchor and physics options");
 
-            const descriptor = engine.prefab.read(path);
+            const descriptor = engine.scene.prefabs.read(path);
             if (!descriptor || !Array.isArray(descriptor.objects) ||
                 descriptor.objects.length === 0 || descriptor.objects.length > 128)
                 throw new Error("Invalid prefab template from VFS");
@@ -113,11 +121,16 @@
                         name: definition.name,
                         position,
                         size: definition.size,
-                        mass: definition.mass,
+                        // Visual native mesh units independent of collider.
+                        scale: definition.scale ?? {x:1,y:1,z:1},
+                        // Socket-bound presentation is not a simulated rigid
+                        // body. The prefab definition retains its physical mass.
+                        mass: physics === "visual" ? 0 : definition.mass,
                         color: definition.color,
                         asset: definition.asset,
                         layer: definition.layer,
-                        collision: definition.collision !== false,
+                        collision: physics === "visual" ? false :
+                            (collision === undefined ? definition.collision !== false : collision),
                         parent
                     });
                     handles.set(definition.id, entity);

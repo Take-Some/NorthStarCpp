@@ -1,0 +1,77 @@
+<NorthStarWeaponGrips version="1" source="WeaponLab/Shared/Content/physics/endorphin/humanoid.json" coordinate_space="local_joint_delta_degrees">
+  <Profile class="pistol" support_offset="0.03 -0.02 0.02" primary_grip="0 0 0" support_grip="-0.055 -0.030 0.012" rear_sight="0 0.09189 -0.020" front_sight="0 0.09189 0.178" sight_eye_distance="0.295"
+           ads_elbow_outward_bias="0.43" ads_elbow_drop_bias="0.44"
+           ads_support_hand_stiffness="1.20"
+           ads_forearm_visibility_guard="0.235">
+    <Hand side="right" wrist_offset="-0.032 -0.008 -0.068" socket_offset="-0.032 -0.008 -0.025447000000000004">
+      <Joint name="r_thumba" x="0" y="-8" z="-12" />
+      <Joint name="r_thumbb" x="0" y="12" z="0" />
+      <Joint name="r_thumbc" x="0" y="8" z="0" />
+      <Joint name="r_indexa" x="0" y="2" z="0" />
+      <Joint name="r_indexb" x="0" y="5" z="0" />
+      <Joint name="r_indexc" x="0" y="2" z="0" />
+      <Joint name="r_middlea" x="0" y="50" z="0" />
+      <Joint name="r_middleb" x="0" y="45" z="0" />
+      <Joint name="r_middlec" x="0" y="25" z="0" />
+      <Joint name="r_ringa" x="0" y="55" z="0" />
+      <Joint name="r_ringb" x="0" y="48" z="0" />
+      <Joint name="r_ringc" x="0" y="28" z="0" />
+      <Joint name="r_pinkya" x="0" y="60" z="0" />
+      <Joint name="r_pinkyb" x="0" y="48" z="0" />
+      <Joint name="r_pinkyc" x="0" y="28" z="0" />
+    </Hand>
+    <Hand side="left" wrist_offset="0.028 -0.018 -0.054" socket_offset="0.028 -0.018 -0.011446999999999999">
+      <Joint name="l_thumba" x="0" y="-8" z="12" />
+      <Joint name="l_thumbb" x="0" y="-14" z="0" />
+      <Joint name="l_thumbc" x="0" y="-10" z="0" />
+      <Joint name="l_indexa" x="0" y="-50" z="0" />
+      <Joint name="l_indexb" x="0" y="-48" z="0" />
+      <Joint name="l_indexc" x="0" y="-25" z="0" />
+      <Joint name="l_middlea" x="0" y="-55" z="0" />
+      <Joint name="l_middleb" x="0" y="-48" z="0" />
+      <Joint name="l_middlec" x="0" y="-28" z="0" />
+      <Joint name="l_ringa" x="0" y="-58" z="0" />
+      <Joint name="l_ringb" x="0" y="-48" z="0" />
+      <Joint name="l_ringc" x="0" y="-28" z="0" />
+      <Joint name="l_pinkya" x="0" y="-62" z="0" />
+      <Joint name="l_pinkyb" x="0" y="-48" z="0" />
+      <Joint name="l_pinkyc" x="0" y="-28" z="0" />
+    </Hand>
+  </Profile>
+  <Profile class="rifle" support_offset="0 0.043053337 0.305839269" primary_grip="0 0 0" support_grip="-0.055 0.040 0.312" rear_sight="0 0.058 0.035" front_sight="0 0.058 0.300">
+    <Hand side="right" wrist_offset="-0.032 -0.008 -0.068" socket_offset="-0.032 -0.008 -0.025447000000000004">
+      <Joint name="r_thumba" x="0" y="-8" z="-12" />
+      <Joint name="r_thumbb" x="0" y="12" z="0" />
+      <Joint name="r_thumbc" x="0" y="8" z="0" />
+      <Joint name="r_indexa" x="0" y="2" z="0" />
+      <Joint name="r_indexb" x="0" y="5" z="0" />
+      <Joint name="r_indexc" x="0" y="2" z="0" />
+      <Joint name="r_middlea" x="0" y="50" z="0" />
+      <Joint name="r_middleb" x="0" y="45" z="0" />
+      <Joint name="r_middlec" x="0" y="25" z="0" />
+      <Joint name="r_ringa" x="0" y="55" z="0" />
+      <Joint name="r_ringb" x="0" y="48" z="0" />
+      <Joint name="r_ringc" x="0" y="28" z="0" />
+      <Joint name="r_pinkya" x="0" y="60" z="0" />
+      <Joint name="r_pinkyb" x="0" y="48" z="0" />
+      <Joint name="r_pinkyc" x="0" y="28" z="0" />
+    </Hand>
+    <Hand side="left" wrist_offset="0.063 -0.018 -0.015" socket_offset="0.020447 -0.018 -0.015">
+      <Joint name="l_thumba" x="0" y="-8" z="12" />
+      <Joint name="l_thumbb" x="0" y="-18" z="0" />
+      <Joint name="l_thumbc" x="0" y="-12" z="0" />
+      <Joint name="l_indexa" x="0" y="-60" z="0" />
+      <Joint name="l_indexb" x="0" y="-38" z="0" />
+      <Joint name="l_indexc" x="0" y="-22" z="0" />
+      <Joint name="l_middlea" x="0" y="-62" z="0" />
+      <Joint name="l_middleb" x="0" y="-42" z="0" />
+      <Joint name="l_middlec" x="0" y="-25" z="0" />
+      <Joint name="l_ringa" x="0" y="-65" z="0" />
+      <Joint name="l_ringb" x="0" y="-42" z="0" />
+      <Joint name="l_ringc" x="0" y="-25" z="0" />
+      <Joint name="l_pinkya" x="0" y="-68" z="0" />
+      <Joint name="l_pinkyb" x="0" y="-45" z="0" />
+      <Joint name="l_pinkyc" x="0" y="-28" z="0" />
+    </Hand>
+  </Profile>
+</NorthStarWeaponGrips>

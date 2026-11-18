@@ -1,0 +1,130 @@
+{
+  "format": "NEF8 YDR binary v1",
+  "models": {
+    "city_building-a.ydr": {
+      "vertices": 2566,
+      "triangles": 4092,
+      "sha256": "7e2847343cda4fae7ff6c2f082ba5d78636bbb26c4080b74a3f0e1324a86f342"
+    },
+    "city_building-c.ydr": {
+      "vertices": 2310,
+      "triangles": 3856,
+      "sha256": "4170aa10f954293462b61ef2844ee36e690ac8747b99211f598577360ff38653"
+    },
+    "city_building-h.ydr": {
+      "vertices": 947,
+      "triangles": 1396,
+      "sha256": "79e531994b4d5befcac20dcb595133c8d2b90ce44a4b9fe25375222a189974b2"
+    },
+    "city_chimney-basic.ydr": {
+      "vertices": 120,
+      "triangles": 176,
+      "sha256": "e6917e514293399df3226d5e0c1d55961e5ab6bea115053caf7841102c27dc6c"
+    },
+    "city_chimney-large.ydr": {
+      "vertices": 180,
+      "triangles": 436,
+      "sha256": "4cb16f27fe5bf7ea891567327ed7a84f6ebb7efbe26341f8d05f0a0c68537a35"
+    },
+    "city_detail-tank-large.ydr": {
+      "vertices": 352,
+      "triangles": 1132,
+      "sha256": "1f48882299362a86f56b575b0a58200581698117997ac1bc8b40a16a9d75672c"
+    },
+    "city_shipping-container-a.ydr": {
+      "vertices": 476,
+      "triangles": 804,
+      "sha256": "5883d29c4ef620e0ed071047c2cd86a8ae960e3928550bce4d5211cf9b4c53db"
+    },
+    "city_water-tower.ydr": {
+      "vertices": 712,
+      "triangles": 1936,
+      "sha256": "75b860cd9cbe2e0b07c1bb8ec166a19afab7994a5f7449ac02d154f3f927476b"
+    },
+    "factory_catwalk-corner.ydr": {
+      "vertices": 358,
+      "triangles": 972,
+      "sha256": "bfe9820ea25eb671e3c28962fe830b5864260bc567e83b46cdf7d76a1b613d0d"
+    },
+    "factory_catwalk-stairs.ydr": {
+      "vertices": 607,
+      "triangles": 1336,
+      "sha256": "acabec555de0a9cab88bc59a25e3742227165d6f525ee28f463856a8bbc89059"
+    },
+    "factory_catwalk-straight.ydr": {
+      "vertices": 280,
+      "triangles": 656,
+      "sha256": "520b0f3fdd4cfd2f58b27072795ec277f79527faae85e6977ea571a3d68aaf7e"
+    },
+    "factory_cog-a.ydr": {
+      "vertices": 192,
+      "triangles": 320,
+      "sha256": "d39a6b364ce1f003258dfb1d552d267a52de0b0e21e58e8ae5421ce89281ceeb"
+    },
+    "factory_conveyor-long.ydr": {
+      "vertices": 176,
+      "triangles": 392,
+      "sha256": "2358fc02da0b3a8cdd345447b5f58476f9725aa952cff691d6d7b7a5609f95aa"
+    },
+    "factory_crane-lift.ydr": {
+      "vertices": 288,
+      "triangles": 424,
+      "sha256": "365576e6b24c82f23b25c21aa9b0fb0050cb79c287767fcdacc434d74e1d23de"
+    },
+    "factory_crane.ydr": {
+      "vertices": 672,
+      "triangles": 980,
+      "sha256": "c752dfb76b26cdef7c167afb96c12b66c9e219245018abff34aa3436c17ef935"
+    },
+    "factory_hopper-high-round.ydr": {
+      "vertices": 144,
+      "triangles": 352,
+      "sha256": "b50e0eb395564d783b5f155f68770a1f3b576b5853cab8916ef6f5a24a88be83"
+    },
+    "factory_machine-bed.ydr": {
+      "vertices": 564,
+      "triangles": 1136,
+      "sha256": "c990e629e26ebd3d0293156e73c697e602d3136a8e6bc4ad27d27a75d8e7c852"
+    },
+    "factory_machine-fortified.ydr": {
+      "vertices": 420,
+      "triangles": 640,
+      "sha256": "47dcb86d0e8db1c4f60364bbc1516401a80ae71c1ee25a753b2a2090f1f287a6"
+    },
+    "factory_machine.ydr": {
+      "vertices": 352,
+      "triangles": 536,
+      "sha256": "5539a8fec668f8bff925089aaf1b2740b8945f3180a6136ea28e109b256451a4"
+    },
+    "factory_pipe-large-bend.ydr": {
+      "vertices": 304,
+      "triangles": 896,
+      "sha256": "436b9a0cab34edcb8397ff106aa4e49cd3f946a7be50c9a27acd324b7b01ffe9"
+    },
+    "factory_pipe-large-valve.ydr": {
+      "vertices": 424,
+      "triangles": 912,
+      "sha256": "2e6da371000727970a23a2644030aa1277f9ec3dc005040759c63ebf124a72e2"
+    },
+    "factory_pipe-large.ydr": {
+      "vertices": 224,
+      "triangles": 496,
+      "sha256": "8c647103a160b0cc11504b9ac70d6a2c8ffc3c519aa833f9b1e28cc309cc33b8"
+    },
+    "wasteland_dry.ydr": {
+      "vertices": 4,
+      "triangles": 2,
+      "sha256": "417c6965c34fd54120657de9e4d35b61fbf9bed2f2828ba40cd1b51b91a77982"
+    },
+    "wasteland_gravel.ydr": {
+      "vertices": 4,
+      "triangles": 2,
+      "sha256": "ee649897c8929d5a7d96d2d3723817defee39f6166640c7bff8bfb3e7647dcff"
+    },
+    "bastion_deck_grate.ydr": {
+      "vertices": 4,
+      "triangles": 2,
+      "sha256": "2db114c6c4114aab882a10cf90239ea9285d5736b140229d73e9c8899c9b3db2"
+    }
+  }
+}

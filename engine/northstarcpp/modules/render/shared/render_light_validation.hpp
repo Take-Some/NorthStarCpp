@@ -1,4 +1,4 @@
-// Shared validation for engine.render dynamic point/spot light ABI.
+// Shared validation for engine.render four-kind light ABI (48-byte POD).
 // Hardware render providers must copy, never borrow, host-owned arrays.
 #pragma once
 #include <northstarcpp/render_lights_api.h>
@@ -27,9 +27,9 @@ inline std::vector<NorthStarRenderLight> validated_render_lights(
         if(light.position_range[3]<=0.f || light.color_intensity[3]<0.f ||
            light.color_intensity[0]<0.f ||light.color_intensity[1]<0.f ||
            light.color_intensity[2]<0.f ||
-           light.direction_cone[3]<-1.f || light.direction_cone[3]>1.f)
+           light.direction_cone[3]<-3.f || light.direction_cone[3]>1.f)
             throw std::invalid_argument("Invalid dynamic light photometry");
-        if(light.direction_cone[3]>=0.f) {
+        if(light.direction_cone[3]>=0.f || light.direction_cone[3]==-2.f) {
             float squared=light.direction_cone[0]*light.direction_cone[0]+
                 light.direction_cone[1]*light.direction_cone[1]+
                 light.direction_cone[2]*light.direction_cone[2];

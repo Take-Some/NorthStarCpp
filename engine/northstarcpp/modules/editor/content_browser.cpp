@@ -283,17 +283,7 @@ void EditorContentBrowser::thumbnail_worker() {
                 fs::file_size(file,ec)>128u*1024u*1024u)continue;
             if(!assets || mounted_root!=job.root) {
                 assets=std::make_unique<AssetManager>();
-                assets->mount_directory("",job.root,0);
-                // The shared layer remains provider-resolved rather than
-                // using direct file decoding in the Content Browser.
-                for(auto dir=job.root.parent_path();!dir.empty();) {
-                    if(fs::is_directory(dir/"sharedAssets",ec)) {
-                        assets->mount_shared_assets(dir/"sharedAssets");break;
-                    }
-                    auto const parent=dir.parent_path();
-                    if(parent==dir)break;
-                    dir=parent;
-                }
+                assets->mount_content_assets(job.root);
                 mounted_root=job.root;
             }
             auto const key=job.relative.generic_u8string();

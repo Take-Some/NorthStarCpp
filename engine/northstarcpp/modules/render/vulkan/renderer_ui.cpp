@@ -194,8 +194,7 @@ void Renderer::ensure_ui_resources() {
         desc.pColorBlendState=&blend;
         desc.pDynamicState=&dynamics;
         desc.layout=ui_pipeline_layout_;
-        auto result=vkCreateGraphicsPipelines(
-            device_,VK_NULL_HANDLE,1,&desc,nullptr,&ui_pipeline_);
+        auto result=create_cached_graphics_pipelines(1,&desc,&ui_pipeline_);
         vkDestroyShaderModule(device_,vertex,nullptr);
         vkDestroyShaderModule(device_,fragment,nullptr);
         check_ui(result,"Create Vulkan UI graphics pipeline");

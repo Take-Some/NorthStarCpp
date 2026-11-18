@@ -31,6 +31,15 @@ struct NativeModelResource {
     }
 };
 
+// Imported YDD vertices are mesh-local; YMT/YCD joint palettes are
+// skeleton-local. Row-vector skin transform is:
+// mesh_to_skeleton * skeleton_palette * skeleton_to_mesh.
+// Reuse the destination buffer to avoid per-frame palette allocations.
+void remap_skin_palette_to_mesh(
+    std::vector<math::float4x4>& output,
+    std::vector<math::float4x4> const& skeleton_palette,
+    math::float4x4 const& mesh_to_skeleton);
+
 // CPU reference for native YDD 8-weight skinning; preserves the original
 // UV/material section topology for PBR. GPU path must match its output.
 MeshAsset skin_native_model_cpu(

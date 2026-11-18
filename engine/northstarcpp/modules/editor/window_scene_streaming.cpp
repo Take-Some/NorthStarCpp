@@ -1,4 +1,5 @@
 #include "window_scene_streaming.hpp"
+#include <northstarcpp/asset_roots.hpp>
 #include <northstarcpp/physics.hpp>
 
 #ifndef NOMINMAX
@@ -92,35 +93,18 @@ void WindowSceneStreaming::mount_assets(SceneStreamingPaths const& paths)
 
     clear_asset_requests();
     auto store=std::make_unique<AssetManager>();
-    store->mount_runtime_archives();
     bool mounted=false;
-    fs::path mounted_project;
     if(!paths.archive.empty()) {
+        store->mount_runtime_archives();
+        auto const shared=paths.shared_assets.empty()?
+            asset_paths::locate_shared_root(source,asset_paths::executable_dir()):
+            paths.shared_assets;
+        if(!shared.empty())store->mount_shared_assets(shared);
         store->mount_archive("",paths.archive,
             paths.archive_data.empty()?paths.archive:paths.archive_data);
         mounted=true;
     } else {
-        const auto project=source.parent_path()/"assets";
-        if(fs::is_directory(project)) {
-            store->mount_directory("",project);
-            mounted_project=project;
-            mounted=true;
-        }
-    }
-
-    auto common=paths.shared_assets;
-    if(common.empty()) {
-        for(auto parent=source.parent_path();!parent.empty();) {
-            auto candidate=parent/"engine/northstarcpp/resources/sharedAssets";
-            if(fs::is_directory(candidate)) { common=std::move(candidate); break; }
-            auto next=parent.parent_path();
-            if(next==parent)break;
-            parent=std::move(next);
-        }
-    }
-    if(!common.empty() && fs::is_directory(common) &&
-       !same_asset_directory(common,mounted_project)) {
-        store->mount_shared_assets(common);
+        store->mount_project_assets(source.parent_path(),paths.shared_assets);
         mounted=true;
     }
     if(mounted) {

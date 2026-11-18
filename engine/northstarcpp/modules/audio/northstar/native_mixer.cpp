@@ -1,4 +1,5 @@
 #include "native_mixer.hpp"
+#include <northstarcpp/nac.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -35,39 +36,45 @@ Mixer::Voice* Mixer::find(std::uint64_t id) {
     return nullptr;
 }
 
-std::uint64_t Mixer::play(NorthStarPcm16 const& pcm, NorthStarAudioVoiceOptions const& opt) {
-    if (!pcm.samples || !pcm.frames || pcm.frames > sample_rate * 300 ||
-        pcm.sample_rate < 8000 || pcm.sample_rate > 192000 ||
-        (pcm.channels != 1 && pcm.channels != 2) ||
-        !std::isfinite(opt.gain) || opt.gain < 0 || opt.gain > 8 ||
-        !finite(opt.position) || opt.struct_size < sizeof(opt))
-        throw std::invalid_argument("NorthStar Audio: invalid PCM or voice options");
-    // Copying PCM into each voice is currently required by ABI 2.
-    // Bound both per-voice and aggregate memory to protect the game runtime.
-    auto const required = std::uint64_t(pcm.frames) * pcm.channels * sizeof(std::int16_t);
-    if (required > 16ull * 1024 * 1024)
-        throw std::invalid_argument("NorthStar Audio: PCM exceeds 16 MiB per voice");
-    std::uint64_t used = 0;
-    for (auto const& v : voices_) used += v.pcm.size() * sizeof(std::int16_t);
-    while (!voices_.empty() && used + required > 64ull * 1024 * 1024) {
-        used -= voices_.front().pcm.size() * sizeof(std::int16_t);
-        voices_.erase(voices_.begin()); // deterministic oldest-first stealing
-    }
-    if (voices_.size() >= max_voices) {
-        // Deterministic oldest-first admission while keeping O(1) storage.
-        voices_.erase(voices_.begin());
-    }
+Mixer::PreparedPcm Mixer::prepare(NorthStarPcm16 const& pcm) {
+    if(!pcm.samples || !pcm.frames ||
+       pcm.sample_rate<8000u || pcm.sample_rate>192000u ||
+       (pcm.channels!=1u&&pcm.channels!=2u))
+        throw std::invalid_argument("NorthStar Audio: invalid PCM format");
+    const auto bytes=std::uint64_t(pcm.frames)*pcm.channels*sizeof(std::int16_t);
+    if(bytes>nac::max_pcm_bytes)
+        throw std::invalid_argument("NorthStar Audio: PCM exceeds mixer capacity");
+    PreparedPcm prepared{};
+    prepared.frames=pcm.frames;prepared.rate=pcm.sample_rate;
+    prepared.channels=pcm.channels;
+    prepared.samples.assign(pcm.samples,
+        pcm.samples+std::size_t(pcm.frames)*pcm.channels);
+    return prepared;
+}
+std::uint64_t Mixer::play(NorthStarPcm16 const& pcm,
+                          NorthStarAudioVoiceOptions const& options) {
+    return play(prepare(pcm),options);
+}
+std::uint64_t Mixer::play(PreparedPcm&& pcm,
+                          NorthStarAudioVoiceOptions const& opt) {
+    if(!pcm.frames || !pcm.rate || (pcm.channels!=1u&&pcm.channels!=2u) ||
+       pcm.samples.size()!=std::size_t(pcm.frames)*pcm.channels ||
+       !std::isfinite(opt.gain) || opt.gain<0.f || opt.gain>8.f ||
+       !finite(opt.position) || opt.struct_size<sizeof(opt))
+        throw std::invalid_argument("NorthStar Audio: invalid prepared voice");
+    const auto required=std::uint64_t(pcm.samples.size())*sizeof(std::int16_t);
+    std::uint64_t used=0;
+    for(auto const& v:voices_)used+=v.pcm.size()*sizeof(std::int16_t);
+    // Never interrupt existing one-shot audio to admit a newer sound.
+    if(used+required>nac::max_pcm_bytes || voices_.size()>=max_voices)
+        return 0;
     Voice v{};
-    v.id = next_id_++;
-    if (!next_id_) next_id_ = 1;
-    v.rate = pcm.sample_rate;
-    v.channels = pcm.channels;
-    v.frames = pcm.frames;
-    v.gain = opt.gain;
-    v.looping = opt.looping != 0;
-    v.spatial = opt.spatial != 0;
-    v.pos = opt.position;
-    v.pcm.assign(pcm.samples, pcm.samples + std::size_t(pcm.frames)*pcm.channels);
+    v.id=next_id_++;
+    if(!next_id_)next_id_=1;
+    v.rate=pcm.rate;v.channels=pcm.channels;v.frames=pcm.frames;
+    v.gain=opt.gain;v.looping=opt.looping!=0;
+    v.spatial=opt.spatial!=0;v.pos=opt.position;
+    v.pcm=std::move(pcm.samples); // O(1) under the real-time mixer lock.
     voices_.push_back(std::move(v));
     return voices_.back().id;
 }
@@ -144,7 +151,23 @@ void Mixer::mix(std::int16_t* output, std::uint32_t frames) {
     }
     voices_.erase(std::remove_if(voices_.begin(),voices_.end(),
         [](Voice const& v){return !v.looping && v.cursor >= v.frames;}),voices_.end());
-    for (std::size_t i = 0; i < std::size_t(frames)*2; ++i)
-        output[i] = saturate(accum[i]);
+    // Mixing many independent voices can exceed 0 dBFS even when every
+    // individual PCM stream is valid. Hard clamping produced harsh audible
+    // crackle on gunshots/metal impacts. Apply one stereo-linked peak limiter
+    // before PCM16 quantization to preserve spatial balance and transients.
+    float peak=0.f;
+    for(std::size_t i=0;i<std::size_t(frames)*2;++i)
+        peak=std::max(peak,std::abs(accum[i]));
+    const auto target=peak>.94f ? .94f/peak : 1.f;
+    if(target<output_gain_)
+        output_gain_=target; // sample block lookahead: no clipping on attack
+    else {
+        // 140ms release, so closely spaced gunshots don't make the gain pump.
+        const float decay=std::exp(-float(frames)/
+            (float(sample_rate)*.14f));
+        output_gain_=target+(output_gain_-target)*decay;
+    }
+    for(std::size_t i=0;i<std::size_t(frames)*2;++i)
+        output[i]=saturate(accum[i]*output_gain_);
 }
 } // namespace northstarcpp::native_audio

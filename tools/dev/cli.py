@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from tools.build_layout import LOG_DIR, canonical_build_path, configured_build_type
 import re
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "northstarcpp.json"
-LOGS = ROOT / ".northstarcpp" / "logs"
+LOGS = LOG_DIR
 WINDOWS_APP_TARGETS = {"editor": "northstarcpp_editor_qt", "player": "northstarcpp_player"}
 PORTED_TARGETS = ("northstarcpp_portability_smoke",)
 if os.name == "nt":
@@ -80,7 +81,7 @@ def build_type(args: argparse.Namespace, cfg: dict) -> str:
 def build_path(cfg: dict, kind: str) -> Path:
     if kind not in ("Debug", "Release", "RelWithDebInfo"):
         raise ShellError("Unsupported build type: " + kind)
-    return inside(cfg.get("build_root", "out") + "/gcc-" + kind.lower())
+    return canonical_build_path(kind)
 
 
 def invoke(command: list[str], cwd: Path = ROOT, dry: bool = False, logged: bool = True) -> int:
@@ -123,7 +124,7 @@ def doctor(cfg: dict, as_json: bool = False) -> int:
         ("CMake project", (ROOT / "CMakeLists.txt").is_file(), "NorthStarCpp GNU GCC project"),
         ("Native runtime sources", (ROOT / "engine" / "northstarcpp" / "CMakeLists.txt").is_file(),
          "Editor, player and runtime CMake modules"),
-        ("Math source tree", (ROOT / "engine" / "northstarcpp" / "modules" / "foundation" / "northstarcpp" / "compat" / "core" / "sources").is_dir(),
+        ("Math source tree", (ROOT / "engine" / "northstarcpp" / "modules" / "core" / "northstarcpp").is_dir(),
          "Internal engine math implementation"),
     ]
     for name, path in toolchain(cfg).items():
@@ -151,6 +152,7 @@ def status(cfg: dict, as_json: bool = False) -> int:
         "projects": project_count,
         "build_dir": str(output),
         "configured": (output / "CMakeCache.txt").is_file(),
+        "configured_build_type": configured_build_type(output),
         "ported_targets": list(PORTED_TARGETS),
         "full_engine_ported": False
     }
@@ -166,6 +168,9 @@ def require_cache(cfg: dict, kind: str) -> Path:
     path = build_path(cfg, kind)
     if not (path / "CMakeCache.txt").exists():
         raise ShellError("Build tree not configured: {}. Use 'configure' first.".format(path))
+    actual = configured_build_type(path)
+    if actual != kind:
+        raise ShellError("One build tree is configured for {} (requested {}). Run configure --build-type {} first.".format(actual, kind, kind))
     return path
 
 
@@ -212,6 +217,8 @@ def test(cfg: dict, args: argparse.Namespace) -> int:
 
 def run(cfg: dict, args: argparse.Namespace) -> int:
     kind = build_type(args, cfg)
+    if not args.executable and not args.dry_run:
+        require_cache(cfg, kind)
     if args.executable:
         executable = inside(args.executable)
     else:
@@ -339,7 +346,7 @@ def parser() -> argparse.ArgumentParser:
     game = sub.add_parser("game-dist", help="Package one project with the verified game runtime")
     game.add_argument("--project", metavar="FOLDER", help="Project folder or Projects/<name>")
     game.add_argument("--engine-package", metavar="FOLDER", help="Verified engine distribution")
-    game.add_argument("--output-dir", metavar="FOLDER", default="dist/games")
+    game.add_argument("--output-dir", metavar="FOLDER", default="out/package/games")
     game.add_argument("--physics", choices=("bullet", "jolt"), default="jolt")
     game.add_argument("--allow-debug", action="store_true")
     game.add_argument("--no-zip", action="store_true")
@@ -390,6 +397,8 @@ def dispatch(cfg: dict, args: argparse.Namespace) -> int:
     if name == "dist":
         command = [sys.executable, "-B", "-m", "tools.build_dist",
                    "--build-type", args.build_type, "--jobs", str(args.jobs)]
+        if not args.verify:
+            command.extend(["--qa-only", "--output-dir", str(ROOT / "out" / "package" / "qa")])
         if args.no_zip:
             command.append("--no-zip")
         if args.from_build:
@@ -425,7 +434,7 @@ def dispatch(cfg: dict, args: argparse.Namespace) -> int:
             "7": ("NorthStarCpp projects", ["projects"]),
             "8": ("Portability audit", ["audit"]),
             "9": ("Logs", ["logs"]),
-            "11": ("Release distributable", ["dist"]),
+            "11": ("Release QA package", ["dist"]),
         }
         if os.name == "nt":
             entries["10"] = ("Open scene editor", ["editor"])

@@ -12,7 +12,7 @@
             super();
             const authored = NorthStar.player.config.camera || {};
             this.#view = NorthStar.camera.createViewController({
-                initialMode: "third_person",
+                initialMode: engine.camera.views.available() ? engine.camera.views.mode() : "third_person",
                 toggleKey: 86,
                 transitionSeconds: 0.45,
                 minDistance: 0.5,
@@ -24,7 +24,7 @@
         }
 
         start() {
-            this.#active = engine.camera.available();
+            this.#active = engine.camera.views.available();
             if (this.#active) this.#view.start();
         }
 

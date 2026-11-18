@@ -10,6 +10,7 @@
 #include "qt_menu_theme.hpp"
 #include "qt_asset_card_delegate.hpp"
 #include "qt_prefab_preview.hpp"
+#include "qt_editor_viewport.hpp"
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/nac.hpp>
 #include <QApplication>
@@ -84,6 +85,13 @@ int main(int argc,char** argv) {
         "Verify project prefab card, original 3D preview and modal inspection.");
     QCommandLineOption multiPrefabSmoke("prefab-composition-smoke",
         "Verify native two-object Prefab composition, transforms and lighting.");
+    QCommandLineOption gpuPrefab("gpu-prefab",
+        "Prefab path relative to --content project root for GPU preview QA.",
+        "reference","prefabs/mahir_mt28.nprefab");
+    QCommandLineOption gpuCapture("gpu-capture",
+        "Save actual GPU viewport readback in MT28 preview smoke.","filename");
+    QCommandLineOption mt28GpuSmoke("mt28-gpu-preview-smoke",
+        "Benchmark native engine.render GPU preview with the full MT28 Scene V3.");
     QCommandLineOption mini14PrefabSmoke("mini14-prefab-smoke",
         "Check shared Mini-14 prefab native 3D modal, not its schematic fallback.");
     QCommandLineOption screenshot("screenshot",
@@ -103,6 +111,9 @@ int main(int argc,char** argv) {
     parser.addOption(prefabCardsSmoke);
     parser.addOption(multiPrefabSmoke);
     parser.addOption(mini14PrefabSmoke);
+    parser.addOption(mt28GpuSmoke);
+    parser.addOption(gpuCapture);
+    parser.addOption(gpuPrefab);
     parser.addOption(screenshot);
     parser.process(app);
     // Compatibility launcher only. Normal authoring uses the engine-owned
@@ -115,7 +126,7 @@ int main(int argc,char** argv) {
         parser.isSet(collisionIconsSmoke) ||
         parser.isSet(previewModalSmoke) ||
         parser.isSet(prefabCardsSmoke) || parser.isSet(multiPrefabSmoke) ||
-        parser.isSet(mini14PrefabSmoke) || parser.isSet(screenshot);
+        parser.isSet(mini14PrefabSmoke) || parser.isSet(mt28GpuSmoke) || parser.isSet(screenshot);
     if(!qa) {
         auto const executable=QDir(QCoreApplication::applicationDirPath())
             .filePath("northstarcpp_editor_qt.exe");
@@ -207,7 +218,7 @@ int main(int argc,char** argv) {
 
     QMainWindow window;
     window.setObjectName("northstarAssetBrowserWindow");
-    window.setWindowTitle("NorthStar Engine — Content Browser");
+    window.setWindowTitle("NorthStar Engine Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р РЋРІвЂћСћР В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р РЋРЎв„ў Content Browser");
     window.resize(1460,880);
     window.setMinimumSize(950,550);
     // The native browser is a QWidget; the Qt editor can place it into any
@@ -227,6 +238,7 @@ int main(int argc,char** argv) {
     auto* fileMenu=window.menuBar()->addMenu("&Content");
     fileMenu->addAction("&Refresh",QKeySequence(Qt::Key_F5),
         view,&northstarcpp::editor::QtContentBrowser::refresh);
+    fileMenu->addAction("Scene Sky...",&window,[view] {view->editSceneSky();});
     fileMenu->addSeparator();
     fileMenu->addAction("&Close",QKeySequence::Close,&window,&QMainWindow::close);
     auto* helpMenu=window.menuBar()->addMenu("&Help");
@@ -234,7 +246,7 @@ int main(int argc,char** argv) {
         QMessageBox::about(&window,"NorthStar Content Browser",
             "Native C++/Qt6 asset browser\n"
             "Project-scoped index, editable content, and asynchronous previews.\n"
-            "Kayla's Systems — 2026");
+            "Kayla's Systems Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р РЋРІвЂћСћР В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р Р‹Р РЋРЎв„ў 2026");
     });
     window.statusBar()->showMessage("Native Content Browser  |  F5 Refresh  |  "
         "Double-click to preview assets  |  Right-click to insert meshes");
@@ -250,6 +262,84 @@ int main(int argc,char** argv) {
         window.addDockWidget(Qt::BottomDockWidgetArea,layoutDock);
     }
     window.show();
+    if(parser.isSet(mt28GpuSmoke)) {
+#ifdef _WIN32
+        try {
+            namespace fs=std::filesystem;
+            auto const project=fs::u8path(
+                parser.value(content).toUtf8().toStdString());
+            auto const prefabRef=parser.value(gpuPrefab).toUtf8().toStdString();
+            auto const contentRoot=fs::is_directory(project/"assets")?
+                project/"assets":project;
+            auto mt28=northstarcpp::editor::prefab_preview::load(
+                contentRoot,prefabRef);
+            northstarcpp::editor::QtEditorViewport gpuViewport;
+            gpuViewport.resize(960,640);
+            gpuViewport.setAssetSources(contentRoot);
+            gpuViewport.setScene(&mt28);
+            gpuViewport.setAssetPreviewMode(true);
+            gpuViewport.setShowGrid(false);
+            gpuViewport.setOrbitMode(true,{0.f,1.6f,0.f},19.f);
+            gpuViewport.setOrbitAngles(.62f,-.27f);
+            gpuViewport.show();
+            QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+            gpuViewport.setDrawMode(
+                northstarcpp::editor::QtEditorViewport::DrawMode::EngineGpu);
+            // Large vehicles stream full-res models asynchronously.
+            // Do not report a fast empty GPU frame as a performance result.
+            bool success=gpuViewport.gpuActive();
+            QElapsedTimer warmup;warmup.start();
+            QString loadedStats;
+            int nativeMeshes=0;
+            int stableFrames=0,previousMeshes=-1;
+            while(success && warmup.elapsed()<15000 &&
+                  !(nativeMeshes>=int(std::min<std::size_t>(40,mt28.objects.size())) && stableFrames>=5)) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+                QThread::msleep(25);
+                success=gpuViewport.renderGpuNow();
+                loadedStats=gpuViewport.gpuAssetSummary();
+                nativeMeshes=loadedStats.section("Native meshes: ",1,1)
+                    .section(" |",0,0).toInt();
+                stableFrames=nativeMeshes>0 && nativeMeshes==previousMeshes?
+                    stableFrames+1:0;
+                previousMeshes=nativeMeshes;
+            }
+            std::vector<double> times;
+            for(int i=0;i<12 && success && nativeMeshes>0;++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,15);
+                gpuViewport.setOrbitAngles(.62f+float(i)*.075f,-.27f);
+                QElapsedTimer frame;frame.start();
+                success=gpuViewport.renderGpuNow();
+                times.push_back(double(frame.nsecsElapsed())/1.e6);
+            }
+            if(parser.isSet(gpuCapture) && success && nativeMeshes>0) {
+                const auto pixels=gpuViewport.captureRenderedFrame();
+                if(pixels.isNull()||!pixels.save(parser.value(gpuCapture),"PNG")){
+                    std::cerr<<"MT28_GPU_PREVIEW_ERROR GPU capture failed\n";
+                    return 24;
+                }
+            }
+            auto const summary=gpuViewport.gpuAssetSummary();
+            std::cout<<"MT28_GPU_PREVIEW active="<<gpuViewport.gpuActive()
+                     <<" prefab="<<prefabRef
+                     <<" actors="<<mt28.objects.size()
+                     <<" warmup_ms="<<warmup.elapsed()
+                     <<" native_meshes_after_warmup="<<nativeMeshes
+                     <<" summary="<<summary.toStdString()<<"\n";
+            std::cout<<"MT28_GPU_FRAME_CPU_MS";
+            for(auto sample:times)std::cout<<" "<<sample;
+            std::cout<<"\n";
+            return success && !mt28.objects.empty() &&
+                nativeMeshes>0?0:21;
+        }catch(std::exception const& error) {
+            std::cerr<<"MT28_GPU_PREVIEW_ERROR "<<error.what()<<"\n";
+            return 22;
+        }
+#else
+        std::cout<<"MT28_GPU_PREVIEW unsupported platform\n";
+        return 23;
+#endif
+    }
 
     if(parser.isSet(gitBadgeSmoke) || parser.isSet(layoutStabilitySmoke) ||
        parser.isSet(smoke) ||
@@ -268,7 +358,7 @@ int main(int argc,char** argv) {
         }
         if(parser.isSet(mini14PrefabSmoke)) {
             namespace role=northstarcpp::editor::asset_card_roles;
-            view->browseTo("prefabs");
+            view->browseTo("prefabs/weapon");
             auto* grid=view->findChild<QListView*>("assetGrid");
             auto* model=grid?grid->model():nullptr;
             QModelIndex selected;
@@ -330,7 +420,7 @@ int main(int argc,char** argv) {
             if(okay)try {
                 auto scene=northstarcpp::editor::prefab_preview::load(
                     fs::u8path(original.toUtf8().toStdString()),
-                    "prefabs/pistol.nprefab");
+                    "prefabs/weapon/pistol.nprefab");
                 auto child=scene.objects.front();
                 child.node.id=scene.objects.front().node.id+1;
                 child.node.parent=scene.objects.front().node.id;
@@ -361,7 +451,7 @@ int main(int argc,char** argv) {
                     QThread::msleep(10);
                 }
                 view->setSearchText("");
-                view->browseTo("prefabs");
+                view->browseTo("prefabs/weapon");
                 auto* grid=view->findChild<QListView*>("assetGrid");
                 auto* model=grid?grid->model():nullptr;
                 QModelIndex selected;
@@ -412,13 +502,36 @@ int main(int argc,char** argv) {
                                info->text().contains("Native models: 2") &&
                                info->text().contains("Missing models: 0")) {
                                 rendered=true;
+                                poll.stop(); // prevent reentrant timer callbacks
+                                bool const gpuNative=
+                                    canvas->property("previewBackend").toString()=="engine.render";
+                                auto const beforeRevision=
+                                    canvas->property("gpuRenderRevision").toULongLong();
                                 QImage bright=canvas->grab().toImage();
                                 slider->setValue(0);
-                                QCoreApplication::processEvents(
-                                    QEventLoop::AllEvents,30);
+                                // A new frame is now computed asynchronously;
+                                // wait for its completion before comparing.
+                                QElapsedTimer waitLight;waitLight.start();
+                                while(waitLight.elapsed()<7000 &&
+                                      !canvas->property("previewRendered").toBool()) {
+                                    QCoreApplication::processEvents(
+                                        QEventLoop::AllEvents,30);
+                                    QThread::msleep(10);
+                                }
                                 QImage dim=canvas->grab().toImage();
-                                lighting=!bright.isNull() && !dim.isNull() &&
-                                         bright!=dim;
+                                if(gpuNative) {
+                                    // Native child swapchain pixels are not
+                                    // included in QWidget::grab(). Confirm
+                                    // a fresh engine.render frame submission.
+                                    lighting=canvas->property("previewRendered").toBool() &&
+                                        canvas->property("gpuRenderRevision").toULongLong()>beforeRevision &&
+                                        canvas->property("gpuAssetSummary").toString().contains("Native meshes:");
+                                } else {
+                                    lighting=canvas->property("previewRendered").toBool() &&
+                                        !bright.isNull() && !dim.isNull() &&
+                                        bright!=dim;
+                                }
+
                                 modal->accept();
                             }
                         }
@@ -438,7 +551,7 @@ int main(int argc,char** argv) {
         }
         if(parser.isSet(prefabCardsSmoke)) {
             namespace role=northstarcpp::editor::asset_card_roles;
-            view->browseTo("prefabs");
+            view->browseTo("prefabs/weapon");
             auto* grid=view->findChild<QListView*>("assetGrid");
             auto* model=grid?grid->model():nullptr;
             QModelIndex index;
@@ -458,11 +571,11 @@ int main(int argc,char** argv) {
             if(okay) {
                 QElapsedTimer wait;wait.start();
                 while(wait.elapsed()<15000 &&
-                      view->cachedThumbnail("prefabs/pistol.nprefab").isNull()) {
+                      view->cachedThumbnail("prefabs/weapon/pistol.nprefab").isNull()) {
                     QCoreApplication::processEvents(QEventLoop::AllEvents,50);
                     QThread::msleep(15);
                 }
-                okay=!view->cachedThumbnail("prefabs/pistol.nprefab").isNull();
+                okay=!view->cachedThumbnail("prefabs/weapon/pistol.nprefab").isNull();
             }
             if(okay) {
                 grid->setCurrentIndex(index);
@@ -510,9 +623,9 @@ int main(int argc,char** argv) {
                 int count;
             };
             std::array<FolderCase,4> const tests{{
-                {"textures/skydome.ytd","Texture","Texture · ", "#4DBA87",5},
-                {"models/skydome.ydd","Mesh","Mesh · embedded","#58A7DB",1},
-                {"materials/skydome.ymat","Material","Material · embedded","#A66AD6",3},
+                {"textures/skydome.ytd","Texture","Texture Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В· ", "#4DBA87",5},
+                {"models/skydome.ydd","Mesh","Mesh Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В· embedded","#58A7DB",1},
+                {"materials/skydome.ymat","Material","Material Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›Р В Р’В Р Р†Р вЂљРІвЂћСћР В РІР‚в„ўР вЂ™Р’В· embedded","#A66AD6",3},
                 {"","Folder","Folder","#C99A52",3}
             }};
             int checked=0;
@@ -935,7 +1048,15 @@ int main(int argc,char** argv) {
                         QObject::connect(&check,&QTimer::timeout,&window,[&] {
                             auto* modal=qobject_cast<QDialog*>(
                                 QApplication::activeModalWidget());
-                            if(modal && modal->objectName()=="assetPreviewDialog") {
+                            if(modal && folder.endsWith(".ymat") &&
+                               modal->objectName()=="northstarMaterialAssetEditor") {
+                                seen=modal->windowTitle().contains(folder+"@"+entry);
+                                auto* sphere=modal->findChild<QLabel*>("materialAssetPreviewSphere");
+                                if(seen && sphere && !sphere->pixmap().isNull()) {
+                                    rendered=true;
+                                    modal->accept();
+                                }
+                            } else if(modal && modal->objectName()=="assetPreviewDialog") {
                                 seen=true;
                                 auto* viewport=modal->findChild<QWidget*>("assetPreviewCanvas");
                                 if(viewport && viewport->property("previewRendered").toBool()) {

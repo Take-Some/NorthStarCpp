@@ -8,13 +8,13 @@ optional, separate weapon prefab.
 
 ## Shared character prefabs
 
-- `sharedAssets/prefabs/abby.nprefab`: independent Abby YDD visual, YMT
+- `sharedAssets/prefabs/characters/abby.nprefab`: independent Abby YDD visual, YMT
   skeleton resolved from the model, materials and `northstar.animation.default`
   V3 prefab component containing the authored `mm-explore.ycd@abby-mm-explore-idle`
   clip. No Pawn, camera, physics motor or weapon component.
 - First-person arms use `Scene.setVisualMode(entity, "first_person_arms")`
   on the **same** Abby Entity. No FPS-specific prefab or second model exists.
-- `Projects/AbbyPistolDemo/prefabs/pistol.nprefab`: a separate, collision-free
+- `Projects/AbbyPistolDemo/prefabs/weapon/pistol.nprefab`: a separate, collision-free
   weapon model. Weapon selection, ammunition, audio and bone attachment
   belong to project scripts and can be omitted or replaced.
 
@@ -28,7 +28,7 @@ An independent Abby can be instantiated in any project:
 ```js
 import { Prefab, Scene } from "@northstar/engine";
 
-const npc = Prefab.instantiate("prefabs/abby.nprefab", {
+const npc = Prefab.instantiate("prefabs/characters/abby.nprefab", {
     position: { x: 4, y: 0, z: 9 }
 });
 // Not a Player; can be an NPC, decorative actor or cinematic character.
@@ -48,9 +48,9 @@ their respective Scene entities, not to Pawn. Pawn does not
 reference Abby's mesh or pistol. Any compatible entity can receive
 player-control components in a project.
 
-For this demo only, `scripts/playerConfig.js` associates that generic Pawn
+For this demo only, `assets/scripts/playerConfig.js` associates that generic Pawn
 with the optional `character.prefab` only; camera mode changes rendering, not entity count.
-`CharacterVisual` in `scripts/main.js` instantiates and animates Abby
+`CharacterVisual` in `assets/scripts/main.js` instantiates and animates Abby
 independently of `PistolWeapon`. If `weapon.enabled: false`, Abby remains.
 If `character.prefab` is changed to a different animated model, the
 visual system uses that prefab. An NPC prefab does not require either

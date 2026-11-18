@@ -52,7 +52,7 @@ Neither OBJ conversion nor a new game runtime ABI is introduced.
 
 ## Acceptance
 
-Fixture: `Projects/NorthStarFirstPersonPlatform/prefabs/pistol.nprefab`.
+Fixture: `Projects/NorthStarFirstPersonPlatform/prefabs/weapon/pistol.nprefab`.
 
 Two native pistol instances, one with an independent transform:
 - **43,804 triangles**

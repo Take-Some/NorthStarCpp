@@ -9,11 +9,32 @@ import tempfile
 ROOT=Path(__file__).resolve().parents[1]
 SRC=ROOT/"engine/northstarcpp/modules/render/vulkan"
 SOURCES=[
+    ("deferred_primitive.vert","deferred_primitive_vertex"),
     ("deferred_gbuffer.frag","deferred_gbuffer_fragment"),
     ("deferred_gbuffer.frag","deferred_gbuffer_fragment_v2"),
     ("deferred_resolve.vert","deferred_resolve_vertex"),
     ("deferred_resolve.frag","deferred_resolve_fragment"),
     ("deferred_resolve.frag","deferred_resolve_fragment_v2"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_ssao"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_ssao"),
+    ("deferred_ssao.frag","deferred_ssao_fragment"),
+    ("deferred_shadow.vert","deferred_shadow_vertex"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_csm"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_csm"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_ssao_csm"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_ssao_csm"),
+    ("deferred_bloom.frag","deferred_bloom_fragment"),
+    ("deferred_composite.frag","deferred_composite_fragment"),
+    ("deferred_luminance.frag","deferred_luminance_fragment"),
+    ("deferred_velocity.frag","deferred_velocity_fragment"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_ssao_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_ssao_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_csm_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_csm_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_ssao_csm_hdr"),
+    ("deferred_resolve.frag","deferred_resolve_fragment_v2_ssao_csm_hdr"),
 ]
 def main():
     glslc=shutil.which("glslc")
@@ -28,7 +49,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ns-vk-deferred-") as tmp:
         for filename,name in SOURCES:
             output=Path(tmp)/(filename+".spv")
-            flags=["-DNS_GBUFFER_V2=1"] if name.endswith("_v2") else []
+            flags=[]
+            if "_v2" in name:flags.append("-DNS_GBUFFER_V2=1")
+            if "_ssao" in name and filename=="deferred_resolve.frag":
+                flags.append("-DNS_SSAO_HALF=1")
+            if "_csm" in name and filename=="deferred_resolve.frag":
+                flags.append("-DNS_CSM=1")
+            if "_hdr" in name and filename=="deferred_resolve.frag":
+                flags.append("-DNS_HDR_LINEAR=1")
             subprocess.run([glslc,"-O","--target-env=vulkan1.3",*flags,
                 str(SRC/filename),"-o",str(output)],check=True)
             data=output.read_bytes()

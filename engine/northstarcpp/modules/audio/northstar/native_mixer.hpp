@@ -13,6 +13,14 @@ inline constexpr std::size_t max_voices = 128;
 // Not internally synchronized: owning provider guards state with a mutex.
 class Mixer {
 public:
+    struct PreparedPcm {
+        std::vector<std::int16_t> samples;
+        std::uint32_t frames=0,rate=0,channels=0;
+    };
+    // Allocate and copy decoded PCM on the gameplay thread BEFORE locking
+    // the device mixer. A large NAC clip must not block real-time output.
+    static PreparedPcm prepare(NorthStarPcm16 const&);
+    std::uint64_t play(PreparedPcm&&,NorthStarAudioVoiceOptions const&);
     std::uint64_t play(NorthStarPcm16 const&, NorthStarAudioVoiceOptions const&);
     bool stop(std::uint64_t id);
     void stop_all() noexcept;
@@ -36,6 +44,9 @@ private:
     Voice* find(std::uint64_t id);
     std::vector<Voice> voices_;
     std::uint64_t next_id_ = 1;
+    // Block peak limiter state, shared across output channels to preserve
+    // stereo imaging and avoid the crackle of hard PCM16 clipping.
+    float output_gain_ = 1.f;
     NorthStarAudioListener listener_{sizeof(NorthStarAudioListener),
         {0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
 };

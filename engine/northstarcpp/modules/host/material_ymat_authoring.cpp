@@ -91,7 +91,7 @@ std::vector<std::uint8_t> pack_payload(
     std::memcpy(data.data(),"NEF8",4);
     write_integer(data,4,2,1);   // NEF8 v1
     write_integer(data,6,2,128);
-    write_integer(data,8,2,kind);  // Native YMAT (30) or YTD (1)
+    write_integer(data,8,2,kind);  // Native YTD (1); material authoring uses XML kind 4
     write_integer(data,10,2,1);  // raw DEFLATE
     write_integer(data,12,2,1);  // schema
     write_integer(data,16,8,128);
@@ -106,12 +106,7 @@ std::vector<std::uint8_t> pack_payload(
     std::memcpy(data.data()+128,zipped.data(),zipped.size());
     return data;
 }
-std::vector<std::uint8_t> pack(Tree const& root) {
-    std::string const body=json(root);
-    if(body.size()>512*1024)
-        throw std::invalid_argument("Editable YMAT body exceeds 512 KiB");
-    return pack_payload(body,30,1);
-}
+
 }
 std::vector<std::uint8_t> encode_editor_ymat(
     std::string const& authored_descriptor) {
@@ -133,17 +128,33 @@ std::vector<std::uint8_t> encode_editor_ymat(
     auto const color=decode_color(descriptor.get<std::string>("base_color"));
     auto const metallic=unit(descriptor.get<float>("metallic"));
     auto const roughness=unit(descriptor.get<float>("roughness"));
+
+    // Author XML directly. A temporary JSON/NEF8 kind-30 library must never
+    // be constructed, including inside editor code paths.
     Tree material;
-    material.put("name",name);
-    material.put("shader",shader);
-    material.put("blend",blend=="translucent"?"alpha":blend);
-    material.put("alpha_cutoff",cutoff);
-    material.put("two_sided",descriptor.get<bool>("two_sided",false));
+    material.put("<xmlattr>.name",name);
+    material.put("<xmlattr>.shader",shader);
+    material.put("Surface.<xmlattr>.blend",blend=="translucent"?"alpha":blend);
+    material.put("Surface.<xmlattr>.alpha_cutoff",cutoff);
+    material.put("Surface.<xmlattr>.two_sided",
+                 descriptor.get<bool>("two_sided",false)?"true":"false");
     Tree params;
-    params.push_back({"",parameter("base_color","color",color,4)});
-    params.push_back({"",parameter("metallic","float",{metallic,0,0,0},1)});
-    params.push_back({"",parameter("roughness","float",{roughness,0,0,0},1)});
-    material.add_child("params",params);
+    auto push_param=[&](std::string const& id,std::string const& type,
+                        std::array<float,4> const& values,unsigned count) {
+        Tree node;node.put("<xmlattr>.name",id);
+        node.put("<xmlattr>.type",type);
+        std::ostringstream data;data.imbue(std::locale::classic());data<<std::setprecision(9);
+        for(unsigned i=0;i<count;++i) {
+            if(i)data<<',';
+            data<<values[i];
+        }
+        node.put("<xmlattr>.value",data.str());
+        params.add_child("Param",node);
+    };
+    push_param("base_color","color",color,4);
+    push_param("metallic","float",{metallic,0,0,0},1);
+    push_param("roughness","float",{roughness,0,0,0},1);
+    material.add_child("Params",params);
     Tree textures;
     for(auto const* slot:{"base_color","normal","roughness","metallic","emissive"}) {
         auto ref=descriptor.get<std::string>(std::string(slot)+"_texture","");
@@ -152,27 +163,35 @@ std::vector<std::uint8_t> encode_editor_ymat(
         if(ref.find(".ytd")==std::string::npos)
             throw std::invalid_argument("Native YMAT texture must reference YTD");
         Tree entry;
-        entry.put("slot",slot);
-        entry.put("ref",ref);
-        entry.put("required",true);
-        textures.push_back({"",entry});
+        entry.put("<xmlattr>.slot",slot);
+        entry.put("<xmlattr>.ref",ref);
+        textures.add_child("Texture",entry);
     }
-    if(!textures.empty())material.add_child("textures",textures);
-    if(auto graph=descriptor.get_child_optional("graph"))
-        material.add_child("graph",*graph);
-    // PropertyTree writes numeric JSON scalars as strings. Store the exact
-    // validated authoring source as an encoded field instead, preserving
-    // number/bool types for the Qt editor's strict descriptor validation.
-    material.put("editor_source",authored_descriptor);
-    Tree materials;
-    materials.push_back({"",material});
-    Tree root;
-    root.put("schema","northstar.ymat.v1");
-    root.put("editor_schema","northstar.ymat.editor.v1");
-    root.add_child("materials",materials);
-    // The old in-memory descriptor is converted once to canonical XML.
-    // Only NEF8 kind-4/XML bytes can leave the authoring API.
-    auto encoded=migrate_ymat_to_xml(pack(root));
+    if(!textures.empty())material.add_child("Textures",textures);
+    // Parse typed original descriptor, not PropertyTree's stringified JSON,
+    // preserving numeric/boolean Material Graph node types in typed XML.
+    if(descriptor.get_child_optional("graph")) {
+        auto parsed=detail::typed_xml_value_from_json(authored_descriptor);
+        bool found=false;
+        for(auto const& field:parsed) {
+            if(field.first!="Value" ||
+               field.second.get<std::string>("<xmlattr>.name","")!="graph")continue;
+            if(field.second.get<std::string>("<xmlattr>.type")!="object")
+                throw std::invalid_argument("Material Graph must be an object");
+            material.add_child("Graph.Value",field.second);
+            found=true;
+        }
+        if(!found)throw std::invalid_argument("Missing typed Material Graph");
+    }
+    Tree doc,library;
+    library.put("<xmlattr>.version",2);
+    library.put("<xmlattr>.schema","northstarcpp.ymat.material_library.v2");
+    library.add_child("Material",material);
+    doc.add_child("YmatMaterialLibrary",library);
+    std::ostringstream xml;
+    boost::property_tree::write_xml(xml,doc,
+        boost::property_tree::xml_writer_make_settings<char>(' ',2));
+    auto encoded=encode_xml_ymat(xml.str(),1);
     auto const list=detail::parse_list_file(encoded);
     (void)detail::parse_materials(list,"Materials/Editor.ymat");
     return encoded;
@@ -264,21 +283,7 @@ std::string decode_editor_ymat(std::vector<std::uint8_t> const& bytes) {
         json<<'}';
         return json.str();
     }
-    if(file.kind!=30)
-        throw std::invalid_argument("Unsupported YMAT editor source kind");
-    auto root=detail::parse_json(std::string(file.body.begin(),file.body.end()));
-    if(root.get<std::string>("editor_schema","")!="northstar.ymat.editor.v1")
-        throw std::invalid_argument("Read-only imported YMAT: create a material copy");
-    auto const& materials=root.get_child("materials");
-    if(materials.size()!=1)
-        throw std::invalid_argument("Editable YMAT must have exactly one material");
-    auto editor=materials.begin()->second.get<std::string>("editor_source");
-    if(editor.size()>512*1024)
-        throw std::invalid_argument("Editable YMAT descriptor exceeds size limit");
-    auto typed=detail::parse_json(editor);
-    if(typed.get<unsigned>("schema")!=1)
-        throw std::invalid_argument("Invalid editable YMAT source");
-    return editor;
+    throw std::invalid_argument("Only XML NEF8 kind-4 YMAT is supported");
 }
 std::vector<std::uint8_t> encode_rgba8_ytd(
     std::string const& name,unsigned width,unsigned height,
@@ -348,8 +353,8 @@ std::vector<std::uint8_t> encode_rgba8_ytd(
 YmatLibraryBody read_ymat_library(
     std::vector<std::uint8_t> const& original) {
     auto file=detail::parse_list_file(original);
-    if(file.kind!=4 && file.kind!=30)
-        throw std::invalid_argument("Only NEF8 kind 4/30 are material libraries");
+    if(file.kind!=4)
+        throw std::invalid_argument("Only XML NEF8 kind-4 YMAT material libraries are supported");
     (void)detail::parse_materials(file,"library.ymat");
     return {file.kind,file.entries,
             std::string(file.body.begin(),file.body.end())};

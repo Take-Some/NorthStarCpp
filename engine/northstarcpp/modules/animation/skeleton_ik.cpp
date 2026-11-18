@@ -10,9 +10,7 @@ bool SkeletonPose::pose_two_bone(Skeleton const& rig,
     if(!target.valid()||!pole.valid()||shoulder_limit<=0.f||elbow_limit<=0.f||
        !std::isfinite(shoulder_limit)||!std::isfinite(elbow_limit))return false;
     auto index=[&](char const* name)->std::size_t {
-        auto it=std::find_if(rig.joints.begin(),rig.joints.end(),
-            [&](auto const& joint){return joint.name==name;});
-        return std::size_t(it-rig.joints.begin());
+        return rig.joint_index(name);
     };
     auto const shoulder=index(shoulder_name),elbow=index(elbow_name),
                wrist=index(wrist_name);
@@ -105,6 +103,72 @@ bool SkeletonPose::pose_two_bone(Skeleton const& rig,
                 b.elements[row][col]*rule.source_b_weight;
     }
     return raised||bent;
+}
+
+bool SkeletonPose::orient_wrist(Skeleton const& rig,char const* wrist_name,
+    math::float4x4 const& desired_global,float max_angle_radians)
+{
+    using namespace math;
+    if(!std::isfinite(max_angle_radians) || max_angle_radians<=0.f)
+        return false;
+    auto const joint=rig.joint_index(wrist_name);
+    if(joint>=rig.joints.size())return false;
+    if(joint>=local_.size())return false;
+    float4x4 target=desired_global;
+    auto const parent=rig.joints[joint].parent;
+    if(parent>=0) {
+        float4x4 inverse;
+        if(!inverse.try_invert(global_[std::size_t(parent)]))
+            return false;
+        target=desired_global*inverse;
+    }
+    // Strip translation and normalize parent scale before quaternion
+    // extraction; imported YDD bind transforms may carry non-unit scale.
+    for(unsigned row=0;row<3;++row) {
+        float length=0.f;
+        for(unsigned col=0;col<3;++col)
+            length+=target.elements[row][col]*target.elements[row][col];
+        if(length<1e-8f || !std::isfinite(length))return false;
+        length=std::sqrt(length);
+        for(unsigned col=0;col<3;++col)
+            target.elements[row][col]/=length;
+    }
+    for(unsigned col=0;col<3;++col) {
+        target.elements[3][col]=0.f;
+        target.elements[col][3]=0.f;
+    }
+    target.elements[3][3]=1.f;
+    auto desired=quaternion(target).normalize();
+    auto const current=local_[joint].rotation;
+    if(!desired.valid() || !current.valid())return false;
+    float dot=current.x*desired.x+current.y*desired.y+
+              current.z*desired.z+current.w*desired.w;
+    dot=std::clamp(std::abs(dot),0.f,1.f);
+    const float angle=2.f*std::acos(dot);
+    if(angle<1e-4f)return true;
+    const float amount=std::min(1.f,std::min(max_angle_radians,2.2f)/angle);
+    auto const selected=slerp(current,desired,amount).normalize();
+    local_[joint].rotation=selected;
+    // These helpers are importer-verified bind-identical copies. Only
+    // matched wrist helpers can follow the wrist rotation, not arbitrary
+    // finger-roll or twist branches (which previously tore the skin).
+    for(auto const& [helper,source]:rig.mirrored_helpers)
+        if(source==joint && helper<local_.size())
+            local_[helper].rotation=selected;
+    evaluate(rig);
+    for(auto const& rule:rig.secondary_palette_constraints) {
+        if(rule.bone>=palette_.size() || rule.source_a>=palette_.size() ||
+           rule.source_b>=palette_.size())continue;
+        auto const& a=palette_[rule.source_a];
+        auto const& b=palette_[rule.source_b];
+        auto& out=palette_[rule.bone];
+        for(int row=0;row<4;++row)
+            for(int col=0;col<4;++col)
+                out.elements[row][col]=a.elements[row][col]*
+                    (1.f-rule.source_b_weight)+
+                    b.elements[row][col]*rule.source_b_weight;
+    }
+    return true;
 }
 
 }

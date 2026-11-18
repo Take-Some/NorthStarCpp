@@ -1,5 +1,7 @@
 # NorthStarCpp — Editable Native YMAT Libraries QA
 
+> **Document status:** Historical material-editor report (2026-11-15). Any kind-30 compatibility described below is superseded by the [XML-only YMAT format](YMAT_XML_ONLY_MIGRATION_2026-11-18.md); do not restore the legacy reader.
+
 **Date:** 2026-11-15
 **Workspace:** C:/Users/AidenFox/Documents/NorthStarCpp
 **QA build:** out/ymat-entry-editor-qa-20261115

@@ -49,12 +49,15 @@ std::string expand_material_graph_functions(
     std::string const& graph_json,MaterialFunctionResolver const& resolver);
 std::string compile_material_graph_with_functions(
     std::string const& graph_json,MaterialFunctionResolver const& resolver);
-// Reads project *.material.json, *.material-instance.json, compiled YMAT;
+// Reads native XML YMAT and independently versioned Material Instances;
 // loads referenced texture images from VFS, including common sharedAssets.
 // Throws on missing, malformed, oversized or unsupported resource content.
 MaterialDefinition load_material_definition(AssetStore const& assets,
                                             std::string const& reference);
 
+// Decode one named native YTD entry with the established BCn material codec.
+MaterialImage load_native_texture_image(AssetStore const& assets,
+                                        std::string const& reference);
 // Per-model material transaction. Decodes shared YTD dictionaries once across
 // slots, rather than repeating full ListFile decompression per material.
 // Lifetime is explicit and scoped; no process-global asset cache is used.

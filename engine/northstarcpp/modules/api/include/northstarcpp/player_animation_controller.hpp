@@ -37,12 +37,19 @@ public:
         if(!player_blueprint::good_animation(graph_))
             throw std::invalid_argument("Invalid animation graph");
         sample_.clip=player_blueprint::clip(graph_,sample_.state);
+        if(sample_.clip.empty())sample_.clip=fallback_clip();
     }
     void advance(float seconds,float speed,bool grounded,bool rising) {
         if(!std::isfinite(seconds)||seconds<0.f||seconds>1.f||
            !std::isfinite(speed)||speed<0.f)
             throw std::invalid_argument("Invalid animation update");
         auto next=player_blueprint::pick_animation(graph_,speed,grounded,rising);
+        // An optional YCD state may be unbound while content is authored.
+        // Never select an empty clip and expose a bind pose to the renderer.
+        // Hold the last playable clip/state instead; movement telemetry still
+        // updates even when its requested transition cannot be sampled.
+        if(player_blueprint::clip(graph_,next).empty() && !sample_.clip.empty())
+            next=sample_.state;
         if(next!=sample_.state) {
             sample_.previous=sample_.state;
             sample_.previous_clip=sample_.clip;
@@ -60,6 +67,15 @@ public:
     Sample const& sample() const noexcept {return sample_;}
     player_blueprint::Animation const& graph() const noexcept {return graph_;}
 private:
+    std::string fallback_clip() const {
+        using State=player_blueprint::AnimationState;
+        for(auto state:{State::Idle,State::Walk,State::Run,
+                        State::Jump,State::Fall}) {
+            auto const& name=player_blueprint::clip(graph_,state);
+            if(!name.empty())return name;
+        }
+        return {};
+    }
     player_blueprint::Animation graph_;
     Sample sample_{};
     float blend_elapsed_=100.f;

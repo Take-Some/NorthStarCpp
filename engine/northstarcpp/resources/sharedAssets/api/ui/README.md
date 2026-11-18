@@ -2,12 +2,11 @@
 
 Every scripted NorthStarCpp project receives the default UI authoring root:
 
-`sharedAssets/scripts/ui/UI.js`
+`engine/northstarcpp/resources/sharedAssets/api/ui/UI.js`
 
-It is evaluated **once per V8 context**, after the engine SDK bootstrap
-and before the project's `scripts/main.js`. A project may override its
-implementation with `Projects/<Project>/scripts/ui/UI.js` (the same
-virtual path, `scripts/ui/UI.js`) without altering the C++ engine.
+The protected UI implementation is evaluated once per V8 context,
+after engine bootstrap and before project scripts. Projects compose
+components and documents without replacing this engine-owned service.
 
 The engine does not know about missions, health, inventory, progress,
 advertising or game rules. Only this generic native UI operation exists:
@@ -92,34 +91,22 @@ quests.unmount();
 Properties are generic strings, finite numbers and booleans. Colors use
 `#RRGGBBAA` strings. Node names are scoped to the root layer.
 
-## Override and hot reload
+## Declarative components and hot reload
 
-A project may create `scripts/ui/UI.js` to replace the shared default root.
-Its script should register exactly one implementation:
+Use root.render with nested element descriptors and event callbacks.
+This validates atomically and avoids native submission for unchanged
+trees. Stable IDs preserve event callbacks; reloadFromAsset uses the
+same normalizer and keeps runtime overrides.
 
-```js
-(() => {
-    class ProjectUIRoot {
-        constructor(layer) { this.layer = layer; }
-        mount() { /* compose UI through NorthStar.modules.engine.UI.mount */ }
-        unmount() { /* remove the project layer */ }
-    }
-    NorthStar.modules.engine.UI.registerRoot(ProjectUIRoot);
-})();
-```
-
-The loader includes `ui/UI.js` and its flat compatibility alias `UI.js`
-in the project-root modification watch list, so source changes trigger the
-existing script-context hot reload. An invalid override must fail
-initialization rather than silently fall back to a different UI behavior.
+For file-backed menus, use UI.loadAsset. The Qt editor indexes the
+embedded types/northstar-engine.d.ts for autocomplete, including
+UiDeclaration, UiDocument and UIRoot.render.
 
 ## Boundaries
 
-The native renderer currently composites this tree as a **screen-space**
-overlay. Render-to-texture and an entity/material attachment contract are
-required before a project can display the same UI on a 3D surface (e.g.,
-an advertising screen). Creating an `image` node does not, by itself,
-implement world-space UI or guarantee image-resource drawing support.
+Screen roots and UI.createSurface world roots share the same
+declaration contract. Actual world-space rendering depends on provider
+capabilities and project assets; a UI image does not create an entity.
 
 Gameplay values remain project-script state; UI nodes are presentation
 objects only. No gameplay-specific native API, flags, ECS components or

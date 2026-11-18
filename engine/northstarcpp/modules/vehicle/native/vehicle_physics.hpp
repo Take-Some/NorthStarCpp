@@ -3,6 +3,7 @@
 // This is NOT Jolt VehicleConstraint: ground/impact contacts are supplied by host.
 #pragma once
 #include <northstarcpp/vehicle_cabin_plugin.h>
+#include "vehicle_powertrain.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -41,6 +42,12 @@ struct Vehicle {
     std::vector<Wheel> wheels;
     std::vector<Seat> seats;
     std::vector<Door> doors;
+    Powertrain powertrain;
+    // Rig invariants computed once, reused by every physics substep.
+    float driven_weight=0.f;
+    float brake_weight=0.f;
+    float driven_radius=0.34f;
+    float axle_z2=0.1f,track_x2=0.1f;
     float mass=1500.f;
     float yaw_inertia=3200.f;
     float center_of_mass_y=0.65f;
@@ -59,8 +66,26 @@ struct Vehicle {
     float last_forward_accel=0.f;
     float last_lateral_accel=0.f;
     std::uint32_t grounded_wheels=0;
+    bool heightfield_follow=false, heightfield_calibrated=false;
+    float initial_height=0.f, initial_ground=0.f;
+    float ground_calibration=0.f, heave_velocity=0.f;
     float target_x=0, target_z=0, target_speed=0, arrival_radius=2.f;
 };
+inline void refresh_rig_cache(Vehicle& vehicle) {
+    float drive=0.f,brake=0.f,radius=0.f,z2=0.f,x2=0.f;
+    for(auto const& w:vehicle.wheels){
+        drive+=w.setup.drive_factor;
+        brake+=w.setup.brake_factor;
+        radius+=w.setup.drive_factor*w.setup.radius;
+        z2+=w.setup.mount[2]*w.setup.mount[2];
+        x2+=w.setup.mount[0]*w.setup.mount[0];
+    }
+    vehicle.driven_weight=drive;
+    vehicle.brake_weight=brake;
+    vehicle.driven_radius=drive>0.f?radius/drive:0.34f;
+    vehicle.axle_z2=std::max(.1f,z2);
+    vehicle.track_x2=std::max(.1f,x2);
+}
 inline Wheel default_wheel(float x,float z,bool steer,bool driven) {
     Wheel w;
     auto& c=w.setup;
@@ -88,6 +113,7 @@ inline void default_rig(Vehicle& v) {
     v.brake_force=v.mass*v.definition.braking;
     v.rolling_resistance=0.015f;
     v.aerodynamic_drag=0.55f;
+    refresh_rig_cache(v);
 }
 inline void guide(Vehicle& v) {
     auto& s=v.state;
@@ -125,23 +151,49 @@ inline bool step_substep(Vehicle& v,float dt) {
             door.fraction=std::max(door.target,door.fraction-travel);
     }
     float const heading=v.state.heading;
+    if(v.heightfield_follow) {
+        float average=0.f,calibration=0.f;
+        unsigned count=0u;
+        for(auto const& wheel:v.wheels)
+            if(wheel.explicit_contact && wheel.telemetry.in_contact) {
+                auto const& c=wheel.setup;
+                average+=wheel.ground_y;
+                float const preload=std::min(c.travel,
+                    (v.mass*gravity/std::max(1.f,float(v.wheels.size())))/
+                    std::max(1.f,c.spring_rate));
+                calibration+=v.state.position[1]+c.mount[1]-
+                    c.rest_length-c.radius+preload-wheel.ground_y;
+                ++count;
+            }
+        if(count) {
+            average/=count;
+            if(!v.heightfield_calibrated) {
+                v.initial_ground=average;
+                v.initial_height=v.state.position[1];
+                v.ground_calibration=calibration/count;
+                v.heightfield_calibrated=true;
+            }
+            float const desired=v.initial_height+(average-v.initial_ground);
+            float const acceleration=clamp(
+                (desired-v.state.position[1])*80.f-
+                v.heave_velocity*18.f,-40.f,40.f);
+            v.heave_velocity=clamp(v.heave_velocity+acceleration*dt,-6.f,6.f);
+            v.state.position[1]+=v.heave_velocity*dt;
+        }
+    }
     float const speed=std::hypot(v.forward_speed,v.lateral_speed);
     float const steer_scale=1.f/(1.f+speed*speed/(25.f*25.f));
     float force_forward=0.f,force_lateral=0.f,yaw_torque=0.f;
-    float driven_weight=0.f,brake_weight=0.f;
-    for(auto const& w:v.wheels) {
-        driven_weight+=w.setup.drive_factor;
-        brake_weight+=w.setup.brake_factor;
-    }
+    float const driven_weight=v.driven_weight;
+    float const brake_weight=v.brake_weight;
+    float const drive_force=v.powertrain.enabled?
+        update_powertrain(v.powertrain,dt,v.forward_speed,v.state.throttle,
+            v.driven_radius):
+        v.state.throttle*v.engine_force;
     float largest_long_slip=0.f,largest_lat_slip=0.f;
     std::uint32_t contacted=0u;
     float const nominal_load=v.mass*gravity/static_cast<float>(v.wheels.size());
-    float z2=0.f,x2=0.f;
-    for(auto const& w:v.wheels) {
-        z2+=w.setup.mount[2]*w.setup.mount[2];
-        x2+=w.setup.mount[0]*w.setup.mount[0];
-    }
-    z2=std::max(z2,0.1f);x2=std::max(x2,0.1f);
+    float const z2=v.axle_z2,x2=v.track_x2;
     for(auto& w:v.wheels) {
         auto const& c=w.setup;
         auto& t=w.telemetry;
@@ -157,7 +209,8 @@ inline bool step_substep(Vehicle& v,float dt) {
         if(w.explicit_contact) {
             if(t.in_contact) {
                 float const wheel_height=v.state.position[1]+c.mount[1];
-                float const available=c.rest_length+c.radius+w.ground_y-wheel_height;
+                float const available=c.rest_length+c.radius+w.ground_y+
+                    (v.heightfield_follow?v.ground_calibration:0.f)-wheel_height;
                 t.compression=clamp(available,0.f,c.travel);
                 float const compression_rate=clamp(
                     (t.compression-previous_compression)/dt,-20.f,20.f);
@@ -200,7 +253,7 @@ inline bool step_substep(Vehicle& v,float dt) {
         force_lateral+=force_x;
         yaw_torque+=c.mount[2]*force_x-c.mount[0]*force_z;
         float drive=driven_weight>0.f?
-            v.state.throttle*v.engine_force*c.radius*
+            drive_force*c.radius*
             (c.drive_factor/driven_weight):0.f;
         if(v.traction_enabled && std::abs(t.slip_ratio)>0.25f &&
            drive*t.slip_ratio>0.f)

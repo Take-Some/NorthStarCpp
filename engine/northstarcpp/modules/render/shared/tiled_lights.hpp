@@ -92,6 +92,16 @@ inline TileLightGrid build_tile_lights(
             auto* slot=grid.indices.data()+offset;
             for(std::uint32_t l=0;l<count;++l) {
                 auto const& light=lights[l];
+                // Global directional and sky lights intersect EVERY screen tile.
+                if(light.direction_cone[3]<=-2.f) {
+                    if(slot[0]==max_lights_per_tile) {
+                        slot[0]=overflow_light_tile;
+                        ++grid.fallback_tiles;
+                        break;
+                    }
+                    slot[1+slot[0]++]=l;
+                    continue;
+                }
                 TileVec3 const center_to_light{
                     light.position_range[0]-eye.x,light.position_range[1]-eye.y,
                     light.position_range[2]-eye.z};

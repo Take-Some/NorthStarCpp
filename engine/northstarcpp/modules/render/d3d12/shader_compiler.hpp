@@ -12,6 +12,7 @@ Microsoft::WRL::ComPtr<ID3DBlob> compile_authored_material(const char* entry,con
 Microsoft::WRL::ComPtr<ID3DBlob> compile_material_variant(
     const std::string& source,const char* entry,const char* profile);
 Microsoft::WRL::ComPtr<ID3DBlob> compile_deferred(const char* entry,const char* profile);
+Microsoft::WRL::ComPtr<ID3DBlob> compile_motion(const char* entry,const char* profile);
 Microsoft::WRL::ComPtr<ID3DBlob> compile_fxaa(const char* entry,const char* profile);
 Microsoft::WRL::ComPtr<ID3DBlob> compile_bloom(const char* entry,const char* profile);
 Microsoft::WRL::ComPtr<ID3DBlob> compile_hdr(const char* entry,const char* profile);

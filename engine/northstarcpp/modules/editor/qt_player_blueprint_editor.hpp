@@ -18,12 +18,14 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -41,7 +43,8 @@ inline QDoubleSpinBox* number(QWidget* parent,char const* name,
 }
 inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
                                 std::uint64_t pawn_id,
-                                std::filesystem::path const& project_root={}) {
+                                std::filesystem::path const& project_root={},
+                                std::uint64_t selected_entity=0) {
     auto const layout=player_blueprint::layout(source,pawn_id);
     if(!layout || !layout->camera || !layout->mesh)
         throw std::invalid_argument("Select a Player Blueprint Pawn with Camera and SkeletalMesh");
@@ -53,7 +56,7 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     dialog.setMinimumSize(940,590);
     auto* root=new QVBoxLayout(&dialog);
     auto* title=new QLabel(
-        "Player Blueprint    |    Controller  вЂў  Pawn  вЂў  Camera  вЂў  SkeletalMesh  вЂў  Animation",&dialog);
+        "PLAYER FRAMEWORK  |  Controller > Pawn > Motor / Camera / SkeletalMesh > Animation",&dialog);
     title->setObjectName("playerBlueprintBreadcrumb");
     root->addWidget(title);
     auto* split=new QSplitter(Qt::Horizontal,&dialog);
@@ -63,7 +66,8 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     hierarchy->setHeaderLabel("Components / Entities");
     hierarchy->setMinimumWidth(250);
     auto* controller=new QTreeWidgetItem(hierarchy,{
-        QString("PlayerController  [%1]").arg(layout->controller)});
+        layout->controller?QString("PlayerController  [%1]").arg(layout->controller):
+                           QString("Local Player")});
     controller->setData(0,Qt::UserRole,0);
     auto* pawn=new QTreeWidgetItem(hierarchy,{
         QString("Character Pawn  [%1]").arg(layout->pawn)});
@@ -83,6 +87,13 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     auto* details=new QTabWidget(split);
     details->setObjectName("playerBlueprintDetails");
     split->setStretchFactor(1,1);
+    auto addTab=[details](QWidget* panel,char const* name) {
+        auto* scroll=new QScrollArea(details);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(panel);
+        details->addTab(scroll,name);
+    };
     QObject::connect(hierarchy,&QTreeWidget::currentItemChanged,&dialog,
         [details](QTreeWidgetItem* current,QTreeWidgetItem*) {
             if(current)details->setCurrentIndex(
@@ -91,17 +102,21 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
 
     auto* controls=new QWidget(details);
     auto* controlsForm=new QFormLayout(controls);
-    auto* local=new QCheckBox("Auto Possess on Play",controls);
+    auto* local=new QCheckBox("Control this Pawn on Play",controls);
     local->setObjectName("playerControllerAutoPossess");
-    auto* pawnMetadata=player_blueprint::find(
-        candidate,layout->pawn,player_character::pawn_type);
-    local->setChecked(pawnMetadata && pawnMetadata->payload.size()==12 &&
-        player_character::detail::get32(pawnMetadata->payload.data(),4)!=0);
-    controlsForm->addRow("Possession",local);
-    controlsForm->addRow(new QLabel(
-        "PlayerController is independent of the Pawn. Possess/Unpossess switches "
-        "the controlled stable Entity ID without replacing the model.",controls));
-    details->addTab(controls,"Controller");
+    auto const wasLocal=scene_pawn::is_local(candidate,layout->pawn);
+    local->setChecked(wasLocal);
+    auto const pawnIndex=gameplay::entity_index(candidate,layout->pawn).value();
+    auto const& pawnObject=candidate.objects[pawnIndex];
+    controlsForm->addRow("Controlled Pawn",new QLabel(
+        QString("%1  [%2]").arg(QString::fromStdString(pawnObject.name))
+                           .arg(layout->pawn),controls));
+    controlsForm->addRow("Startup",local);
+    auto* startupHint=new QLabel(
+        "Enabling this option switches the local player from the previous startup Pawn.",controls);
+    startupHint->setWordWrap(true);
+    controlsForm->addRow(startupHint);
+    addTab(controls,"Controller");
 
     auto* physics=new QWidget(details);
     auto* physicsForm=new QFormLayout(physics);
@@ -118,16 +133,14 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     physicsForm->addRow("Acceleration",accel);
     physicsForm->addRow("Air Control",air);
     physicsForm->addRow("Gravity Scale",gravity);
-    auto pawnIndex=gameplay::entity_index(candidate,layout->pawn);
-    auto capsule=collision_authoring::for_object(candidate,
-        candidate.objects.at(*pawnIndex));
+    auto capsule=collision_authoring::for_object(candidate,pawnObject);
     auto* radius=number(physics,"playerCapsuleDiameter",
         capsule.dimensions.x,.05,10,.05);
     auto* height=number(physics,"playerCapsuleHeight",
         capsule.dimensions.y,.1,20,.1);
     physicsForm->addRow("Capsule Diameter",radius);
     physicsForm->addRow("Capsule Height",height);
-    details->addTab(physics,"Motor / Pawn Collider");
+    addTab(physics,"Motor / Pawn Collider");
 
     auto* cameraPanel=new QWidget(details);
     auto* cameraForm=new QFormLayout(cameraPanel);
@@ -138,21 +151,53 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     view->addItems({"First Person","Third Person"});
     view->setCurrentIndex(int(cam.mode));
     auto* eye=number(cameraPanel,"playerCameraEyeHeight",rig.eye_height,0,5,.05);
-    auto* fov=number(cameraPanel,"playerCameraFov",rig.fov_degrees,10,170,1);
+    auto const cameraIndex=gameplay::entity_index(candidate,layout->camera).value();
+    auto const cameraPosition=candidate.objects[cameraIndex].position;
+    auto* anchorX=number(cameraPanel,"playerCameraAnchorX",
+        cameraPosition.x-pawnObject.position.x,-2000000,2000000,.05,3);
+    auto* anchorZ=number(cameraPanel,"playerCameraAnchorZ",
+        cameraPosition.z-pawnObject.position.z,-2000000,2000000,.05,3);
+    auto const originalEye=eye->value();
+    auto const originalAnchorX=anchorX->value();
+    auto const originalAnchorZ=anchorZ->value();
+    auto* fov=number(cameraPanel,"playerCameraFov",rig.fov_degrees,25,120,1);
+    auto const originalFov=fov->value();
     auto* minPitch=number(cameraPanel,"playerCameraMinPitch",rig.min_pitch,-89,0,1);
     auto* maxPitch=number(cameraPanel,"playerCameraMaxPitch",rig.max_pitch,0,89,1);
     auto* distance=number(cameraPanel,"playerCameraSpringArm",cam.spring_arm_length,0,20,.1);
     auto* shoulder=number(cameraPanel,"playerCameraShoulder",cam.shoulder,-5,5,.05);
     auto* lag=number(cameraPanel,"playerCameraLag",cam.lag,0,10,.05);
     cameraForm->addRow("View Mode",view);
-    cameraForm->addRow("Eye Height",eye);
+    cameraForm->addRow("Eye Height (m)",eye);
+    cameraForm->addRow("Anchor Offset X (m)",anchorX);
+    cameraForm->addRow("Anchor Offset Z (m)",anchorZ);
     cameraForm->addRow("Field of View",fov);
     cameraForm->addRow("Min Pitch",minPitch);
     cameraForm->addRow("Max Pitch",maxPitch);
     cameraForm->addRow("Spring Arm Distance",distance);
     cameraForm->addRow("Shoulder Offset",shoulder);
     cameraForm->addRow("Camera Lag",lag);
-    details->addTab(cameraPanel,"Camera");
+    auto* cameraModeHint=new QLabel(cameraPanel);
+    cameraModeHint->setWordWrap(true);
+    cameraModeHint->setObjectName("playerCameraModeHint");
+    cameraForm->addRow(cameraModeHint);
+    // Disable settings that have no effect in first person, keeping authored
+    // third-person values intact when the creator switches views.
+    auto syncCameraMode=[distance,shoulder,lag,cameraModeHint](int mode) {
+        bool const thirdPerson=mode==int(player_blueprint::ViewMode::ThirdPerson);
+        distance->setEnabled(thirdPerson);
+        shoulder->setEnabled(thirdPerson);
+        lag->setEnabled(thirdPerson);
+        cameraModeHint->setText(thirdPerson
+            ? "Third Person: the spring arm follows the Pawn; distance, shoulder "
+              "and lag control camera placement without moving the character."
+            : "First Person: the camera uses its own authored anchor on the Pawn. "
+              "Third-person spring arm settings are preserved but inactive.");
+    };
+    QObject::connect(view,QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     &dialog,syncCameraMode);
+    syncCameraMode(view->currentIndex());
+    addTab(cameraPanel,"Camera");
 
     auto* meshPanel=new QWidget(details);
     auto* meshForm=new QFormLayout(meshPanel);
@@ -195,7 +240,7 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     meshForm->addRow("Local Offset Y",offsetY);
     meshForm->addRow("Local Offset Z",offsetZ);
     meshForm->addRow(hide);
-    details->addTab(meshPanel,"SkeletalMesh");
+    addTab(meshPanel,"SkeletalMesh");
     QObject::connect(browse,&QPushButton::clicked,&dialog,
         [&dialog,asset,project_root] {
             auto const file=QFileDialog::getOpenFileName(&dialog,
@@ -233,14 +278,9 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
             if(file.isEmpty())return;
             auto const absolute=std::filesystem::path(file.toStdWString());
             std::vector<std::filesystem::path> bases{project_root,project_root/"assets"};
-            for(auto dir=project_root;!dir.empty();) {
-                if(std::filesystem::is_directory(dir/"sharedAssets")) {
-                    bases.push_back(dir/"sharedAssets");break;
-                }
-                auto parent=dir.parent_path();
-                if(parent==dir)break;
-                dir=parent;
-            }
+            if(auto const shared=asset_paths::locate_shared_root(project_root);
+               !shared.empty())
+                bases.push_back(shared);
             for(auto const& base:bases) {
                 std::error_code ec;
                 auto const relative=std::filesystem::relative(absolute,base,ec);
@@ -288,9 +328,19 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
     animForm->addRow(new QLabel(
         "The Animation Controller selects Idle / Walk / Run / Jump / Fall. "
         "Clip references are retained for the engine animation provider.",animationPanel));
-    details->addTab(animationPanel,"Animation");
-    hierarchy->setCurrentItem(pawn);
-    details->setCurrentIndex(1);
+    addTab(animationPanel,"Animation");
+    QObject::connect(details,&QTabWidget::currentChanged,&dialog,
+        [hierarchy,sections=std::array{controller,pawn,camera,mesh,anim}](int index) {
+            auto* current=hierarchy->currentItem();
+            if(index>=0 && (!current || current->data(0,Qt::UserRole).toInt()!=index))
+                hierarchy->setCurrentItem(sections[std::size_t(index)]);
+        });
+    auto* selected=pawn;
+    if(selected_entity && selected_entity==layout->controller)selected=controller;
+    else if(selected_entity && selected_entity==layout->motor)selected=motor;
+    else if(selected_entity==layout->camera)selected=camera;
+    else if(selected_entity==layout->mesh)selected=mesh;
+    hierarchy->setCurrentItem(selected);
 
     auto* buttons=new QDialogButtonBox(
         QDialogButtonBox::Save|QDialogButtonBox::Cancel,&dialog);
@@ -315,16 +365,8 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
                 (void)visual_prefab::load(project_root,prefabRef);
             }
             auto next=candidate;
-            // Pawn and Controller are different entities with independent lifetimes.
-            player_blueprint::assign(next,layout->controller,
-                player_blueprint::controller_type,
-                player_blueprint::serialize_controller(layout->pawn,local->isChecked()));
-            std::string pawnPayload;
-            player_character::detail::push32(pawnPayload,1u);
-            player_character::detail::push32(pawnPayload,local->isChecked()?1u:0u);
-            player_character::detail::push32(pawnPayload,1u);
-            player_blueprint::assign(next,layout->pawn,
-                player_character::pawn_type,std::move(pawnPayload));
+            if(local->isChecked()!=wasLocal)
+                scene_pawn::set_startup_pawn(next,layout->pawn,local->isChecked());
             std::string motor;
             for(float v:{float(walk->value()),float(run->value()),
                          float(jump->value()),float(accel->value()),
@@ -345,7 +387,8 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
                 float(distance->value()),float(shoulder->value()),float(lag->value())};
             player_blueprint::set_camera(next,layout->camera,newCamera);
             std::string rigPayload;
-            for(float v:{float(eye->value()),float(fov->value()),
+            auto const cameraFov=fov->value()==originalFov?rig.fov_degrees:float(fov->value());
+            for(float v:{float(eye->value()),cameraFov,
                          float(minPitch->value()),float(maxPitch->value())})
                 player_character::detail::pushfloat(rigPayload,v);
             player_blueprint::assign(next,layout->camera,
@@ -388,11 +431,13 @@ inline std::optional<Scene> edit(QWidget* owner,Scene const& source,
             anim.blend_seconds=float(blend->value());
             anim.root_motion=false;
             player_blueprint::set_animation(next,layout->mesh,anim);
-            auto cameraIdx=gameplay::entity_index(next,layout->camera).value();
-            next.objects[cameraIdx].position={
-                next.objects[idx].position.x,
-                next.objects[idx].position.y+float(eye->value()),
-                next.objects[idx].position.z};
+            auto& anchor=next.objects[cameraIndex].position;
+            if(anchorX->value()!=originalAnchorX)
+                anchor.x=pawnObject.position.x+float(anchorX->value());
+            if(eye->value()!=originalEye)
+                anchor.y=pawnObject.position.y+float(eye->value());
+            if(anchorZ->value()!=originalAnchorZ)
+                anchor.z=pawnObject.position.z+float(anchorZ->value());
             validate_scene(next);
             candidate=std::move(next);
             dialog.accept();

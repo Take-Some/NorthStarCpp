@@ -1,5 +1,9 @@
 // NorthStarCpp — independent native camera director.
 #include <northstarcpp/camera.hpp>
+#include <northstarcpp/camera_owner_clearance.hpp>
+#include <cstdlib>
+#include <northstarcpp/scene_pawn.hpp>
+#include <northstarcpp/player_camera_rig.hpp>
 #include <northstarcpp/scene_camera_actor.hpp>
 #include <northstarcpp/camera_track.hpp>
 #include <northstarcpp/camera_cutscene.hpp>
@@ -351,6 +355,15 @@ void CameraDirector::shake(float amplitude, float duration) {
     shake_duration_=duration;
     shake_remaining_=duration;
 }
+void CameraDirector::recoil(float pitch,float yaw,float recovery) {
+    ensure(finite(pitch) && finite(yaw) && finite(recovery) &&
+           pitch>=0.f && pitch<=.20f && std::abs(yaw)<=.08f &&
+           recovery>=.08f && recovery<=1.5f,
+           "Invalid angular weapon recoil");
+    recoil_pitch_=std::clamp(recoil_pitch_+pitch,0.f,.25f);
+    recoil_yaw_=std::clamp(recoil_yaw_+yaw,-.12f,.12f);
+    recoil_decay_=4.f/recovery;
+}
 void CameraDirector::cut() noexcept {
     initialized_=false;
     transition_seconds_=transition_elapsed_=0.f;
@@ -364,6 +377,7 @@ void CameraDirector::reset() {
     active_shot_.clear();
     transition_seconds_=transition_elapsed_=0.f;
     shake_remaining_=shake_duration_=shake_amplitude_=0.f;
+    recoil_pitch_=recoil_yaw_=0.f;
     time_=orbit_phase_=0.f;
     track_time_=0.f;
     cutscene_.reset();
@@ -476,6 +490,9 @@ Vector3 CameraDirector::clip_line_of_sight(Vector3 pivot, Vector3 wanted,
     for (std::size_t i=0;i<world.objects.size();++i) {
         if (i==ignore) continue;
         auto const& obj=world.objects[i];
+        // Ignore the possessed Pawn own visual, not its world collision.
+        if(ignore<world.objects.size() &&
+           obj.node.parent==world.objects[ignore].node.id)continue;
         if (world.version==3 && (!obj.node.visible || !obj.node.collision))
             continue;
         if (!finite(obj.position) || !finite(obj.size) || obj.size<=0.f) continue;
@@ -764,6 +781,86 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         }
     }
 
+    // Keep gameplay camera outside the possessed pawn without removing any
+    // head/face mesh. Applied after smoothing and blends, where a short
+    // spring arm or transition can otherwise tunnel through the character.
+    auto const avoid_owned_character=[&](Vector3 position) {
+        if(!world || selectedShot || cutscene_ ||
+           (mode_!=CameraMode::first_person &&
+            mode_!=CameraMode::third_person && mode_!=CameraMode::orbit))
+            return position;
+        auto const owner_index=scene_pawn::local_index(*world);
+        if(!owner_index)return position;
+        auto const& owner=world->objects[*owner_index];
+        // A bare physics Pawn has no head model; preserve camera ABI.
+        bool has_owner_mesh=false;
+        for(auto const& actor:world->objects) {
+            if(actor.node.id!=owner.node.id && actor.node.parent!=owner.node.id)continue;
+            auto ref=actor.node.asset.substr(0,actor.node.asset.find('@'));
+            if(ref.size()>=4 &&
+               (ref.compare(ref.size()-4,4,".ydd")==0 ||
+                ref.compare(ref.size()-4,4,".ydr")==0)) {
+                has_owner_mesh=true;break;
+            }
+        }
+        if(!has_owner_mesh) {
+            // Game-authored SkeletalMesh entities commonly reference an
+            // .nprefab rather than storing the resolved YDD on the node.
+            for(auto const& visual:world->objects) {
+                if(visual.node.id!=owner.node.id &&
+                   visual.node.parent!=owner.node.id)continue;
+                for(auto const& component:world->components)
+                    if(component.entity_id==visual.node.id &&
+                       (component.type=="northstar.gameplay.skeletal_mesh" ||
+                        component.type=="northstar.editor.visual_prefab")) {
+                        has_owner_mesh=true;break;
+                    }
+                if(has_owner_mesh)break;
+            }
+        }
+        if(!has_owner_mesh)return position;
+        float height=1.45f;
+        try {
+            height=gameplay::camera_rig(*world,owner.node.id).eye_height;
+        }catch(std::exception const&) {
+            // Invalid optional authored rig must not crash the camera tick.
+        }
+        const Vector3 head{owner.position.x,
+            owner.position.y+height,owner.position.z};
+        if(distance(t.eye,head)>1.5f)return position;
+        auto const radius=mode_==CameraMode::first_person?
+            camera_collision::first_person_head_radius:
+            (position.y>head.y-.27f?.54f:.77f);
+        return camera_collision::keep_camera_outside_player(
+            position,owner.position,height,pose_.yaw,radius,
+            mode_==CameraMode::first_person,
+            [&](Vector3 const& candidate) {
+                if(physics) {
+                    auto const hit=physics->sweep_sphere(head,candidate,.12f,*owner_index);
+                    return !hit || hit->fraction>=.999f;
+                }
+                return !world || distance(
+                    clip_line_of_sight(head,candidate,*world,*owner_index),
+                    candidate)<.02f;
+            });
+    };
+    auto const safe_position=avoid_owned_character(pose_.position);
+    if(std::getenv("NORTHSTARCPP_CAMERA_CLEARANCE_TRACE")) {
+        static unsigned trace_count=0;
+        if(trace_count++<16u || trace_count%45u==0u)
+            std::fprintf(stderr,
+                "[INFO] [engine.camera] owner_clearance mode=%u"
+                " eye=(%.3f,%.3f,%.3f) before=(%.3f,%.3f,%.3f)"
+                " after=(%.3f,%.3f,%.3f)\\n",
+                static_cast<unsigned>(mode_),t.eye.x,t.eye.y,t.eye.z,
+                pose_.position.x,pose_.position.y,pose_.position.z,
+                safe_position.x,safe_position.y,safe_position.z);
+    }
+    if(distance(safe_position,pose_.position)>1.e-5f) {
+        pose_.position=safe_position;
+        follow_pose_.position=safe_position;
+        follow_velocity_={0.f,0.f,0.f};
+    }
     CameraPose render=pose_;
     if (shake_remaining_>0.f && shake_duration_>0.f) {
         float const falloff=shake_remaining_/shake_duration_;
@@ -772,6 +869,20 @@ CameraPose CameraDirector::update(float dt, CameraTarget const& t, Scene const* 
         render.position.y+=std::sin(time_*35.7f+1.1f)*amplitude*.6f;
         shake_remaining_=std::max(0.f,shake_remaining_-dt);
     }
+    // Recoil tilts the rendered first-person sight picture instead of
+    // merely translating the head. Leave the input orientation untouched:
+    // the projectile was resolved before this post-shot impulse.
+    if(mode_==CameraMode::first_person &&
+       (std::abs(recoil_pitch_)>1.e-5f || std::abs(recoil_yaw_)>1.e-5f)) {
+        render.pitch=std::clamp(render.pitch+recoil_pitch_,-1.40f,1.40f);
+        render.yaw+=recoil_yaw_;
+        const float falloff=std::exp(-recoil_decay_*dt);
+        recoil_pitch_*=falloff;
+        recoil_yaw_*=falloff;
+    }
+    // Camera shake can shift the final eye back inside the head even when
+    // the blended gameplay camera was clear. Clamp the final render pose too.
+    render.position=avoid_owned_character(render.position);
     try {check_pose(render);}
     catch(std::invalid_argument const& error) {
         throw std::invalid_argument(std::string("Camera render pose: ")+error.what());

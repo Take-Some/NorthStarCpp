@@ -177,6 +177,31 @@ NativeModelResource load_native_model_resource(
             }
         } catch(std::runtime_error const&) {}
     }
+    // Native characters may have separate part or preview YDDs whose names
+    // intentionally differ from their canonical <character-id>.ymt rig.
+    // This is a generic namespace convention, not an Ellie-specific fallback.
+    if(!has_skeleton && path.rfind("characters/",0)==0) {
+        auto const end_id=path.find('/',11);
+        if(end_id!=std::string::npos && end_id>11 &&
+           end_id-11<=72) {
+            auto const id=path.substr(11,end_id-11);
+            auto const canonical="characters/"+id+"/models/"+id+".ymt";
+            try {
+                if(assets.size(canonical)>0) {
+                    skeleton_path=canonical;
+                    has_skeleton=true;
+                }
+            } catch(std::runtime_error const&) {}
+        }
+    }
+    // Imported static YDR assets may carry XML authoring-only skeleton
+    // sidecars. Do not pass that XML into the binary NEF8 rig decoder.
+    if(has_skeleton && path.compare(path.size()-4,4,".ydr")==0) {
+        auto const header=assets.read_range(skeleton_path,0,4);
+        if(header.size()==4 && header[0]=='<' &&
+           (header[1]=='?' || header[1]=='s' || header[1]=='S'))
+            has_skeleton=false;
+    }
     if(has_skeleton) {
         auto const rig_begin=std::chrono::steady_clock::now();
         result.skeleton=load_skeleton(assets,skeleton_path);
@@ -227,6 +252,21 @@ NativeModelResource load_native_model_resource(
     }
     return result;
 }
+void remap_skin_palette_to_mesh(
+    std::vector<math::float4x4>& output,
+    std::vector<math::float4x4> const& skeleton_palette,
+    math::float4x4 const& mesh_to_skeleton)
+{
+    if(skeleton_palette.empty() || skeleton_palette.size()>4096)
+        throw std::invalid_argument("Invalid source skin palette");
+    math::float4x4 skeleton_to_mesh;
+    if(!skeleton_to_mesh.try_invert(mesh_to_skeleton))
+        throw std::invalid_argument("Non-invertible YDD mesh-to-skeleton basis");
+    output.resize(skeleton_palette.size());
+    for(std::size_t i=0;i<skeleton_palette.size();++i)
+        output[i]=mesh_to_skeleton*skeleton_palette[i]*skeleton_to_mesh;
+}
+
 void skin_native_mesh_cpu_into(
     MeshAsset& output, MeshAsset const& mesh, Skeleton const& skeleton,
     std::vector<SkinWeights> const& weights,
@@ -312,7 +352,9 @@ MeshAsset skin_native_model_cpu(
 {
     if(!model.has_skin())
         throw std::invalid_argument("Native model has no decoded skin");
+    std::vector<math::float4x4> mesh_palette;
+    remap_skin_palette_to_mesh(mesh_palette,palette,model.mesh_to_skeleton);
     return skin_native_mesh_cpu(model.mesh,*model.skeleton,
-                                model.vertex_skin,palette);
+                                model.vertex_skin,mesh_palette);
 }
 } // namespace northstarcpp

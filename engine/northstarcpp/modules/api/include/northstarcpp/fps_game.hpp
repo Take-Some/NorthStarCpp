@@ -3,9 +3,11 @@
 #pragma once
 #include <northstarcpp/scene.hpp>
 #include <northstarcpp/fps_assets.hpp>
+#include <northstarcpp/fps_ballistics.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 
 namespace northstarcpp {
 
@@ -20,7 +22,12 @@ public:
     Vector3 direction() const;
     Vector3 eye(Scene const& scene) const;
     Vector3 movement(float strafe, float forward) const;
-    bool fire(Scene const& scene);
+    // The equipped weapon may supply an exact world-space muzzle point.
+    // Without one, the legacy target-only arena remains eye-based.
+    bool fire(Scene const& scene,std::optional<Vector3> muzzle=std::nullopt);
+    std::optional<ballistics::Shot> const& last_shot() const noexcept {
+        return last_shot_;
+    }
     bool begin_reload();
     void reset();
     void tint(Scene& scene) const;
@@ -39,8 +46,8 @@ public:
     bool reloading() const { return reload_timer_ > 0.f; }
     bool alive() const { return health_ > 0; }
     bool won() const { return total_ > 0 && hits_ == total_; }
-    float yaw() const { return yaw_; }
-    float pitch() const { return pitch_; }
+    float yaw() const { return yaw_+recoil_yaw_; }
+    float pitch() const { return pitch_<=-1.40f||pitch_>=1.40f ? pitch_ : std::clamp(pitch_+recoil_pitch_,-1.40f,1.40f); }
 
 private:
     struct Moving {
@@ -48,11 +55,14 @@ private:
         Vector3 origin;
         float phase;
     };
+    std::optional<ballistics::Shot> last_shot_{};
     FpsTuning tuning_;
     std::size_t player_ = 0;
     float yaw_ = 0.f;
     float pitch_ = 0.f;
     float recoil_ = 0.f;
+    float recoil_pitch_=0.f,recoil_pitch_speed_=0.f;
+    float recoil_yaw_=0.f,recoil_yaw_speed_=0.f;
     float shot_timer_ = 0.f;
     float reload_timer_ = 0.f;
     float damage_timer_ = 0.f;

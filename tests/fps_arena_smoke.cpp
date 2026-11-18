@@ -77,6 +77,42 @@ int main()
         FpsArena blocked(scene(true));
         if (blocked.fire(scene(true))) return 10;
 
+        // Actual ray direction is sampled before camera recoil kicks in.
+        // A small 40m target would be missed if the post-shot camera
+        // elevation were incorrectly applied to the current bullet.
+        Scene precise;
+        qa::append(precise,{"Player",{0,0,0},1.5f,0xffffff,true,2.f});
+        qa::append(precise,{"Target Tiny",{0,1.2f,40.f},.5f,
+            0xff4040,false,0.f});
+        FpsArena precise_weapon(precise);
+        if(!precise_weapon.fire(precise)||
+           precise_weapon.hits()!=1||
+           precise_weapon.pitch()<=0.f)return 21;
+        // Recoil is an impulse with physically plausible spring return,
+        // not a permanent modification of the user's aim pitch/yaw.
+        Scene recoil_scene=scene(false);
+        FpsArena spring_weapon(recoil_scene);
+        auto const base_pitch=spring_weapon.pitch();
+        auto const base_yaw=spring_weapon.yaw();
+        spring_weapon.fire(recoil_scene);
+        if(spring_weapon.pitch()<base_pitch+.025f ||
+           spring_weapon.recoil_amount()<.8f)return 24;
+        for(int frame=0;frame<90;++frame)
+            spring_weapon.advance(1.f/60.f,recoil_scene);
+        if(std::abs(spring_weapon.pitch()-base_pitch)>.001f ||
+           std::abs(spring_weapon.yaw()-base_yaw)>.001f ||
+           spring_weapon.recoil_amount()>0.f)return 25;
+        // Debris is neither a valid target nor an arena topology error.
+        Scene debris_scene=scene(false);
+        FpsArena debris_weapon(debris_scene);
+        qa::append(debris_scene,{"Pistol casing",{0,1.3f,2.f},
+            .04f,0xd5a742,false,.008f});
+        debris_scene.objects.back().node.layer="Weapon debris";
+        if(!debris_weapon.fire(debris_scene)||
+           debris_weapon.hits()!=1)return 22;
+        debris_weapon.tint(debris_scene);
+        if(debris_scene.objects.back().color!=0xd5a742)return 23;
+
         Scene no_player{};
         qa::append(no_player,{"Target 0", {0,1,5},1.f,0xff0000,false,0.f});
         try { FpsArena invalid(no_player); return 11; }

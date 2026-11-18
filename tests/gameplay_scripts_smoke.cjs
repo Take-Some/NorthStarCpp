@@ -15,12 +15,25 @@ function harness(source, objects, options = {}) {
     let characterSpec = null;
     let pointer = { x: 0, y: 0 }, jumped = 0, paused = false;
     let currentView = "first_person", wheel = 0, followDistance = 4;
+    // One VFS fixture resolver for scripts, prefabs and UI assets.
+    const scriptDir = path.dirname(source);
+    const projectAssets = path.basename(scriptDir) === "scripts" &&
+        path.basename(path.dirname(scriptDir)) === "assets"
+        ? path.dirname(scriptDir) : path.resolve(scriptDir, "..", "assets");
+    const resolveAsset = virtualPath => {
+        const candidates = [
+            path.join(projectAssets, virtualPath),
+            path.join(ROOT, "engine/northstarcpp/resources/sharedAssets", virtualPath)
+        ];
+        const file = candidates.find(candidate => fs.existsSync(candidate));
+        assert.ok(file, "Missing project/shared VFS asset: " + virtualPath);
+        return file;
+    };
     // The current Scene/Prefab SDK creates real entity handles. Mirror its
     // neutral host interface rather than bypassing project weapon scripts.
     const resolvePrefab = resource => {
-        assert.equal(resource, "prefabs/pistol.nprefab");
-        const file = path.join(ROOT, "Projects/NorthStarFirstPersonPlatform", resource);
-        const text = fs.readFileSync(file, "utf8");
+        assert.equal(resource, "prefabs/weapon/pistol.nprefab");
+        const text = fs.readFileSync(resolveAsset(resource), "utf8");
         assert.match(text, /^NorthStarCpp\.Scene 3/m);
         const records = [...text.matchAll(/^entity\s+(\d+)\s+(\d+)\s+"([^"]+)"\s+"([^"]+)"\s+"([^"]*)"\s+"([^"]*)"\s+"([^"]+)"\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)/gm)];
         assert.ok(records.length, "prefab fixture must contain entities");
@@ -157,6 +170,9 @@ function harness(source, objects, options = {}) {
             stop(id) { animationStops.push(id); }
         },
         ui: {
+            readAsset(vpath) {
+                return require('../tools/dev/nui_test_bridge.cjs').load(resolveAsset(vpath));
+            },
             apply(document) {
                 assert.equal(document.target,"screen");
                 assert.ok(Array.isArray(document.nodes));
@@ -167,6 +183,45 @@ function harness(source, objects, options = {}) {
             setTitle(value) {titles.push(value);}
         }
     };
+    // Test the actual public grouped runtime contract, not old flat mocks.
+    const flat = {scene:engine.scene, input:engine.input, player:engine.player,
+        camera:engine.camera, character:engine.character,physics:engine.physics,
+        session:engine.session,audio:engine.audio,animation:engine.animation,
+        ui:engine.ui,prefab:engine.prefab};
+    engine.scene={
+        entities:{objects:flat.scene.objects,objectCount:flat.scene.objectCount,
+            spawn:flat.scene.spawn,destroy:flat.scene.destroy},
+        transforms:{moveRuntime:flat.scene.moveRuntime,
+            rotateRuntime:flat.scene.rotateRuntime,
+            moveStatic:flat.scene.moveStatic,setColor:flat.scene.setColor},
+        animation:{setAnimation:flat.scene.setAnimation},
+        prefabs:flat.prefab
+    };
+    delete engine.prefab;
+    engine.input={keyboard:{isDown:flat.input.isDown},
+        pointer:{mouseDown:flat.input.mouseDown,
+            pointerDelta:flat.input.pointerDelta,wheelDelta:flat.input.wheelDelta},
+        gamepads:{gamepad:flat.input.gamepad}};
+    engine.player={controller:{
+        controlledIndex:flat.player.controlledIndex,
+        controlledEntity:flat.player.controlledEntity},
+        motion:{setEyeHeight:flat.player.setEyeHeight,eye:flat.player.eye,
+            move:flat.player.move,sprint:flat.player.sprint,jump:flat.player.jump}};
+    engine.camera={views:{
+        available:flat.camera.available,angles:flat.camera.angles,
+        setMode:flat.camera.setMode,mode:flat.camera.mode,
+        followDistance:flat.camera.followDistance,
+        setFollowDistance:flat.camera.setFollowDistance,
+        setAngles:flat.camera.setAngles,setZoom:flat.camera.setZoom},
+        effects:{shake:flat.camera.shake}};
+    engine.character={visual:flat.character};
+    engine.physics={queries:{sweepSphere:flat.physics.sweepSphere},
+        bodies:{applyImpulse:flat.physics.applyImpulse}};
+    engine.session={lifecycle:flat.session};
+    engine.audio={playback:flat.audio};
+    engine.animation={clips:flat.animation};
+    engine.ui={documents:{readAsset:flat.ui.readAsset,apply:flat.ui.apply},
+        viewport:{setTitle:flat.ui.setTitle}};
     const sourceCode = fs.readFileSync(source, "utf8");
     const context = vm.createContext({engine, Math, Object, Number, Map, Set,
         Boolean, Error, RangeError});
@@ -194,6 +249,12 @@ function harness(source, objects, options = {}) {
     const shared = path.join(ROOT, "engine/northstarcpp/resources/sharedAssets/api/northstar/bootstrap.js");
     vm.runInContext(fs.readFileSync(shared, "utf8"), context,
         {filename:shared, timeout:1500});
+    // Runtime loads the engine-owned UIRoot implementation before any project
+    // script uses UI.loadAsset(); this test must mirror the same sequence.
+    const uiRootScript=path.join(ROOT,
+        "engine/northstarcpp/resources/sharedAssets/api/ui/UI.js");
+    vm.runInContext(fs.readFileSync(uiRootScript,"utf8"),context,
+        {filename:uiRootScript,timeout:1500});
     // Input enum classes register immediately after bootstrap, before any
     // script can import Keys or GamepadButtons from @northstar/engine.
     for (const name of ["input/Keys.js", "input/GamepadButtons.js",  "scene/Entity.js", "scene/Prefab.js"]) {
@@ -247,7 +308,7 @@ function harness(source, objects, options = {}) {
     };
 }
 function platform() {
-    const game = harness(path.join(ROOT,"Projects/NorthStarFirstPersonPlatform/scripts/main.js"),[
+    const game = harness(path.join(ROOT,"Projects/NorthStarFirstPersonPlatform/assets/scripts/main.js"),[
         {index:0,name:"Explorer",player:true,mass:2,position:{x:0,y:0,z:0}},
         {index:1,name:"Physics Crate",player:false,mass:2,position:{x:0,y:0,z:3}}
     ]);
@@ -326,7 +387,7 @@ function platform() {
 }
 function cameraOverrides() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "northstar-camera-"));
-    const source=path.join(ROOT, "Projects/NorthStarFirstPersonPlatform/scripts/main.js");
+    const source=path.join(ROOT, "Projects/NorthStarFirstPersonPlatform/assets/scripts/main.js");
     const objects=[{index:0,name:"Explorer",player:true,mass:2,position:{x:0,y:0,z:0}}];
     try {
         const custom=path.join(dir,"playerCamera.js");
@@ -438,7 +499,7 @@ function arena() {
     return game;
 }
 function animationLab() {
-    const project=path.join(ROOT,"Projects/NorthStarAnimationLab");
+    const project=path.join(ROOT,"tests/fixtures/animation_lab/assets");
     const clip=JSON.parse(fs.readFileSync(
         path.join(project,"animations/lift.anim.json"),"utf8"));
     assert.equal(clip.schema,1);

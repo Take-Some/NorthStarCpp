@@ -1,3 +1,8 @@
+> Historical design note (2026-11-15). Superseded by the unified SDK
+> refactor of 2026-11-17: the event handler and optional sound mapping now
+> live in character/footsteps.js and use Audio.play(). The old
+> audio/footsteps.js and player/playerFootsteps.js paths are not loaded.
+
 # NorthStar: root events and player footsteps
 
 Implemented in NorthStarCpp on 2026-11-15.

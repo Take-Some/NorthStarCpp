@@ -16,6 +16,7 @@ cbuffer LightingCamera : register(b0) {
     float4 shadow_splits; // far distance of cascades 0,1,2, depth blend fraction
     float4 hdr_settings; // hdr enabled, reserved...
     float4 cascade_depth_bias; // per-cascade normalized depth bias
+    float4 height_fog_parameters; // x: density; .yz reserved
 };
 Texture2D<float4> g_albedo : register(t0);    // linear RGB + coverage alpha
 Texture2D<float4> g_normal : register(t1);    // world normal, signed roughness
@@ -139,7 +140,8 @@ float4 deferred_ps(FSOut input) : SV_Target {
     // The directional shadow field is evaluated only for in-range receivers.
     float sun_visibility=1.0;
     float camera_distance=dot(world-camera_world.xyz,camera_forward_csm.xyz);
-    if(shadow_info.x>0.5 && camera_distance>=0 &&
+    // Back-facing pixels receive no direct sun, so skip CSM/PCF/PCSS taps.
+    if(shadow_info.x>0.5 && NoL>0.001 && camera_distance>=0 &&
        camera_distance<=shadow_splits.z) {
         uint cascade=camera_distance<shadow_splits.x?0:
                      (camera_distance<shadow_splits.y?1:2);
@@ -204,17 +206,31 @@ float4 deferred_ps(FSOut input) : SV_Target {
             uint light_index = fallback ? n : tiled_indices.Load(tile_start + 1 + n);
             if (light_index >= tile_info.z) continue;
             DynamicLight source = dynamic_lights[light_index];
-            float3 to_light = source.position_range.xyz-world;
-            float dist2 = dot(to_light,to_light);
-            float radius = source.position_range.w;
-            if (dist2 >= radius*radius || radius <= 0) continue;
-            float inv_dist = rsqrt(max(dist2, 1.e-6));
-            float3 local_light = to_light*inv_dist;
+            // ABI v1 semantic extension: -3 sky ambient, -2 directional,
+            // -1 point, 0..1 spotlight. Both global kinds skip radial culling.
+            float kind = source.direction_cone.w;
+            if(kind <= -2.5) {
+                lit += albedo*source.color_intensity.rgb*
+                    (source.color_intensity.a*ao*saturate(aux.r));
+                continue;
+            }
+            float3 local_light;
+            float attenuation = 1.0;
+            if(kind <= -1.5) {
+                local_light=normalize(-source.direction_cone.xyz);
+            } else {
+                float3 to_light = source.position_range.xyz-world;
+                float dist2 = dot(to_light,to_light);
+                float radius = source.position_range.w;
+                if (dist2 >= radius*radius || radius <= 0) continue;
+                float inv_dist = rsqrt(max(dist2, 1.e-6));
+                local_light = to_light*inv_dist;
+                attenuation = saturate(1-sqrt(dist2)/radius);
+                attenuation *= attenuation;
+            }
             float local_NoL = saturate(dot(normal,local_light));
             if (local_NoL <= 0) continue;
-            float attenuation = saturate(1-sqrt(dist2)/radius);
-            attenuation *= attenuation;
-            if (source.direction_cone.w >= 0) {
+            if (kind >= 0) {
                 float3 spot_axis=normalize(source.direction_cone.xyz);
                 float spot_angle=dot(spot_axis,-local_light);
                 attenuation *= smoothstep(source.direction_cone.w,
@@ -235,6 +251,19 @@ float4 deferred_ps(FSOut input) : SV_Target {
             lit += (local_diffuse+local_spec)*local_NoL*attenuation*
                 source.color_intensity.rgb*source.color_intensity.a;
         }
+    }
+    // Original analytic atmospheric perspective, independent of HDR.
+    // No new samples/RTs: a distance-aware exponential height integral.
+    // A dedicated volumetric light-scattering pass remains separate.
+    if(height_fog_parameters.x>0.0) {
+        float visibility_distance=length(world-camera_world.xyz);
+        float h0=exp(clamp(-.025*camera_world.y,-8.0,8.0));
+        float h1=exp(clamp(-.025*world.y,-8.0,8.0));
+        float extinction=min(20.0,
+            height_fog_parameters.x*visibility_distance*
+            clamp(.5*(h0+h1),.01,8.0));
+        float haze=min(.96,1.0-exp(-extinction));
+        lit=lerp(lit,float3(.23,.315,.395),haze);
     }
     return float4(hdr_settings.x>0.5 ? max(lit,0) : encode_srgb(lit),1);
 }

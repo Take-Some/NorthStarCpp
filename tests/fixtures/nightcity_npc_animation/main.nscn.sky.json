@@ -1,0 +1,10 @@
+{
+  "sky": {
+    "mode": "procedural",
+    "preset": "sky-act2-day-1-sav-kids-morning",
+    "sun": true,
+    "clouds": true,
+    "timeOfDay": 9.5,
+    "cloudCoverage": 0.4
+  }
+}

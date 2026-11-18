@@ -1,4 +1,5 @@
 #include "renderer_private.hpp"
+#include "../shared/height_fog.hpp"
 #include "shader_spirv.hpp"
 #include <algorithm>
 #include <array>
@@ -57,6 +58,8 @@ std::uint32_t Renderer::find_memory_type(std::uint32_t bits,
     throw std::runtime_error("Vulkan GPU has no compatible memory type");
 }
 Renderer::Renderer(HWND window,bool software):hwnd_(window) {
+    height_fog_density_=
+        northstarcpp::render::height_fog_density_from_environment();
     if(!hwnd_||!IsWindow(hwnd_))throw std::invalid_argument("Vulkan provider requires an HWND");
     try {
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -150,6 +153,7 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
         dci.enabledExtensionCount=1;dci.ppEnabledExtensionNames=&swap_extension;
         check(vkCreateDevice(physical_,&dci,nullptr,&device_),"vkCreateDevice");
         vkGetDeviceQueue(device_,family_,0,&queue_);
+        create_pipeline_cache();
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.queueFamilyIndex=family_;
         pci.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -184,19 +188,80 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
             timestamp_valid_bits_=family_properties[family_].timestampValidBits;
         }
         char deferred_setting[8]{};
-        deferred_enabled_=GetEnvironmentVariableA(
+        // Deferred is required for the Vulkan directional CSM resolve.
+        // Explicit =0 retains the earlier forward-only QA mode.
+        const DWORD deferred_setting_size=GetEnvironmentVariableA(
             "NORTHSTARCPP_ENABLE_VULKAN_DEFERRED",
-            deferred_setting,sizeof(deferred_setting))>0 &&
-            deferred_setting[0]=='1';
+            deferred_setting,sizeof(deferred_setting));
+        deferred_enabled_=deferred_setting_size==0 ||
+            (deferred_setting_size==1 && deferred_setting[0]=='1');
         char ssao_setting[8]{};
         ssao_enabled_=deferred_enabled_ && GetEnvironmentVariableA(
             "NORTHSTARCPP_ENABLE_VULKAN_SSAO",
             ssao_setting,sizeof(ssao_setting))>0 && ssao_setting[0]=='1';
+        char contact_shadows_setting[8]{};
+        contact_shadows_enabled_=deferred_enabled_ && GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_CONTACT_SHADOWS",
+            contact_shadows_setting,sizeof(contact_shadows_setting))>0 &&
+            contact_shadows_setting[0]=='1' &&
+            contact_shadows_setting[1]=='\0';
+        char csm_setting[8]{};
+        const DWORD csm_setting_size=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_CSM",csm_setting,
+            sizeof(csm_setting));
+        csm_enabled_=deferred_enabled_ &&
+            (csm_setting_size==0 || (csm_setting_size==1 && csm_setting[0]=='1'));
         char gbuffer_setting[8]{};
         gbuffer_v2_=deferred_enabled_ && GetEnvironmentVariableA(
             "NORTHSTARCPP_GBUFFER_VERSION",gbuffer_setting,
             sizeof(gbuffer_setting))>0 &&
             gbuffer_setting[0]=='2' && gbuffer_setting[1]=='\0';
+        char hdr_setting[8]{};
+        hdr_enabled_=deferred_enabled_ && GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_VULKAN_HDR",
+            hdr_setting,sizeof(hdr_setting))>0 &&
+            hdr_setting[0]=='1' && hdr_setting[1]==0;
+        if(hdr_enabled_) {
+            char velocity_setting[8]{};
+            velocity_enabled_=GetEnvironmentVariableA(
+                "NORTHSTARCPP_ENABLE_VULKAN_VELOCITY",
+                velocity_setting,sizeof(velocity_setting))>0 &&
+                velocity_setting[0]=='1'&&velocity_setting[1]==0;
+            char velocity_debug_setting[8]{};
+            velocity_debug_=velocity_enabled_ && GetEnvironmentVariableA(
+                "NORTHSTARCPP_VULKAN_VELOCITY_DEBUG",velocity_debug_setting,
+                sizeof(velocity_debug_setting))>0 &&
+                velocity_debug_setting[0]=='1' && velocity_debug_setting[1]==0;
+            char auto_setting[8]{};
+            auto_exposure_enabled_=
+                GetEnvironmentVariableA("NORTHSTARCPP_VULKAN_AUTO_EXPOSURE",
+                    auto_setting,sizeof(auto_setting))>0 &&
+                auto_setting[0]=='1'&&auto_setting[1]==0;
+            char quality[8]{};
+            if(GetEnvironmentVariableA("NORTHSTARCPP_VULKAN_BLOOM_QUALITY",
+                                      quality,sizeof(quality))>0 &&
+               quality[0]>='0'&&quality[0]<='3'&&quality[1]==0)
+                bloom_quality_=unsigned(quality[0]-'0');
+            active_bloom_levels_=bloom_quality_==0?0:bloom_quality_+1;
+            auto option=[&](const char* name,float& target,float lo,float hi){
+                char buffer[32]{};
+                if(!GetEnvironmentVariableA(name,buffer,sizeof(buffer)))return;
+                char* end=nullptr;
+                auto value=std::strtof(buffer,&end);
+                if(end!=buffer&&end&&*end==0&&std::isfinite(value))
+                    target=std::clamp(value,lo,hi);
+            };
+            option("NORTHSTARCPP_VULKAN_BLOOM_STRENGTH",
+                   bloom_strength_,0.f,2.f);
+            option("NORTHSTARCPP_VULKAN_BLOOM_THRESHOLD",
+                   bloom_threshold_,.05f,16.f);
+            option("NORTHSTARCPP_VULKAN_BLOOM_KNEE",
+                   bloom_soft_knee_,.01f,4.f);
+            option("NORTHSTARCPP_VULKAN_EXPOSURE_SPEED_UP",
+                   exposure_speed_up_,.05f,15.f);
+            option("NORTHSTARCPP_VULKAN_EXPOSURE_SPEED_DOWN",
+                   exposure_speed_down_,.05f,15.f);
+        }
         create_vertex_buffer();
         create_material_resources();
         create_world_resources();
@@ -215,6 +280,7 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
         graph.add_pass({"present",{image},{},{p1},
             {{image,northstarcpp::render::ResourceAccess::Present}}});
         graph_plan_=graph.compile();
+        if(hdr_enabled_)create_hdr_forward_graph();
         if(deferred_enabled_) {
             using namespace northstarcpp::render;
             RenderGraph deferred;
@@ -224,6 +290,24 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
             auto normal=deferred.add_resource("gbuffer normal/roughness");
             auto surface=deferred.add_resource("gbuffer surface");
             auto auxiliary=deferred.add_resource("gbuffer v2 auxiliary");
+            ResourceId half_ao{};
+            if(ssao_enabled_)half_ao=deferred.add_resource("half-res SSAO");
+            ResourceId shadow{};
+            if(csm_enabled_)shadow=deferred.add_resource("CSM depth array");
+            ResourceId hdr_scene{};
+            std::array<ResourceId,bloom_levels_> bloom{};
+            ResourceId exposure_meter{};
+            ResourceId velocity_target{};
+            if(hdr_enabled_) {
+                hdr_scene=deferred.add_resource("FP16 HDR scene");
+                if(auto_exposure_enabled_)
+                    exposure_meter=deferred.add_resource("8x8 HDR log luminance");
+                for(unsigned i=0;i<bloom_levels_;++i)
+                    bloom[i]=deferred.add_resource(
+                        "FP16 bloom pyramid "+std::to_string(i));
+                if(velocity_enabled_)
+                    velocity_target=deferred.add_resource("RG16F motion vectors");
+            }
             std::vector<ResourceId> attachments{depth,albedo,normal,surface};
             std::vector<ResourceUsage> attachment_usage{
                 {depth,ResourceAccess::DepthWrite},
@@ -236,21 +320,91 @@ Renderer::Renderer(HWND window,bool software):hwnd_(window) {
                 {albedo,ResourceAccess::ShaderRead},
                 {normal,ResourceAccess::ShaderRead},
                 {surface,ResourceAccess::ShaderRead},
-                {swap,ResourceAccess::ColorAttachment}};
+                {hdr_enabled_?hdr_scene:swap,
+                 ResourceAccess::ColorAttachment}};
             if(gbuffer_v2_) {
                 attachments.push_back(auxiliary);
                 attachment_usage.push_back({auxiliary,ResourceAccess::ColorAttachment});
                 sampled.push_back(auxiliary);
                 sampled_usage.push_back({auxiliary,ResourceAccess::ShaderRead});
             }
+            if(ssao_enabled_) {
+                sampled.push_back(half_ao);
+                sampled_usage.push_back({half_ao,ResourceAccess::ShaderRead});
+            }
+            if(csm_enabled_) {
+                sampled.push_back(shadow);
+                sampled_usage.push_back({shadow,ResourceAccess::DepthRead});
+            }
             auto g=deferred.add_pass({"gbuffer",{},std::move(attachments),{},
                 std::move(attachment_usage)});
+            auto last_geometry_pass=g;
+            if(ssao_enabled_) {
+                last_geometry_pass=deferred.add_pass({
+                    "half-resolution SSAO",
+                    {normal,depth},{half_ao},{g},
+                    {{normal,ResourceAccess::ShaderRead},
+                     {depth,ResourceAccess::DepthRead},
+                     {half_ao,ResourceAccess::ColorAttachment}}});
+            }
+            if(csm_enabled_) {
+                last_geometry_pass=deferred.add_pass({
+                    "directional CSM",{}, {shadow},{last_geometry_pass},
+                    {{shadow,ResourceAccess::DepthWrite}}});
+            }
             auto l=deferred.add_pass({"deferred resolve",
-                std::move(sampled),{swap},{g},std::move(sampled_usage)});
-            auto f=deferred.add_pass({"authored forward",{}, {swap,depth},{l},
-                {{swap,ResourceAccess::ColorAttachment},
+                std::move(sampled),{hdr_enabled_?hdr_scene:swap},
+                {last_geometry_pass},std::move(sampled_usage)});
+            const auto scene_target=hdr_enabled_?hdr_scene:swap;
+            auto f=deferred.add_pass({"authored forward",{},
+                {scene_target,depth},{l},
+                {{scene_target,ResourceAccess::ColorAttachment},
                  {depth,ResourceAccess::DepthWrite}}});
-            auto ui=deferred.add_pass({"engine.ui overlay",{swap},{swap},{f},
+            auto post=f;
+            if(velocity_enabled_)
+                post=deferred.add_pass({"GPU motion vectors",{depth},
+                    {velocity_target},{post},
+                    {{depth,ResourceAccess::DepthRead},
+                     {velocity_target,ResourceAccess::ColorAttachment}}});
+            if(hdr_enabled_) {
+                if(auto_exposure_enabled_) {
+                    auto meter=deferred.add_pass({"HDR luminance sampling",
+                        {hdr_scene},{exposure_meter},{post},
+                        {{hdr_scene,ResourceAccess::ShaderRead},
+                         {exposure_meter,ResourceAccess::ColorAttachment}}});
+                    post=deferred.add_pass({"HDR luminance readback",
+                        {exposure_meter},{},{meter},
+                        {{exposure_meter,ResourceAccess::CopySource}}});
+                }
+                for(unsigned i=0;i<active_bloom_levels_;++i) {
+                    const auto input=i?bloom[i-1]:hdr_scene;
+                    post=deferred.add_pass({"bloom downsample "+std::to_string(i),
+                        {input},{bloom[i]},{post},
+                        {{input,ResourceAccess::ShaderRead},
+                         {bloom[i],ResourceAccess::ColorAttachment}}});
+                }
+                std::vector<ResourceId> inputs{hdr_scene};
+                std::vector<ResourceUsage> post_access{
+                    {hdr_scene,ResourceAccess::ShaderRead}};
+                if(velocity_enabled_) {
+                    inputs.push_back(velocity_target);
+                    post_access.push_back(
+                        {velocity_target,ResourceAccess::ShaderRead});
+                }
+                if(auto_exposure_enabled_) {
+                    inputs.push_back(exposure_meter);
+                    post_access.push_back({
+                        exposure_meter,ResourceAccess::ShaderRead});
+                }
+                for(unsigned i=0;i<active_bloom_levels_;++i) {
+                    inputs.push_back(bloom[i]);
+                    post_access.push_back({bloom[i],ResourceAccess::ShaderRead});
+                }
+                post_access.push_back({swap,ResourceAccess::ColorAttachment});
+                post=deferred.add_pass({"HDR Filmic scene compositor",
+                    std::move(inputs),{swap},{post},std::move(post_access)});
+            }
+            auto ui=deferred.add_pass({"engine.ui overlay",{swap},{swap},{post},
                 {{swap,ResourceAccess::ColorAttachment}}});
             auto capture=deferred.add_pass({"GPU readback",{swap},{swap},{ui},
                 {{swap,ResourceAccess::CopySource}}});
@@ -265,13 +419,16 @@ void Renderer::destroy_pipeline() noexcept {
     stop_shader_reload();
     if(!device_)return;
     if(pipeline_)vkDestroyPipeline(device_,pipeline_,nullptr);
+    if(pipeline_hdr_)vkDestroyPipeline(device_,pipeline_hdr_,nullptr);
     if(pick_pipeline_)vkDestroyPipeline(device_,pick_pipeline_,nullptr);
     if(world_pipeline_)vkDestroyPipeline(device_,world_pipeline_,nullptr);
+    if(world_pipeline_hdr_)vkDestroyPipeline(device_,world_pipeline_hdr_,nullptr);
     if(world_pipeline_layout_)
         vkDestroyPipelineLayout(device_,world_pipeline_layout_,nullptr);
     if(world_vs_)vkDestroyShaderModule(device_,world_vs_,nullptr);
     if(world_fs_)vkDestroyShaderModule(device_,world_fs_,nullptr);
-    world_pipeline_=VK_NULL_HANDLE;world_pipeline_layout_=VK_NULL_HANDLE;
+    world_pipeline_=world_pipeline_hdr_=VK_NULL_HANDLE;
+    world_pipeline_layout_=VK_NULL_HANDLE;
     world_vs_=world_fs_=VK_NULL_HANDLE;
     if(material_pipeline_)
         vkDestroyPipeline(device_,material_pipeline_,nullptr);
@@ -292,7 +449,8 @@ void Renderer::destroy_pipeline() noexcept {
     if(pipeline_layout_)vkDestroyPipelineLayout(device_,pipeline_layout_,nullptr);
     if(vertex_shader_)vkDestroyShaderModule(device_,vertex_shader_,nullptr);
     if(fragment_shader_)vkDestroyShaderModule(device_,fragment_shader_,nullptr);
-    pipeline_=VK_NULL_HANDLE;pick_pipeline_=VK_NULL_HANDLE;
+    pipeline_=pipeline_hdr_=VK_NULL_HANDLE;
+    pick_pipeline_=VK_NULL_HANDLE;
     pipeline_layout_=VK_NULL_HANDLE;
     vertex_shader_=fragment_shader_=VK_NULL_HANDLE;
 }
@@ -366,6 +524,7 @@ void Renderer::destroy_vertex_buffer() noexcept {
 void Renderer::destroy_swapchain() noexcept {
     if(!device_)return;
     destroy_ui_resources();
+    destroy_hdr_resources();
     destroy_deferred_resources();
     // Must be called after vkDeviceWaitIdle on resize/shutdown, including
     // after any vkQueuePresentKHR waiting on these binary semaphores.
@@ -390,6 +549,7 @@ void Renderer::shutdown() noexcept {
     destroy_world_resources();
     destroy_material_resources();
     destroy_vertex_buffer();
+    if(device_)save_pipeline_cache();
     if(device_) {
         if(completed_)vkDestroyFence(device_,completed_,nullptr);
         if(timing_queries_)vkDestroyQueryPool(device_,timing_queries_,nullptr);
@@ -517,7 +677,9 @@ void Renderer::create_swapchain() {
     create_material_pipeline();
     if(deferred_enabled_) {
         create_deferred_resources();
+        if(hdr_enabled_)create_hdr_resources();
         create_deferred_pipelines();
+        if(hdr_enabled_)create_hdr_pipelines();
     }
 }
 void Renderer::create_pipeline() {
@@ -529,7 +691,13 @@ void Renderer::create_pipeline() {
     };
     shader(shaders::basic_vertex,std::size(shaders::basic_vertex),vertex_shader_);
     shader(shaders::basic_fragment,std::size(shaders::basic_fragment),fragment_shader_);
+    VkPushConstantRange forward_fog_push{};
+    forward_fog_push.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    forward_fog_push.offset=0;
+    forward_fog_push.size=8u*sizeof(float); // eye.xyz + density, haze rgb + reserve
     VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    li.pushConstantRangeCount=1;
+    li.pPushConstantRanges=&forward_fog_push;
     check(vkCreatePipelineLayout(device_,&li,nullptr,&pipeline_layout_),
           "vkCreatePipelineLayout");
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -540,12 +708,13 @@ void Renderer::create_pipeline() {
         stages[i].pName="main";
     }
     VkVertexInputBindingDescription binding{0,sizeof(ColoredVertex),VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attributes[2]{};
+    VkVertexInputAttributeDescription attributes[3]{};
     attributes[0]={0,0,VK_FORMAT_R32G32B32A32_SFLOAT,0};
     attributes[1]={1,0,VK_FORMAT_R32G32B32A32_SFLOAT,16};
+    attributes[2]={2,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(ColoredVertex,world)};
     VkPipelineVertexInputStateCreateInfo vertex{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex.vertexBindingDescriptionCount=1;vertex.pVertexBindingDescriptions=&binding;
-    vertex.vertexAttributeDescriptionCount=2;vertex.pVertexAttributeDescriptions=attributes;
+    vertex.vertexAttributeDescriptionCount=3;vertex.pVertexAttributeDescriptions=attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -580,14 +749,19 @@ void Renderer::create_pipeline() {
     pi.pMultisampleState=&ms;pi.pDepthStencilState=&depth;
     pi.pColorBlendState=&blend;pi.pDynamicState=&dyn;
     pi.layout=pipeline_layout_;
-    check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,&pipeline_),
+    check(create_cached_graphics_pipelines(1,&pi,&pipeline_),
           "vkCreateGraphicsPipelines");
+    if(hdr_enabled_) {
+        VkFormat const forward_hdr_format=hdr_format_;
+        rendering.pColorAttachmentFormats=&forward_hdr_format;
+        check(create_cached_graphics_pipelines(1,&pi,&pipeline_hdr_),
+              "vkCreateGraphicsPipelines(HDR forward primitives)");
+    }
     // The pick pass always uses exact linear RGBA8 UNORM regardless of
     // swapchain BGRA/sRGB format, preventing ID corruption by gamma encoding.
     VkFormat const pick_format=VK_FORMAT_R8G8B8A8_UNORM;
     rendering.pColorAttachmentFormats=&pick_format;
-    check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pi,nullptr,
-                                    &pick_pipeline_),
+    check(create_cached_graphics_pipelines(1,&pi,&pick_pipeline_),
           "vkCreateGraphicsPipelines(ID picking)");
 }
 }

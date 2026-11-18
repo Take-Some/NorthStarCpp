@@ -10,7 +10,7 @@ Bullet-powered arena.
 
 The level is a 60 m × 60 m training platform with physics obstacles and a
 four-stage objective sequence. The objectives are implemented in
-`scripts/main.js` using the supported `@northstar/engine` SDK:
+`assets/scripts/main.js` using the supported `@northstar/engine` SDK:
 
 1. **SIGNAL:** reach the cyan navigation beacon.
 2. **PHYSICS:** displace the yellow dynamic crate by at least 0.9 m.
@@ -39,9 +39,9 @@ No mission entities are hard-coded in the C++ runtime.
 
 The player starts in **first-person view**. Camera authoring values are
 read from the selected Pawn's `northstar.gameplay.camera_rig` component.
-`scripts/playerConfig.js` defines configuration, controls and optional
+`assets/scripts/playerConfig.js` defines configuration, controls and optional
 character assets, but does not create another PlayerController.
-`scripts/player/playerMovement.js` forwards input to
+`assets/scripts/player/playerMovement.js` forwards input to
 `Player.move`, `Player.jump` and `Player.sprint`.
 Actual physical movement is owned by Jolt.
 

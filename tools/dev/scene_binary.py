@@ -164,7 +164,7 @@ def scene_entity_references(data: bytes) -> list[tuple[str, str]]:
             return result
 
         read_text()  # entity name
-        cursor += 12 + 4 + 4 + 4 + 8 + 8  # position, size, color, mass, IDs
+        cursor += 12 + struct.calcsize("<fIBfQQ")  # position + exact entity scalar layout
         for _ in range(3):
             read_text()  # layer, streaming cell, room
         asset = read_text()

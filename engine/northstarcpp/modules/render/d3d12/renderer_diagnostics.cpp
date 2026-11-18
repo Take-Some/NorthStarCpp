@@ -1,5 +1,6 @@
 // Diagnostics subsystem: independent D3D12 implementation.
 #include "renderer_private.hpp"
+#include "../shared/gpu_capture_ppm.hpp"
 namespace northstarcpp::render::d3d12::detail {
 NorthStarRenderTimingStats RendererState::timing_stats(){
         NorthStarRenderTimingStats stats{};
@@ -46,6 +47,8 @@ void RendererState::verify_readback(ID3D12Resource* pixels,UINT pitch,UINT mode)
         UINT64 material_red=0,material_green=0;
         UINT64 grid_pixels=0;
         auto const* bytes=static_cast<const uint8_t*>(data);
+        northstarcpp::render::diagnostics::capture_ppm_if_requested(
+            bytes,width,height,pitch,false,mode);
         for(UINT y=0;y<height;++y) {
             auto const* row=bytes+SIZE_T(y)*pitch;
             for(UINT x=0;x<width;++x) {

@@ -33,12 +33,20 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
                 1,sky_tint->GetGPUVirtualAddress());
             commands->SetGraphicsRootDescriptorTable(
                 2,sky_srv_heap->GetGPUDescriptorHandleForHeapStart());
-            commands->SetPipelineState(hdr_enabled?
-                hdr_sky_pipeline.Get():sky_pipeline.Get());
+            bool const fullscreen=gpu_sky_uniforms.flags[0]>.5f;
+            commands->SetPipelineState(fullscreen?
+                (hdr_enabled?hdr_sky_fullscreen_pipeline.Get():
+                             sky_fullscreen_pipeline.Get()):
+                (hdr_enabled?hdr_sky_pipeline.Get():sky_pipeline.Get()));
             commands->IASetVertexBuffers(0,1,&sky_vertex_view);
             commands->IASetIndexBuffer(&sky_index_view);
             commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            commands->DrawIndexedInstanced(sky_index_count,1,0,0,0);
+            if(gpu_sky_uniforms.flags[0]>.5f) {
+                // Fullscreen sky ignores source dome indices, guaranteeing
+                // all background pixels at every camera orientation.
+                commands->DrawInstanced(6,1,0,0);
+            }else
+                commands->DrawIndexedInstanced(sky_index_count,1,0,0,0);
         }
         draw_editor_grid(context);
         commands->SetGraphicsRootSignature(signature.Get());
@@ -114,6 +122,13 @@ void RendererState::record_gbuffer_pass(FramePassContext& context) {
                 commands->SetGraphicsRootDescriptorTable(2,handle);
                 commands->DrawInstanced(draw.count,1,draw.first,0);
             }
+        }
+        // Index buffers are immutable across frames; only the small world
+        // matrices/material constants are refreshed. Same HDR/GBuf target.
+        if(!rigid_draws.empty()) {
+            std::memcpy(material_camera_data,&matrix,sizeof(matrix));
+            std::memcpy(material_camera_data+sizeof(matrix),eye_data,sizeof(eye_data));
+            record_rigid_opaque();
         }
 }
 } // namespace northstarcpp::render::d3d12::detail

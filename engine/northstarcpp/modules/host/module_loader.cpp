@@ -201,6 +201,13 @@ std::vector<fs::path> external_candidates(fs::path const& directory)
         if (extension != ".so")
 #endif
             continue;
+        // A test DLL may advertise the same provider/ABI but predate optional
+        // GPU extensions. Only explicit path overrides may select QA DLLs.
+        // Deterministic discovery must prefer render_d3d12.dll over
+        // qa_render_d3d12_motion.dll, regardless of lexical file ordering.
+        auto const filename=lowercase(entry.path().filename().u8string());
+        if(filename.rfind("qa_",0)==0 ||
+           filename.rfind("test_",0)==0)continue;
         std::error_code status;
         if (entry.is_regular_file(status) && !status)
             candidates.push_back(entry.path());

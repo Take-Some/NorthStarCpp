@@ -1,0 +1,90 @@
+<?xml version='1.0' encoding='utf-8'?>
+<NorthStarUI version="3" target="screen" layer="nightcitymenu">
+  <Elements>
+    <Image id="backdrop">
+      <Property name="source" type="string" value="textures/menu.ytd@bg" />
+      <Property name="x" type="number" value="-8" />
+      <Property name="y" type="number" value="-8" />
+      <Property name="width" type="number" value="4096" />
+      <Property name="height" type="number" value="2160" />
+      <Property name="position" type="string" value="absolute" />
+      <Property name="fit" type="string" value="cover" />
+      <Property name="layer" type="string" value="background" />
+      <Property name="ui_shader_hlsl" type="string" value="shaders/ui/menu_hover.hlsl" />
+      <Property name="ui_shader_spirv" type="string" value="shaders/ui/menu_hover.frag.spv" />
+    </Image>
+    <Image id="menuLogo">
+      <Property name="source" type="string" value="textures/menu.ytd@logo" />
+      <Property name="x" type="number" value="76" />
+      <Property name="y" type="number" value="26" />
+      <Property name="width" type="number" value="555" />
+      <Property name="height" type="number" value="214" />
+      <Property name="position" type="string" value="absolute" />
+      <Property name="fit" type="string" value="contain" />
+      <Property name="layer" type="string" value="foreground" />
+    </Image>
+    <Panel id="dimmer">
+      <Property name="x" type="number" value="-8" />
+      <Property name="y" type="number" value="-8" />
+      <Property name="width" type="number" value="4096" />
+      <Property name="height" type="number" value="2160" />
+      <Property name="background" type="color" value="#04070f8a" />
+    </Panel>
+    <Panel id="card" parent="dimmer">
+      <Property name="x" type="number" value="76" />
+      <Property name="y" type="number" value="260" />
+      <Property name="width" type="number" value="555" />
+      <Property name="height" type="number" value="600" />
+      <Property name="padding" type="number" value="25" />
+      <Property name="gap" type="number" value="10" />
+      <Property name="background" type="color" value="#0a1523bb" />
+      <Property name="style" type="string" value="alloy" />
+    </Panel>
+    <Panel id="headerRule" parent="card">
+      <Property name="width" type="number" value="482" />
+      <Property name="height" type="number" value="2" />
+      <Property name="background" type="color" value="#c89b50cc" />
+    </Panel>
+    <Text id="heading" parent="card">
+      <Property name="text" type="string" value="АВТОРЫ И ТЕХНОЛОГИИ" />
+      <Property name="height" type="number" value="41" />
+      <Property name="font_scale" type="number" value="2" />
+      <Property name="color" type="color" value="#ffffffff" />
+    </Text>
+    <Text id="game" parent="card">
+      <Property name="text" type="string" value="Разработка проекта: Kayla" />
+      <Property name="height" type="number" value="36" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="color" type="color" value="#e6ecf7ff" />
+    </Text>
+    <Text id="engine" parent="card">
+      <Property name="text" type="string" value="Движок: NorthStarCpp" />
+      <Property name="height" type="number" value="35" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="color" type="color" value="#e6ecf7ff" />
+    </Text>
+    <Text id="stack" parent="card">
+      <Property name="text" type="string" value="C++ / V8 / engine.ui / Jolt Physics" />
+      <Property name="height" type="number" value="50" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="color" type="color" value="#bac9ddff" />
+    </Text>
+    <Button id="back" parent="card">
+      <Property name="text" type="string" value="НАЗАД" />
+      <Property name="width" type="number" value="482" />
+      <Property name="height" type="number" value="56" />
+      <Property name="font_scale" type="number" value="3" />
+      <Property name="style" type="string" value="cyberpunk" />
+      <Property name="primary" type="bool" value="false" />
+      <Property name="fx_origin" type="number" value="4" />
+      <Property name="background" type="color" value="#1b3a49fa" />
+      <Property name="color" type="color" value="#eaf8ffff" />
+    </Button>
+    <Text id="message" parent="card">
+      <Property name="text" type="string" value="" />
+      <Property name="height" type="number" value="0" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="color" type="color" value="#ffc2baff" />
+    </Text>
+  </Elements>
+</NorthStarUI>

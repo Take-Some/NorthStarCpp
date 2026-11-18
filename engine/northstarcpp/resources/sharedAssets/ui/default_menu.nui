@@ -1,0 +1,77 @@
+<?xml version='1.0' encoding='utf-8'?>
+<NorthStarUI version="3" target="screen" layer="mainmenu">
+  <Tokens>
+    <Token name="accent" type="color" value="#ffcb64ff" />
+    <Token name="surface" type="color" value="#173346ff" />
+    <Token name="foreground" type="color" value="#eaf5ffff" />
+  </Tokens>
+  <Styles>
+    <Style name="menu_button">
+      <Property name="width" type="number" value="505" />
+      <Property name="height" type="number" value="60" />
+      <Property name="background" token="surface" />
+      <Property name="color" token="foreground" />
+      <Property name="font_scale" type="number" value="2" />
+    </Style>
+  </Styles>
+  <Elements>
+    <Panel id="backdrop">
+      <Property name="position" type="string" value="absolute" />
+      <Property name="x" type="number" value="0" />
+      <Property name="y" type="number" value="0" />
+      <Property name="width" type="number" value="4096" />
+      <Property name="height" type="number" value="2160" />
+      <Property name="background" type="color" value="#070d19ff" />
+    </Panel>
+    <Panel id="menu">
+      <Property name="position" type="string" value="absolute" />
+      <Property name="x" type="number" value="80" />
+      <Property name="y" type="number" value="250" />
+      <Property name="width" type="number" value="570" />
+      <Property name="height" type="number" value="510" />
+      <Property name="padding" type="number" value="24" />
+      <Property name="gap" type="number" value="12" />
+      <Property name="background" type="color" value="#0d2035ed" />
+    </Panel>
+    <Text id="brand" parent="menu">
+      <Property name="text" type="string" value="NORTHSTAR" />
+      <Property name="font_scale" type="number" value="3" />
+      <Property name="height" type="number" value="65" />
+      <Property name="color" token="accent" />
+    </Text>
+    <Panel id="divider" parent="menu">
+      <Property name="width" type="number" value="500" />
+      <Property name="height" type="number" value="2" />
+      <Property name="background" type="color" value="#ebbd5fdd" />
+    </Panel>
+    <Button id="start" parent="menu" style="menu_button">
+      <Property name="text" type="string" value="START GAME" />
+      <Property name="style" type="string" value="cyberpunk" />
+      <Property name="primary" type="bool" value="true" />
+      <Property name="background" type="color" value="#785223ff" />
+      <Property name="color" token="accent" />
+      <Property name="font_scale" type="number" value="2" />
+    </Button>
+    <Button id="settings" parent="menu" style="menu_button">
+      <Property name="text" type="string" value="SETTINGS" />
+      <Property name="style" type="string" value="cyberpunk" />
+      <Property name="font_scale" type="number" value="2" />
+    </Button>
+    <Button id="quit" parent="menu" style="menu_button">
+      <Property name="text" type="string" value="QUIT" />
+      <Property name="style" type="string" value="cyberpunk" />
+      <Property name="font_scale" type="number" value="2" />
+    </Button>
+    <Text id="version">
+      <Property name="position" type="string" value="absolute" />
+      <Property name="anchor_bottom" type="bool" value="true" />
+      <Property name="x" type="number" value="80" />
+      <Property name="y" type="number" value="-60" />
+      <Property name="width" type="number" value="350" />
+      <Property name="height" type="number" value="30" />
+      <Property name="font_scale" type="number" value="1" />
+      <Property name="text" type="string" value="NORTHSTARCPP" />
+      <Property name="color" type="color" value="#bf8d6fff" />
+    </Text>
+  </Elements>
+</NorthStarUI>

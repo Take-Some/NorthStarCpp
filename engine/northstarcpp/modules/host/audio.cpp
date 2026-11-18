@@ -53,6 +53,11 @@ struct AudioEngine::State {
           voices(module.query_extension<NorthStarAudioVoicesApi>(
               NORTHSTARCPP_AUDIO_VOICES_ABI))
     {
+        // ABI-2 is required by runtime audio: single-stream providers would
+        // cut gunshots, shell impacts and overlapping music.
+        if(!voices)
+            throw std::runtime_error(
+                "engine.audio requires multivoice provider ABI 2");
         audio = api.create();
         if (!audio)
             throw module.error("Cannot create audio engine");

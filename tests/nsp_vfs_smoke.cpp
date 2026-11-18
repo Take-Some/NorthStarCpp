@@ -34,8 +34,8 @@ int main(int argc,char** argv) {
         check(context!=nullptr,"Cannot create VFS context");
         check(archives->mount_archive(context,"",pack.c_str(),pack.c_str(),-100),
               "Cannot mount NSP");
-        const char* name="prefabs/rifle_mini14.nprefab";
-        fs::path expected_file=source/"prefabs"/"rifle_mini14.nprefab";
+        const char* name="prefabs/weapon/rifle_mini14.nprefab";
+        fs::path expected_file=source/"prefabs/weapon"/"rifle_mini14.nprefab";
         std::ifstream input(expected_file,std::ios::binary);
         check(static_cast<bool>(input),"Missing smoke source asset");
         std::vector<std::uint8_t> expected{
@@ -57,8 +57,8 @@ int main(int argc,char** argv) {
         // package remains visible for assets not provided by the project.
         auto override_root=fs::temp_directory_path()/
             ("northstar_nsp_overlay_smoke_"+std::to_string(GetCurrentProcessId()));
-        fs::create_directories(override_root/"prefabs");
-        {std::ofstream out(override_root/"prefabs"/"rifle_mini14.nprefab",std::ios::binary);
+        fs::create_directories(override_root/"prefabs/weapon");
+        {std::ofstream out(override_root/"prefabs/weapon"/"rifle_mini14.nprefab",std::ios::binary);
          out<<"project-override";}
         auto override_u8=override_root.u8string();
         check(api->mount_directory(context,"",override_u8.c_str(),100),

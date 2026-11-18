@@ -36,6 +36,7 @@ void Renderer::set_skinned_material_batches(
     std::uint64_t total_textures=0;
     VkDeviceSize palette_floats=0;
     bool textures_same=count==skinned_sources_.size();
+    bool geometry_same=count==skinned_sources_.size();
     for(std::uint32_t i=0;i<count;++i) {
         const auto& input=batches[i];
         const auto& policy=input.material;
@@ -59,6 +60,7 @@ void Renderer::set_skinned_material_batches(
                 throw std::invalid_argument("Invalid GPU bone palette");
         if(!previous || previous->palette.size()!=source.palette.size() ||
            !matches_geometry(previous->vertices,input.vertices,input.vertex_count)) {
+            geometry_same=false;
             for(std::uint32_t index=0;index<input.vertex_count;++index) {
                 auto const& vertex=input.vertices[index];
                 for(float value:{vertex.x,vertex.y,vertex.z,
@@ -123,6 +125,7 @@ void Renderer::set_skinned_material_batches(
     skin_vertex_count_=total_vertices;
     skin_palette_floats_=palette_floats;
     if(!textures_same)material_textures_dirty_=true;
+    if(!geometry_same)skin_geometry_dirty_=true;
 }
 void Renderer::create_skin_resources() {
     if(skin_pipeline_)return;
@@ -237,6 +240,7 @@ void Renderer::ensure_skin_buffers() {
             check(vkAllocateMemory(device_,&allocation,nullptr,&next.memory),
                 "vkAllocateMemory(GPU skin)");
             frame_memory::device_allocated(requirements.size);
+            diagnostics_.add(VulkanCounter::skin_buffer_grows);
             check(vkBindBufferMemory(device_,next.handle,next.memory,0),
                 "vkBindBufferMemory(GPU skin)");
         }
@@ -249,7 +253,10 @@ void Renderer::ensure_skin_buffers() {
     VkWriteDescriptorSet writes[3]{};
     for(std::uint32_t i=0;i<bindings.size();++i) {
         auto& buffer=bindings[i].buffer;
-        if(replacement[i].handle)std::swap(buffer,replacement[i]);
+        if(replacement[i].handle) {
+            if(i==0)skin_geometry_dirty_=true;
+            std::swap(buffer,replacement[i]);
+        }
         info[i]={buffer.handle,0,buffer.capacity};
         writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet=skin_set_;
@@ -282,41 +289,55 @@ void Renderer::destroy_skin_resources() noexcept {
     skin_pipeline_=VK_NULL_HANDLE;skin_pipeline_layout_=VK_NULL_HANDLE;
     skin_shader_=VK_NULL_HANDLE;skin_descriptor_pool_=VK_NULL_HANDLE;
     skin_set_layout_=VK_NULL_HANDLE;skin_set_=VK_NULL_HANDLE;
+    skin_geometry_dirty_=true;
 }
 void Renderer::upload_skin_geometry() {
     skin_draws_.clear();
     if(skinned_sources_.empty())return;
     if(!skin_pipeline_)throw std::logic_error("Vulkan GPU skin is uninitialized");
+    // The input mesh is immutable between topology updates: the GPU compute
+    // shader still runs every frame, but only palette matrices must be updated.
+    // A resized skin input buffer always sets skin_geometry_dirty_ again.
     void* vertices=nullptr;
     void* bones=nullptr;
-    check(vkMapMemory(device_,skin_input_.memory,0,
-        skin_vertex_count_*sizeof(NorthStarSkinMaterialVertex),0,&vertices),
-        "vkMapMemory(GPU skin vertices)");
+    bool palette_mapped=false;
+    if(skin_geometry_dirty_)
+        check(vkMapMemory(device_,skin_input_.memory,0,
+            skin_vertex_count_*sizeof(NorthStarSkinMaterialVertex),0,&vertices),
+            "vkMapMemory(GPU skin vertices)");
     try {
         check(vkMapMemory(device_,skin_palette_.memory,0,
             skin_palette_floats_*sizeof(float),0,&bones),
             "vkMapMemory(GPU bone matrices)");
-        std::uint64_t vertex_offset=0;
-        for(auto const& source:skinned_sources_) {
-            const auto bytes=source.vertices.size()*sizeof(NorthStarSkinMaterialVertex);
-            std::memcpy(static_cast<std::uint8_t*>(vertices)+
-                vertex_offset*sizeof(NorthStarSkinMaterialVertex),
-                source.vertices.data(),bytes);
-            vertex_offset+=source.vertices.size();
-            frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,bytes);
+        palette_mapped=true;
+        if(vertices) {
+            std::uint64_t vertex_offset=0;
+            for(auto const& source:skinned_sources_) {
+                auto const bytes=source.vertices.size()*sizeof(NorthStarSkinMaterialVertex);
+                std::memcpy(static_cast<std::uint8_t*>(vertices)+
+                    vertex_offset*sizeof(NorthStarSkinMaterialVertex),
+                    source.vertices.data(),bytes);
+                vertex_offset+=source.vertices.size();
+                diagnostics_.add(VulkanCounter::skin_vertex_upload_bytes,bytes);
+                frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,bytes);
+            }
         }
         auto* dest=static_cast<float*>(bones);
         for(auto const& source:skinned_sources_) {
             dest=std::copy(source.palette.begin(),source.palette.end(),dest);
-            frame_memory::copied(&NorthStarFrameMemoryCounters::palette_copy_bytes,
-                                 source.palette.size()*sizeof(float));
+            auto const bytes=source.palette.size()*sizeof(float);
+            diagnostics_.add(VulkanCounter::skin_palette_upload_bytes,bytes);
+            frame_memory::copied(&NorthStarFrameMemoryCounters::palette_copy_bytes,bytes);
         }
         vkUnmapMemory(device_,skin_palette_.memory);
+        palette_mapped=false;
     }catch(...) {
-        vkUnmapMemory(device_,skin_input_.memory);
+        if(palette_mapped)vkUnmapMemory(device_,skin_palette_.memory);
+        if(vertices)vkUnmapMemory(device_,skin_input_.memory);
         throw;
     }
-    vkUnmapMemory(device_,skin_input_.memory);
+    if(vertices)vkUnmapMemory(device_,skin_input_.memory);
+    skin_geometry_dirty_=false;
     std::uint32_t first=0,palette_offset=0;
     frame_memory::reserve(skin_draws_,skinned_sources_.size());
     for(std::size_t index=0;index<skinned_sources_.size();++index) {

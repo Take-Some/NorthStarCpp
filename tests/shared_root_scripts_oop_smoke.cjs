@@ -41,7 +41,7 @@ const engine={
     },
     camera:{
         available:()=>true,angles:()=>({yaw:0,pitch:0}),
-        mode:()=>cameraModes.at(-1)?.[0]??"first_person",
+        mode:()=>cameraModes.at(-1)?.[0]??"third_person",
         setMode:(mode,time)=>cameraModes.push([mode,time]),
         followDistance:()=>followDistance,
         setFollowDistance:d=>{followDistance=d;},
@@ -56,6 +56,35 @@ const engine={
     audio:{playNac:()=>1},
     logger:{warn:()=>{},info:()=>{}}
 };
+// Real SDK expects service-grouped provider interfaces.
+const flatInput=engine.input,flatPlayer=engine.player,flatScene=engine.scene;
+const flatCamera=engine.camera,flatPhysics=engine.physics;
+const flatSession=engine.session,flatUI=engine.ui,flatAudio=engine.audio;
+engine.input={
+    keyboard:{isDown:flatInput.isDown},
+    pointer:{mouseDown:flatInput.mouseDown,pointerDelta:flatInput.pointerDelta,
+        wheelDelta:flatInput.wheelDelta},
+    gamepads:{gamepad:flatInput.gamepad}
+};
+engine.player={
+    controller:{controlledIndex:flatPlayer.controlledIndex,
+        controlledEntity:flatPlayer.controlledEntity},
+    motion:{setEyeHeight:flatPlayer.setEyeHeight,eye:flatPlayer.eye,
+        move:flatPlayer.move,sprint:flatPlayer.sprint,jump:flatPlayer.jump,
+        motion:flatPlayer.motion,ground:flatPlayer.ground}
+};
+engine.scene={entities:{objects:flatScene.objects,objectCount:flatScene.objectCount},
+    transforms:{setColor:flatScene.setColor}};
+engine.camera={views:{available:flatCamera.available,angles:flatCamera.angles,
+    mode:flatCamera.mode,setMode:flatCamera.setMode,
+    followDistance:flatCamera.followDistance,
+    setFollowDistance:flatCamera.setFollowDistance,setAngles:flatCamera.setAngles,
+    setZoom:flatCamera.setZoom}};
+engine.physics={queries:{sweepSphere:flatPhysics.sweepSphere},
+    bodies:{applyImpulse:flatPhysics.applyImpulse}};
+engine.session={lifecycle:flatSession};
+engine.ui={viewport:{setTitle:flatUI.setTitle},documents:{apply:flatUI.apply}};
+engine.audio={playback:{playNac:flatAudio.playNac}};
 const context=vm.createContext({engine});
 function load(relative) {
     const source=fs.readFileSync(path.join(BASE,relative),"utf8").replace(
@@ -67,15 +96,15 @@ function load(relative) {
     });
 }
 load("northstar/bootstrap.js");
-load("northstar/events.js");
+
 for(const file of [
     "input/Keys.js","input/GamepadButtons.js",
     "scene/Entity.js","scene/Prefab.js","ui/UI.js",
     "character/Character.js","player/playerConfig.js",
     "player/playerActor.js","player/playerSession.js",
     "camera/playerCamera.js","camera/playerLook.js",
-    "player/playerMovement.js","audio/footsteps.js",
-    "player/playerFootsteps.js","character/playerCharacter.js",
+    "player/playerMovement.js","character/footsteps.js",
+    "character/playerCharacter.js",
     "player/playerInteraction.js"
 ])load(file);
 
@@ -150,7 +179,7 @@ held.delete(SDK.Keys.Escape);
 engine.emit("stop");
 assert.equal(probe.stopped,1);
 const before=probe.updated;
-assert.equal(probe.uninstall(),true);
+assert.equal(probe.uninstall(),false,"stop must auto-dispose the script");
 assert.equal(probe.uninstall(),false);
 engine.emit("update",0.016);
 assert.equal(probe.updated,before,"uninstalled script must not receive ticks");

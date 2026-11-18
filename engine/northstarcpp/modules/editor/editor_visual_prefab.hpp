@@ -2,6 +2,7 @@
 // Non-mutating visual prefab composition for Qt GPU authoring.
 // A prefab supplies render parts to an existing SkeletalMesh Entity, never a Pawn.
 #include <northstarcpp/player_blueprint.hpp>
+#include <northstarcpp/asset_roots.hpp>
 #include <northstarcpp/scene.hpp>
 #include <filesystem>
 #include <algorithm>
@@ -78,15 +79,9 @@ inline std::filesystem::path locate(std::filesystem::path root,std::string const
        ref.substr(ref.size()-8)!=".nprefab")
         throw std::invalid_argument("Invalid visual prefab reference");
     std::vector<std::filesystem::path> bases{root,root/"assets"};
-    for(auto dir=root;!dir.empty();) {
-        if(std::filesystem::is_directory(dir/"sharedAssets")) {
-            bases.push_back(dir/"sharedAssets");
-            break;
-        }
-        auto parent=dir.parent_path();
-        if(parent==dir)break;
-        dir=parent;
-    }
+    if(auto const shared=asset_paths::locate_shared_root(root);
+       !shared.empty())
+        bases.push_back(shared);
     for(auto const& base:bases) {
         std::error_code ec;
         auto realbase=std::filesystem::canonical(base,ec);

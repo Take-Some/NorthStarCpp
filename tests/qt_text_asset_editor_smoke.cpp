@@ -14,6 +14,8 @@
 #include <QFileInfo>
 #include <QElapsedTimer>
 #include <QListView>
+#include <QDir>
+#include <QTreeWidget>
 #include <QThread>
 #include <QIcon>
 #include <QTextDocument>
@@ -94,6 +96,57 @@ int main(int argc,char** argv) {
         }
     }
 
+    { // Project scripts must appear even though the scene mounts assets/.
+        require(QDir().mkpath(dir.filePath("assets")),"assets fixture");
+        require(QDir().mkpath(dir.filePath("scripts/player")),"script fixture");
+        QString const script=dir.filePath("scripts/main.js");
+        QString const nested=dir.filePath("scripts/player/controller.ts");
+        require(write(script,"const game = 1;\n"),"main script source");
+        require(write(nested,"export const speed = 4;\n"),"nested script source");
+        QString const scene=dir.filePath("menu.nscn");
+        require(write(scene,"scene"),"project scene path");
+        QtContentBrowser browser;
+        browser.setEditorDockMode(true);
+        browser.setProjectScene(scene);
+        browser.setSearchText("main.js");
+        QElapsedTimer wait;wait.start();
+        while(wait.elapsed()<6500 && browser.visibleCount()!=1) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+            QThread::msleep(10);
+        }
+        require(browser.visibleCount()==1,"project main.js indexed");
+        auto* tree=browser.findChild<QTreeWidget*>();
+        require(tree && !tree->findItems("scripts",
+                Qt::MatchExactly|Qt::MatchRecursive,0).isEmpty(),
+                "script folder visible in project hierarchy");
+        require(tree && !tree->findItems("player",
+                Qt::MatchExactly|Qt::MatchRecursive,0).isEmpty(),
+                "nested script directory visible");
+        browser.setSearchText("");
+        browser.browseTo("scripts");
+        auto* grid=browser.findChild<QListView*>("assetGrid");
+        QModelIndex entry;
+        if(grid)for(int row=0;row<grid->model()->rowCount();++row) {
+            auto index=grid->model()->index(row,0);
+            if(index.data(Qt::DisplayRole).toString()=="main.js")
+                entry=index;
+        }
+        require(entry.isValid(),"main.js visible in scripts folder");
+        QString activated;
+        bool shared=true;
+        QObject::connect(&browser,&QtContentBrowser::textEditorRequested,
+            &browser,[&](QString const& filename,bool readonly) {
+                activated=filename;shared=readonly;
+            });
+        if(grid && entry.isValid())
+            QMetaObject::invokeMethod(grid,"doubleClicked",Qt::DirectConnection,
+                                      Q_ARG(QModelIndex,entry));
+        require(QDir::cleanPath(activated)==QDir::cleanPath(script) && !shared,
+                "double click opens editable project script, not assets path");
+        require(text_assets::formatFor(nested)==text_assets::Format::TypeScript,
+                "nested .ts opens in TypeScript editor");
+    }
+
     auto exercise=[&](QString const& filename,bool shared,
                       auto verify) {
         bool executed=false;
@@ -164,6 +217,79 @@ int main(int argc,char** argv) {
                         {apiAvailable=true;break;}
             }
             require(apiAvailable,"IntelliSense indexes NorthStar d.ts");
+            if(completer) {
+                bool render=false,documentType=false;
+                auto* model=completer->model();
+                for(int row=0;row<model->rowCount();++row) {
+                    QString const name=model->index(row,0).data().toString();
+                    render|=(name=="UIRoot.render");
+                    documentType|=(name=="UiDeclaration.children");
+                }
+                require(render,"UIRoot.render indexed from embedded TypeScript");
+                require(documentType,"UiDeclaration fields indexed from d.ts");
+                // Infer the type of a variable from its UI initializer.
+                editor->setPlainText(
+                    "import { UI } from \"@northstar/engine\";\n"
+                    "const menu = UI.createRoot(\"menu\");\nmenu.r");
+                editor->moveCursor(QTextCursor::End);
+                QKeyEvent typed(QEvent::KeyPress,Qt::Key_E,
+                                Qt::NoModifier,QStringLiteral("e"));
+                QCoreApplication::sendEvent(editor,&typed);
+                require(completer->completionPrefix()=="UIRoot.re",
+                        "UI root alias offers render completion");
+                // Semantic TypeScript completion is async and must not stall
+                // the Qt thread. Wait for its typed, member-only result.
+                QElapsedTimer tsWait;tsWait.start();
+                bool semantic=false;
+                while(tsWait.elapsed()<6500) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                    if(completer->completionPrefix()=="re") {
+                        auto* matches=completer->model();
+                        for(int row=0;row<matches->rowCount();++row)
+                            if(matches->index(row,0).data().toString()=="render")
+                                semantic=true;
+                    }
+                    if(semantic)break;
+                    QThread::msleep(10);
+                }
+                require(semantic,
+                        "real TypeScript checker completes menu.render");
+            }
+            // Real TypeScript diagnostics, inline errors and typo fix.
+            auto* typeIssues=active->findChild<QListWidget*>("textAssetDiagnostics");
+            auto* quickFix=active->findChild<QPushButton*>("textAssetQuickFix");
+            require(typeIssues && quickFix,"TypeScript diagnostics UI");
+            editor->setPlainText(
+                "import {UI} from \"@northstar/engine\";\n"
+                "const menu=UI.createRoot(\"main\");\n"
+                "menu.rnder({id:\"p\",type:\"panel\"});\n"
+                "menu.setText(\"title\",45);\n");
+            QElapsedTimer issueWait;issueWait.start();
+            bool reported=false;
+            while(issueWait.elapsed()<6500) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,50);
+                if(typeIssues)for(int index=0;index<typeIssues->count();++index)
+                    reported|=typeIssues->item(index)->text().contains("TS2551");
+                if(reported)break;
+                QThread::msleep(10);
+            }
+            require(reported,"TypeScript diagnoses unknown UI method");
+            require(editor->extraSelections().size()>1,
+                    "Inline TypeScript diagnostics underlined");
+            auto typo=editor->document()->find("rnder");
+            if(quickFix && !typo.isNull()) {
+                typo.setPosition(typo.selectionStart()+2);
+                editor->setTextCursor(typo);
+                quickFix->click();
+                QElapsedTimer fixWait;fixWait.start();
+                while(fixWait.elapsed()<6500 &&
+                      !editor->toPlainText().contains("menu.render(")) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,40);
+                    QThread::msleep(10);
+                }
+                require(editor->toPlainText().contains("menu.render("),
+                        "Quick Fix replaces misspelled UI method");
+            }
             QKeyEvent shortcut(QEvent::ShortcutOverride,Qt::Key_Space,
                                Qt::ControlModifier);
             QCoreApplication::sendEvent(editor,&shortcut);

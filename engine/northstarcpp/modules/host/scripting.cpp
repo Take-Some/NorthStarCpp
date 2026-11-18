@@ -3,6 +3,7 @@
 #include <northstarcpp/assets.hpp>
 #include <northstarcpp/shared_assets.hpp>
 #include "module_loader.hpp"
+#include "script_api_hierarchy.hpp"
 #include <algorithm>
 #include <iterator>
 #include <fstream>
@@ -16,6 +17,7 @@
 namespace northstarcpp {
 namespace {
 bool valid_identifier(std::string_view name, bool dots);
+std::string quote_json(std::string_view value);
 constexpr std::size_t max_host_bytes = NORTHSTAR_SCRIPTING_MAX_SOURCE_BYTES * 4ull;
 
 // Import lowering for VFS-backed class exports. Both engine.scripting
@@ -84,11 +86,10 @@ std::string lower_engine_imports(std::string_view source) {
                 break;
             }
             auto const imported=read_identifier(cursor);
-            static constexpr std::string_view allowed[]{
-                "Camera","Input","Events","Character","Player","Script","PlayerScript","InputAction",
-                 "Keys","GamepadButtons","Entity","Prefab","Scene","Physics","Session","UI","Logger","Audio"};
-            if(std::find(std::begin(allowed),std::end(allowed),imported)==std::end(allowed))
-                throw std::invalid_argument("Unknown @northstar/engine export: "+imported);
+            // The SDK's EngineModuleRegistry is the single export registry.
+            // Do not duplicate that allowlist in C++: new engine classes must
+            // become importable when the class registry is updated.
+            // Identifiers are already strictly validated by read_identifier.
             skip_whitespace(cursor);
             std::string local=imported;
             if(source.substr(cursor,2)=="as" &&
@@ -98,6 +99,13 @@ std::string lower_engine_imports(std::string_view source) {
                 skip_whitespace(cursor);
                 local=read_identifier(cursor);
             }
+            // Validate against the actual runtime registry. This also gives
+            // useful diagnostics for typos and missing optional providers.
+            // read_identifier accepts only safe ASCII JS identifier bytes.
+            // Construct checked quotes without depending on later JSON helpers.
+            bindings+="if (!(\""+imported+
+                "\" in globalThis.NorthStar.modules.engine)) throw new TypeError(\"Unknown @northstar/engine export: "+
+                imported+"\");\n";
             bindings+="const "+local+" = globalThis.NorthStar.modules.engine."+
                 imported+";\n";
             ++names;
@@ -212,7 +220,20 @@ struct ScriptRuntime::State {
     std::string invoke_host(char const* capability, char const* method,
                            std::string_view args)
     {
-        auto const it = bindings.find({capability, method});
+        auto it = bindings.find({capability, method});
+        if (it == bindings.end()) {
+            const auto legacy=script_api_hierarchy::legacy_namespace(
+                capability,method);
+            if(!legacy.empty())
+                it=bindings.find({std::string(legacy),method});
+        }
+        if (it == bindings.end()) {
+            auto const target=script_api_hierarchy::canonical_method(
+                capability,method);
+            if(!target.first.empty())
+                it=bindings.find({std::string(target.first),
+                                  std::string(target.second)});
+        }
         if (it == bindings.end())
             throw std::runtime_error(std::string("Engine API not registered: ") +
                 capability + "." + method);
@@ -221,7 +242,8 @@ struct ScriptRuntime::State {
     }
 
     std::string invoke_service(char const* capability, char const* method,
-                              char const* args, std::uint32_t length)
+                              char const* args, std::uint32_t length,
+                              bool allow_alias=true)
     {
         auto it = services.find(capability);
         if (it == services.end()) {
@@ -231,8 +253,31 @@ struct ScriptRuntime::State {
             it = services.emplace(capability, std::move(service)).first;
         }
         auto const& service = *it->second;
-        if (!service.api || !service.api->supports(service.context, method))
+        if (!service.api || !service.api->supports(service.context, method)) {
+            // Prefer explicitly registered nested native methods. Otherwise
+            // delegate an alias to its original capability through the
+            // normal service dispatch, so a legacy external plugin remains
+            // authoritative even when called through the new API hierarchy.
+            if (bindings.find({capability, method}) != bindings.end())
+                return invoke_host(capability, method, {args, length});
+            if(allow_alias) {
+                auto const legacy=script_api_hierarchy::legacy_namespace(
+                    capability,method);
+                if(!legacy.empty()) {
+                    const auto name=std::string(legacy);
+                    return invoke_service(name.c_str(),method,args,length,false);
+                }
+                auto const target=script_api_hierarchy::canonical_method(
+                    capability,method);
+                if(!target.first.empty()) {
+                    const auto name=std::string(target.first);
+                    const auto operation=std::string(target.second);
+                    return invoke_service(name.c_str(),operation.c_str(),
+                                          args,length,false);
+                }
+            }
             return invoke_host(capability, method, {args, length});
+        }
 
         NorthStarScriptResult result{sizeof(NorthStarScriptResult), nullptr, 0};
         auto const ok = service.api->invoke(service.context, method, args, length, &result);

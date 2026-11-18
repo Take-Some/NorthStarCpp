@@ -32,7 +32,8 @@ AssetPreviewImage preview_drawable(
     float yaw=0.6f,float pitch=0.3f,float zoom=1.f,
     bool wireframe=false,
     std::vector<MaterialDefinition> const* materials=nullptr,
-    float key_light_intensity=1.f);
+    float key_light_intensity=1.f,
+    std::uint32_t interactive_triangle_step=1);
 // Studio-lit sphere with material parameters and decoded YTD bindings.
 // Editor approximation: does not execute shader source / Vulkan RenderGraph.
 AssetPreviewImage preview_material(

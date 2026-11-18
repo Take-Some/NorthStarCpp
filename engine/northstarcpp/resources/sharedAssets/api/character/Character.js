@@ -21,6 +21,7 @@
         #previous = null;
         #heading;
         #animation;
+        #gait = "idle";
         #elapsed = 0;
         #active = false;
 
@@ -48,9 +49,13 @@
                 animations: Object.freeze(animations)
             });
 
-            this.#states = Object.freeze(Object.assign({
+            const states = Object.assign({
                 idle: "idle", walking: "walk", jumping: "jump", falling: "fall"
-            }, options.states || {}));
+            }, options.states || {});
+            // Old characters with walk-only clips retain their previous pose.
+            states.running ??= states.walking;
+            states.sprinting ??= states.running;
+            this.#states = Object.freeze(states);
             const names = new Set(animations.map(clip => clip.name));
             if (names.size !== animations.length)
                 throw new RangeError("Duplicate character animation names");
@@ -62,6 +67,7 @@
 
             this.#tuning = Object.freeze(Object.assign({
                 walkSpeed: 0.15, teleportSpeed: 35,
+                walkToRun: 2.215, runToSprint: 3.695, gaitHysteresis: 0.18,
                 airborneSpeed: 0.35, headingSeconds: 0.12, jumpHoldSeconds: 0.6
             }, options.tuning || {}));
             for (const [key, value] of Object.entries(this.#tuning)) {
@@ -89,7 +95,7 @@
         }
 
         #sample(dt) {
-            const actor = engine.scene.objects(this.#entityIndex, 1)[0];
+            const actor = engine.scene.entities.objects(this.#entityIndex, 1)[0];
             if (!actor) throw new Error("Character scene entity no longer exists");
             const position = actor.position;
             let moving = false;
@@ -117,13 +123,23 @@
             }
             this.#previous = {x: position.x, y: position.y, z: position.z};
 
+            const hysteresis=this.#tuning.gaitHysteresis;
+            const sprintThreshold=this.#tuning.runToSprint+
+                (this.#gait==="sprint"?-hysteresis:hysteresis);
+            const runThreshold=this.#tuning.walkToRun+
+                (this.#gait==="run"||this.#gait==="sprint"?-hysteresis:hysteresis);
+            this.#gait=!moving?"idle":speed>=sprintThreshold?"sprint":
+                speed>=runThreshold?"run":"walk";
+            const gaitState=this.#gait==="sprint"?this.#states.sprinting:
+                this.#gait==="run"?this.#states.running:
+                this.#gait==="walk"?this.#states.walking:this.#states.idle;
             let next = airborne
                 ? ((this.#animation === this.#states.jumping &&
                     this.#elapsed < this.#tuning.jumpHoldSeconds) ||
                    (this.#animation !== this.#states.jumping &&
                     this.#animation !== this.#states.falling)
                     ? this.#states.jumping : this.#states.falling)
-                : moving ? this.#states.walking : this.#states.idle;
+                : gaitState;
 
             if (this.#selectAnimation) {
                 next = this.#selectAnimation({
@@ -142,14 +158,14 @@
             }
             this.#elapsed += dt;
 
-            if (this.#hideInFirstPerson && engine.camera.available() &&
-                engine.camera.mode() === "first_person") {
+            if (this.#hideInFirstPerson && engine.camera.views.available() &&
+                engine.camera.views.mode() === "first_person") {
                 if(this.#firstPersonArms)
-                    engine.character.pose(this.#entityIndex,this.#heading,
+                    engine.character.visual.pose(this.#entityIndex,this.#heading,
                         this.#animation,true);
-                else engine.character.hide();
+                else engine.character.visual.hide();
             } else {
-                engine.character.pose(this.#entityIndex, this.#heading, this.#animation);
+                engine.character.visual.pose(this.#entityIndex, this.#heading, this.#animation);
             }
         }
 
@@ -158,15 +174,16 @@
                 throw new Error("Character controller is already started");
             if (!Number.isSafeInteger(index) || index < 0)
                 throw new RangeError("Character scene index must be a nonnegative integer");
-            if (!engine.scene.objects(index, 1)[0])
+            if (!engine.scene.entities.objects(index, 1)[0])
                 throw new RangeError("Character scene entity does not exist");
 
-            engine.character.load(this.#resources);
+            engine.character.visual.load(this.#resources);
             this.#entityIndex = index;
             this.#active = true;
             this.#previous = null;
             this.#heading = this.#initialHeading;
             this.#animation = this.#states.idle;
+            this.#gait = "idle";
             this.#elapsed = 0;
             try { this.#sample(0); }
             catch (error) {
@@ -184,11 +201,12 @@
 
         stop() {
             if (!this.#active) return;
-            try { engine.character.clear(); }
+            try { engine.character.visual.clear(); }
             finally {
                 this.#active = false;
                 this.#entityIndex = -1;
                 this.#previous = null;
+                this.#gait = "idle";
             }
         }
 

@@ -73,7 +73,7 @@ int main(int argc,char** argv) {
             std::ifstream file(input,std::ios::binary|std::ios::ate);
             if(!file)throw std::runtime_error("Cannot open NAC for verification");
             auto const size=file.tellg();
-            if(size<=0 || size>260ll*1024*1024)
+            if(size<=0 || size>static_cast<std::streamoff>(nac::max_container_bytes))
                 throw std::runtime_error("NAC verify size invalid");
             std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
             file.seekg(0);

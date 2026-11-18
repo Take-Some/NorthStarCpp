@@ -35,7 +35,6 @@ RELOCATIONS = (
     (ENGINE / "plugins/physics/bullet.cpp", ENGINE / "modules/physics/bullet/bullet.cpp"),
     (ENGINE / "plugins/physics/jolt.cpp", ENGINE / "modules/physics/jolt/jolt.cpp"),
     (ENGINE / "plugins/render/d3d11.cpp", ENGINE / "modules/render/d3d11/d3d11.cpp"),
-    (ENGINE / "plugins/audio/winmm.cpp", ENGINE / "modules/audio/winmm/winmm.cpp"),
     (ENGINE / "plugins/input/win32_xinput.cpp", ENGINE / "modules/input/win32/win32_xinput.cpp"),
     (ENGINE / "compat", Path("external/northstarcpp/compat")),
     (ENGINE / "ecs_api_flecs.cpp", ARCHIVE / "retired-sources/ecs_api_flecs.cpp"),

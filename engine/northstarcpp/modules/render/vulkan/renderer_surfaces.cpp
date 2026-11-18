@@ -272,6 +272,12 @@ void Renderer::create_world_pipeline() {
     VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     layout.setLayoutCount=1;
     layout.pSetLayouts=&world_set_layout_;
+    VkPushConstantRange forward_fog_push{};
+    forward_fog_push.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    forward_fog_push.offset=0;
+    forward_fog_push.size=8u*sizeof(float);
+    layout.pushConstantRangeCount=1;
+    layout.pPushConstantRanges=&forward_fog_push;
     check(vkCreatePipelineLayout(device_,&layout,nullptr,&world_pipeline_layout_),
           "vkCreatePipelineLayout(world)");
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -337,8 +343,13 @@ void Renderer::create_world_pipeline() {
     pipeline.pColorBlendState=&blend;
     pipeline.pDynamicState=&dynamics;
     pipeline.layout=world_pipeline_layout_;
-    check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pipeline,nullptr,
-                                    &world_pipeline_),
+    check(create_cached_graphics_pipelines(1,&pipeline,&world_pipeline_),
           "vkCreateGraphicsPipelines(world compressed textures)");
+    if(hdr_enabled_) {
+        VkFormat const forward_hdr_format=hdr_format_;
+        rendering.pColorAttachmentFormats=&forward_hdr_format;
+        check(create_cached_graphics_pipelines(1,&pipeline,
+              &world_pipeline_hdr_),"vkCreateGraphicsPipelines(HDR world BCn)");
+    }
 }
 } // namespace northstarcpp::render::vulkan

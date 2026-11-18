@@ -1,3 +1,4 @@
+#include "../shared/engine_sky_generated.hpp"
 // Vulkan material ABI v1. Native GPU texture sampling and GGX PBR.
 // CPU copies of all host-owned vertices/texels, bounded and lazy GPU uploads.
 #include "renderer_private.hpp"
@@ -48,7 +49,10 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
     std::vector<MaterialSource> next;
     frame_memory::reserve(next,count);
     std::uint64_t total_vertices=0;
-    bool textures_same=count==material_sources_.size();
+    // Scene sky is an additional stable unlit material batch, not an
+    // authored material index and must not invalidate ordinary batches.
+    bool textures_same=(count+(sky_enabled_?1u:0u)==material_sources_.size()) &&
+                       !sky_pending_;
     VkPhysicalDeviceProperties gpu_properties{};
     vkGetPhysicalDeviceProperties(physical_,&gpu_properties);
     for(std::uint32_t i=0;i<count;++i) {
@@ -64,7 +68,8 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
            input.roughness<0||input.roughness>1||input.unlit>1)
             throw std::invalid_argument("Invalid Vulkan PBR material parameters");
         MaterialSource source;
-        auto const* previous=i<material_sources_.size()?&material_sources_[i]:nullptr;
+        auto const* previous=i<material_sources_.size() &&
+            i!=material_sky_index_?&material_sources_[i]:nullptr;
         for(unsigned component=0;component<4;++component) {
             if(!std::isfinite(input.base_color[component]))
                 throw std::invalid_argument("Invalid material base color");
@@ -103,8 +108,23 @@ void Renderer::set_material_batches(const NorthStarMaterialBatch* batches,
         next.push_back(std::move(source));
     }
     for(std::size_t i=0;i<std::min(next.size(),material_sources_.size());++i) {
+        if(i==material_sky_index_)continue;
         adopt_retained_textures(next[i],material_sources_[i]);
         if(next[i].vertices.empty())next[i].vertices.swap(material_sources_[i].vertices);
+    }
+    if(sky_enabled_) {
+        if(sky_pending_) {
+            next.push_back(std::move(sky_pending_source_));
+            sky_pending_=false;
+            textures_same=false;
+        } else if(material_sky_index_<material_sources_.size()) {
+            next.push_back(std::move(material_sources_[material_sky_index_]));
+        } else {
+            throw std::logic_error("Vulkan sky material residency lost");
+        }
+        material_sky_index_=count;
+    } else {
+        material_sky_index_=static_cast<std::size_t>(-1);
     }
     material_sources_=std::move(next); // Atomic update after all validation.
     if(!textures_same)material_textures_dirty_=true;
@@ -195,7 +215,7 @@ void Renderer::ensure_material_vertex_capacity(VkDeviceSize required_bytes) {
         vkDestroyBuffer(device_,next_buffer,nullptr);
         check(result,"vkBindBufferMemory(high-detail material vertices)");
     }
-    check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(material buffer resize)");
+    check(diagnostics_.time_wait(VulkanWaitKind::device_idle, [&] { return vkDeviceWaitIdle(device_); }),"vkDeviceWaitIdle(material buffer resize)");
     if(material_vertices_buffer_)
         vkDestroyBuffer(device_,material_vertices_buffer_,nullptr);
     if(material_vertices_memory_)
@@ -203,6 +223,7 @@ void Renderer::ensure_material_vertex_capacity(VkDeviceSize required_bytes) {
     material_vertices_buffer_=next_buffer;
     material_vertices_memory_=next_memory;
     material_vertex_capacity_bytes_=next;
+    diagnostics_.add(VulkanCounter::material_buffer_grows);
     std::fprintf(stderr,
         "[INFO] [engine.render] vulkan.material_vertex_capacity_bytes=%llu\\n",
         static_cast<unsigned long long>(next));
@@ -242,7 +263,22 @@ void Renderer::create_material_resources() {
     check(vkBindBufferMemory(device_,lights_buffer_,lights_memory_,0),
           "vkBindBufferMemory(dynamic lights)");
 
-    std::array<VkDescriptorSetLayoutBinding,6> bindings{};
+    VkBufferCreateInfo skyBuffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    skyBuffer.size=sizeof(NorthStarGpuSkyUniforms);
+    skyBuffer.usage=VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    check(vkCreateBuffer(device_,&skyBuffer,nullptr,&sky_uniform_buffer_),
+          "vkCreateBuffer(GPU Sky uniforms)");
+    vkGetBufferMemoryRequirements(device_,sky_uniform_buffer_,&req);
+    VkMemoryAllocateInfo skyAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    skyAllocation.allocationSize=req.size;
+    skyAllocation.memoryTypeIndex=find_memory_type(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    check(vkAllocateMemory(device_,&skyAllocation,nullptr,&sky_uniform_memory_),
+          "vkAllocateMemory(GPU Sky uniforms)");
+    check(vkBindBufferMemory(device_,sky_uniform_buffer_,sky_uniform_memory_,0),
+          "vkBindBufferMemory(GPU Sky uniforms)");
+
+    std::array<VkDescriptorSetLayoutBinding,7> bindings{};
     for(std::uint32_t i=0;i<5;++i) {
         bindings[i].binding=i;bindings[i].descriptorType=
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -253,6 +289,10 @@ void Renderer::create_material_resources() {
     bindings[5].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     bindings[5].descriptorCount=1;
     bindings[5].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[6].binding=6;
+    bindings[6].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[6].descriptorCount=1;
+    bindings[6].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo layout{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layout.bindingCount=static_cast<std::uint32_t>(bindings.size());
@@ -289,7 +329,7 @@ void Renderer::reset_material_textures() {
     const auto capacity=static_cast<std::uint32_t>(std::max<std::size_t>(1,source_count));
     VkDescriptorPoolSize sizes[2]{
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,5u*capacity},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,capacity}};
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,2u*capacity}};
     VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool.maxSets=capacity;
     pool.poolSizeCount=2;pool.pPoolSizes=sizes;
@@ -312,6 +352,10 @@ void Renderer::destroy_material_resources() noexcept {
     if(material_vertices_memory_)vkFreeMemory(device_,material_vertices_memory_,nullptr);
     if(lights_buffer_)vkDestroyBuffer(device_,lights_buffer_,nullptr);
     if(lights_memory_)vkFreeMemory(device_,lights_memory_,nullptr);
+    if(sky_uniform_buffer_)vkDestroyBuffer(device_,sky_uniform_buffer_,nullptr);
+    if(sky_uniform_memory_)vkFreeMemory(device_,sky_uniform_memory_,nullptr);
+    sky_uniform_buffer_=VK_NULL_HANDLE;
+    sky_uniform_memory_=VK_NULL_HANDLE;
     material_descriptor_pool_=VK_NULL_HANDLE;
     material_sampler_=VK_NULL_HANDLE;
     material_set_layout_=VK_NULL_HANDLE;
@@ -331,7 +375,7 @@ MaterialTextureGpu Renderer::upload_material_texture(
     auto const count=values.empty()?defaults.size():values.size();
     auto const width=values.empty()?1u:source.widths[slot];
     auto const height=values.empty()?1u:source.heights[slot];
-    auto const format=(slot==0||slot==4)?
+    auto const format=(slot==4||(slot==0&&!source.sky_cloud_fields))?
         VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;
 
     MaterialTextureGpu texture;
@@ -339,6 +383,8 @@ MaterialTextureGpu Renderer::upload_material_texture(
     frame_memory::assign(texture.source_bytes,data,data+count,
         &NorthStarFrameMemoryCounters::texture_copy_bytes);
     auto const& raw=texture.source_bytes;
+    diagnostics_.add(VulkanCounter::texture_upload_bytes,raw.size());
+    diagnostics_.add(VulkanCounter::texture_uploads);
     VkBuffer staging=VK_NULL_HANDLE;
     VkDeviceMemory staging_memory=VK_NULL_HANDLE;
     VkCommandBuffer cmd=VK_NULL_HANDLE;
@@ -438,13 +484,13 @@ MaterialTextureGpu Renderer::upload_material_texture(
         submit.commandBufferCount=1;submit.pCommandBuffers=&cmd;
         check(vkQueueSubmit(queue_,1,&submit,VK_NULL_HANDLE),
               "vkQueueSubmit(material upload)");
-        check(vkQueueWaitIdle(queue_),"vkQueueWaitIdle(material upload)");
+        check(diagnostics_.time_wait(VulkanWaitKind::texture_queue_idle, [&] { return vkQueueWaitIdle(queue_); }),"vkQueueWaitIdle(material upload)");
         cleanup_temp();
         return texture;
     }catch(...) {
         // Submission failures still demand a best-effort idle before freeing
         // resources potentially referenced by a queued copy command.
-        vkQueueWaitIdle(queue_);
+        diagnostics_.time_wait(VulkanWaitKind::texture_queue_idle, [&] { return vkQueueWaitIdle(queue_); });
         cleanup_temp();
         if(texture.view)vkDestroyImageView(device_,texture.view,nullptr);
         if(texture.image)vkDestroyImage(device_,texture.image,nullptr);
@@ -454,7 +500,8 @@ MaterialTextureGpu Renderer::upload_material_texture(
 }
 void Renderer::upload_material_textures() {
     if(!material_textures_dirty_)return;
-    check(vkDeviceWaitIdle(device_),"vkDeviceWaitIdle(material refresh)");
+    diagnostics_.add(VulkanCounter::texture_descriptor_rebuilds);
+    check(diagnostics_.time_wait(VulkanWaitKind::device_idle, [&] { return vkDeviceWaitIdle(device_); }),"vkDeviceWaitIdle(material refresh)");
     reset_material_textures();
     const auto total=material_sources_.size()+skinned_sources_.size();
     material_sets_.resize(total,VK_NULL_HANDLE);
@@ -470,7 +517,7 @@ void Renderer::upload_material_textures() {
             auto const count=bytes.empty()?defaults.size():bytes.size();
             auto const width=bytes.empty()?1u:source.widths[slot];
             auto const height=bytes.empty()?1u:source.heights[slot];
-            auto const format=(slot==0||slot==4)?
+            auto const format=(slot==4||(slot==0&&!source.sky_cloud_fields))?
                 VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;
             auto key=hash_texture(data,count,width,height,format);
             while(true) {
@@ -517,6 +564,15 @@ void Renderer::upload_material_textures() {
         vkUpdateDescriptorSets(device_,static_cast<std::uint32_t>(writes.size()),
                                writes.data(),0,nullptr);
         vkUpdateDescriptorSets(device_,1,&lightWrite,0,nullptr);
+        VkDescriptorBufferInfo skyBufferInfo{
+            sky_uniform_buffer_,0,sizeof(NorthStarGpuSkyUniforms)};
+        VkWriteDescriptorSet skyWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        skyWrite.dstSet=material_sets_[batch_id];
+        skyWrite.dstBinding=6;
+        skyWrite.descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        skyWrite.descriptorCount=1;
+        skyWrite.pBufferInfo=&skyBufferInfo;
+        vkUpdateDescriptorSets(device_,1,&skyWrite,0,nullptr);
     }
     material_textures_dirty_=false;
 }
@@ -628,7 +684,8 @@ VkPipeline Renderer::create_pipeline_for_material_fragment(
     VkPipelineRenderingCreateInfo rendering{
         VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount=deferred?(gbuffer_v2_?4u:3u):1u;
-    rendering.pColorAttachmentFormats=deferred?gbuffer_formats_.data():&format_;
+    VkFormat forward_format=hdr_enabled_?hdr_format_:format_;
+    rendering.pColorAttachmentFormats=deferred?gbuffer_formats_.data():&forward_format;
     rendering.depthAttachmentFormat=depth_format_;
     VkGraphicsPipelineCreateInfo pipeline{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -644,8 +701,7 @@ VkPipeline Renderer::create_pipeline_for_material_fragment(
     pipeline.pDynamicState=&dynamic;
     pipeline.layout=material_pipeline_layout_;
     VkPipeline created=VK_NULL_HANDLE;
-    check(vkCreateGraphicsPipelines(device_,VK_NULL_HANDLE,1,&pipeline,
-                                    nullptr,&created),
+    check(create_cached_graphics_pipelines(1,&pipeline,&created),
           "vkCreateGraphicsPipelines(material)");
     return created;
 }
@@ -664,6 +720,12 @@ VkPipeline Renderer::material_graph_pipeline(
         throw std::logic_error("Invalid embedded Vulkan Material Graph GLSL");
     glsl.insert(directive+1,
         (deferred?std::string("#define NS_GBUFFER 1\n"):std::string{})+prefix);
+    if(prefix.find("NS_GPU_SKY")!=std::string::npos) {
+        const auto main_pos=glsl.find("void main() {");
+        if(main_pos==std::string::npos)
+            throw std::logic_error("GPU Sky missing GLSL fragment entrypoint");
+        glsl.insert(main_pos,northstarcpp::shaders::sky_atmosphere_glsl);
+    }
     auto bytecode=compile_material_fragment_spirv(glsl);
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize=bytecode.size()*sizeof(std::uint32_t);
@@ -698,6 +760,7 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
     auto const cp=std::cos(frame.camera_pitch),sp=std::sin(frame.camera_pitch);
     for(std::size_t index=0;index<material_sources_.size();++index) {
         auto const& batch=material_sources_[index];
+        const bool sky=(index==material_sky_index_);
         MaterialDraw draw{};
         draw.first=static_cast<std::uint32_t>(material_frame_vertices_.size());
         draw.textures=material_sets_.at(index);
@@ -713,27 +776,77 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
             }
         }
         if(!draw.pipeline)draw.pipeline=material_graph_pipeline(
-            batch.variant_prefix,batch.blend_mode);
+            (sky && gpu_sky_uniforms_.flags[0]>.5f)?
+                std::string("#define NS_GPU_SKY 1\n"):
+                batch.variant_prefix,batch.blend_mode);
         if(deferred_enabled_ && batch.blend_mode!=2)
             if(!draw.gbuffer_pipeline)draw.gbuffer_pipeline=material_graph_pipeline(
-                batch.variant_prefix,batch.blend_mode,true);
+                (sky && gpu_sky_uniforms_.flags[0]>.5f)?
+                    std::string("#define NS_GPU_SKY 1\n"):
+                    batch.variant_prefix,batch.blend_mode,true);
+        // GPU sky is a fullscreen background surface, not a physical mesh.
+        // Dropping triangles whose vertices cross the near plane caused holes
+        // that appeared/disappeared as the camera rotated. Six screen-space
+        // vertices provide complete coverage at far depth, independently of
+        // authored skydome size, winding or proximity to the camera.
+        if(sky && gpu_sky_uniforms_.flags[0]>.5f) {
+            constexpr std::array<std::array<float,2>,6> corners{{
+                {{-1.f,-1.f}},{{-1.f,1.f}},{{1.f,-1.f}},
+                {{1.f,-1.f}},{{-1.f,1.f}},{{1.f,1.f}}
+            }};
+            for(auto const& xy:corners) {
+                MaterialClipVertex out{};
+                out.clip[0]=xy[0];out.clip[1]=xy[1];
+                out.clip[2]=.9999f;out.clip[3]=1.f;
+                // Screen x/y -> camera-space ray -> world ray. Vulkan's
+                // viewport has positive height and clip Y points down here.
+                const float right=xy[0]*aspect/factor;
+                const float vertical=-xy[1]/factor;
+                const float forward=cp-vertical*sp;
+                const float up=vertical*cp+sp;
+                out.world[0]=right*cy+forward*sy;
+                out.world[1]=up;
+                out.world[2]=-right*sy+forward*cy;
+                out.uv[0]=xy[0]*.5f+.5f;
+                out.uv[1]=xy[1]*.5f+.5f;
+                // Sky-only interpolation channel: camera world origin.
+                // The fragment shader uses it to keep 3D cloud patterns
+                // stationary when the player traverses the scene.
+                out.normal[0]=frame.camera_x;
+                out.normal[1]=frame.camera_y;
+                out.normal[2]=frame.camera_z;
+                std::memcpy(out.tint,batch.tint.data(),sizeof(out.tint));
+                out.params[2]=1.f;
+                material_frame_vertices_.push_back(out);
+            }
+            draw.count=6;
+            material_draws_.push_back(draw);
+            continue;
+        }
         for(std::size_t i=0;i+2<batch.vertices.size();i+=3) {
             MaterialClipVertex tri[3]{};
             bool visible=true;
             for(unsigned j=0;j<3;++j) {
                 auto const& v=batch.vertices[i+j];
-                auto const dx=v.x-frame.camera_x;
-                auto const dy=v.y-frame.camera_y;
-                auto const dz=v.z-frame.camera_z;
+                auto const dx=v.x-(sky?0.f:frame.camera_x);
+                auto const dy=v.y-(sky?0.f:frame.camera_y);
+                auto const dz=v.z-(sky?0.f:frame.camera_z);
                 auto const horizontal=dx*cy-dz*sy;
                 auto const forward=dx*sy+dz*cy;
                 auto const vertical=dy*cp-forward*sp;
                 auto const distance=dy*sp+forward*cp;
-                visible=visible&&distance>near_clip;
+                // Authored sky triangles that cross the near plane are
+                // clipped below. Rejecting the complete triangle produced
+                // holes in custom skydomes when rotating the editor camera.
+                if(!sky)visible=visible&&distance>near_clip;
                 auto& out=tri[j];
                 out.clip[0]=horizontal*factor/aspect;
                 out.clip[1]=-vertical*factor;
-                out.clip[2]=(far_clip*distance-far_clip*near_clip)/(far_clip-near_clip);
+                // A constant far depth makes the sky appear behind every
+                // opaque object without a separate renderer-specific mesh
+                // format. Its unlit texture bypasses world lighting.
+                out.clip[2]=sky?distance*.9999f:
+                    (far_clip*distance-far_clip*near_clip)/(far_clip-near_clip);
                 out.clip[3]=distance;
                 out.uv[0]=v.u;out.uv[1]=v.v;
                 out.normal[0]=v.nx;out.normal[1]=v.ny;out.normal[2]=v.nz;
@@ -746,13 +859,121 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
                 out.params[3]=static_cast<float>(slots);
                 out.world[0]=v.x;out.world[1]=v.y;out.world[2]=v.z;
             }
-            if(visible)
+            if(sky) {
+                // Source YDD UVs and geometry must remain intact. Clip the
+                // view-space polygon against Vulkan's positive near plane,
+                // interpolating its attributes before perspective division.
+                // The far depth is constant, so sky never occludes geometry.
+                auto interpolate=[](MaterialClipVertex const& a,
+                                    MaterialClipVertex const& b,float t) {
+                    MaterialClipVertex out{};
+                    for(int k=0;k<4;++k) {
+                        out.clip[k]=a.clip[k]+(b.clip[k]-a.clip[k])*t;
+                        out.tint[k]=a.tint[k]+(b.tint[k]-a.tint[k])*t;
+                        out.params[k]=a.params[k]+(b.params[k]-a.params[k])*t;
+                    }
+                    for(int k=0;k<2;++k)
+                        out.uv[k]=a.uv[k]+(b.uv[k]-a.uv[k])*t;
+                    for(int k=0;k<3;++k) {
+                        out.normal[k]=a.normal[k]+
+                            (b.normal[k]-a.normal[k])*t;
+                        out.world[k]=a.world[k]+(b.world[k]-a.world[k])*t;
+                    }
+                    return out;
+                };
+                std::array<MaterialClipVertex,5> clipped{};
+                unsigned count=0;
+                constexpr unsigned vertices=3;
+                for(unsigned j=0;j<vertices;++j) {
+                    auto const& a=tri[(j+vertices-1)%vertices];
+                    auto const& b=tri[j];
+                    bool a_inside=a.clip[3]>near_clip*1.001f;
+                    bool b_inside=b.clip[3]>near_clip*1.001f;
+                    if(a_inside!=b_inside) {
+                        float t=(near_clip*1.001f-a.clip[3])/
+                            (b.clip[3]-a.clip[3]);
+                        clipped[count++]=interpolate(a,b,std::clamp(t,0.f,1.f));
+                    }
+                    if(b_inside)clipped[count++]=b;
+                }
+                for(unsigned j=1;j+1<count;++j) {
+                    material_frame_vertices_.push_back(clipped[0]);
+                    material_frame_vertices_.push_back(clipped[j]);
+                    material_frame_vertices_.push_back(clipped[j+1]);
+                }
+            } else if(visible)
                 material_frame_vertices_.insert(material_frame_vertices_.end(),
                                                  tri,tri+3);
         }
         draw.count=static_cast<std::uint32_t>(material_frame_vertices_.size())-
                    draw.first;
         if(draw.count)material_draws_.push_back(draw);
+    }
+    // Alpha compositing is order-dependent. Depth-write is disabled for
+    // translucent PSOs, so submit *triangles* globally back-to-front,
+    // irrespective of material/batch submission order. Stable ties preserve
+    // the original authoring order. CPU-transform already computed clip.w as
+    // positive view-space distance; no extra camera transform is necessary.
+    auto& translucent_triangles=translucent_triangles_scratch_;
+    translucent_triangles.clear();
+    for(std::size_t draw_id=0;draw_id<material_draws_.size();++draw_id) {
+        auto const& draw=material_draws_[draw_id];
+        if(draw.blend_mode!=2u)continue;
+        for(std::uint32_t first=draw.first;first+2<draw.first+draw.count;
+            first+=3u) {
+            auto const& a=material_frame_vertices_[first];
+            auto const& b=material_frame_vertices_[first+1u];
+            auto const& c=material_frame_vertices_[first+2u];
+            float depth=(a.clip[3]+b.clip[3]+c.clip[3])/3.f;
+            translucent_triangles.push_back({depth,draw_id,first});
+        }
+    }
+    if(!translucent_triangles.empty()) {
+        std::stable_sort(translucent_triangles.begin(),
+            translucent_triangles.end(),[](auto const& a,auto const& b) {
+                return a.distance>b.distance;
+            });
+        auto& ordered=translucent_vertices_scratch_;
+        ordered.clear();
+        if(ordered.capacity()<material_frame_vertices_.size())
+            ordered.reserve(material_frame_vertices_.size());
+        auto& ordered_draws=translucent_draws_scratch_;
+        ordered_draws.clear();
+        if(ordered_draws.capacity()<
+           material_draws_.size()+translucent_triangles.size())
+            ordered_draws.reserve(
+                material_draws_.size()+translucent_triangles.size());
+        for(auto const& draw:material_draws_) {
+            if(draw.blend_mode==2u)continue;
+            auto updated=draw;
+            updated.first=static_cast<std::uint32_t>(ordered.size());
+            ordered.insert(ordered.end(),
+                material_frame_vertices_.begin()+draw.first,
+                material_frame_vertices_.begin()+draw.first+draw.count);
+            ordered_draws.push_back(updated);
+        }
+        // Rebatch only adjacent sorted triangles with identical PSO/texture
+        // bindings. Do not regroup distant fragments of the same material,
+        // as that would break the global alpha-blending depth order.
+        for(auto const& triangle:translucent_triangles) {
+            auto const& source=material_draws_[triangle.draw_id];
+            bool same=!ordered_draws.empty() &&
+                ordered_draws.back().blend_mode==2u &&
+                ordered_draws.back().pipeline==source.pipeline &&
+                ordered_draws.back().textures==source.textures;
+            if(!same) {
+                auto next=source;
+                next.first=static_cast<std::uint32_t>(ordered.size());
+                next.count=0u;
+                ordered_draws.push_back(next);
+            }
+            ordered.insert(ordered.end(),
+                material_frame_vertices_.begin()+triangle.first,
+                material_frame_vertices_.begin()+triangle.first+3u);
+            ordered_draws.back().count+=3u;
+        }
+        material_frame_vertices_.swap(ordered);
+        material_draws_.swap(ordered_draws);
     }
     auto const bytes=material_frame_vertices_.size()*sizeof(MaterialClipVertex);
     if(bytes>max_material_vertex_bytes_)
@@ -763,6 +984,7 @@ void Renderer::collect_material_vertices(const NorthStarRenderFrame& frame) {
         check(vkMapMemory(device_,material_vertices_memory_,0,bytes,0,&mapped),
               "vkMapMemory(material vertices)");
         std::memcpy(mapped,material_frame_vertices_.data(),bytes);
+        diagnostics_.add(VulkanCounter::material_vertex_upload_bytes,bytes);
         frame_memory::copied(&NorthStarFrameMemoryCounters::geometry_copy_bytes,bytes);
         vkUnmapMemory(device_,material_vertices_memory_);
     }

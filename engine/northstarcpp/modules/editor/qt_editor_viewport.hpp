@@ -6,6 +6,7 @@
 #include "viewport_frame_profile.hpp"
 #include <northstarcpp/scene.hpp>
 #include <QPoint>
+#include <QPixmap>
 #include <northstarcpp/frame_clock.hpp>
 #include <QSet>
 #include <QString>
@@ -18,6 +19,8 @@
 class QDragEnterEvent;
 class QDropEvent;
 class QDragMoveEvent;
+class QDragLeaveEvent;
+class QLabel;
 class QMouseEvent;
 class QWheelEvent;
 class QKeyEvent;
@@ -31,11 +34,14 @@ class QtEditorViewport final : public QWidget {
 public:
     explicit QtEditorViewport(QWidget* parent=nullptr);
     ~QtEditorViewport() override;
-    void setAssetSources(std::filesystem::path projectRoot);
+    void setAssetSources(std::filesystem::path projectRoot,std::filesystem::path scene={});
+    void reloadSceneSky();
     std::size_t queueCompiledShader(QString const& absolutePath,QByteArray const& spirv);
     bool gpuActive() const noexcept;
     QString gpuError() const {return gpu_error_;}
     bool renderGpuNow();
+    // Capture actual GPU viewport HWND pixels, never fabricated scene art.
+    QPixmap captureRenderedFrame();
     // Returns last native GPU frame's host-side submission summary.
     QString gpuAssetSummary() const;
     ViewportFrameQuantiles cpuSubmissionQuantiles() const {
@@ -57,6 +63,11 @@ public:
     };
     void setDrawMode(DrawMode mode);
     DrawMode drawMode() const noexcept {return draw_mode_;}
+    // Disable editor gizmo/picking for immutable GPU mesh instancing in previews.
+    void setAssetPreviewMode(bool enabled) {
+        asset_preview_mode_=enabled;
+        gpu_dirty_=true;update();
+    }
     void setShowGrid(bool enabled);
     void setShowCollisions(bool enabled);
     bool showCollisions() const noexcept {return show_collisions_;}
@@ -99,6 +110,7 @@ protected:
     void focusOutEvent(QFocusEvent*) override;
     void dragEnterEvent(QDragEnterEvent*) override;
     void dragMoveEvent(QDragMoveEvent*) override;
+    void dragLeaveEvent(QDragLeaveEvent*) override;
     void dropEvent(QDropEvent*) override;
 private:
     Scene const* scene_{};
@@ -116,6 +128,7 @@ private:
     Vector3 orbit_target_{0.f,1.f,0.f};
     bool panning_=false;
     bool show_grid_=true;
+    bool asset_preview_mode_=false;
     bool show_collisions_=false;
     int collision_hull_preview_=-1;
     DrawMode draw_mode_=DrawMode::Shaded; // activated after Qt window show
@@ -124,11 +137,13 @@ private:
     northstarcpp::timing::FrameClock fly_clock_;
     QTimer* fly_timer_{};
     QTimer* gpu_timer_{};
+    QLabel* dropCue_{};
+    QLabel* dropGhost_{}; // transient placement marker; never authored as an actor
     QWidget* gpu_surface_{};
     struct GpuState;
     std::unique_ptr<GpuState> gpu_;
     std::optional<std::uint64_t> pending_gpu_pick_;
-    std::filesystem::path asset_root_;
+    std::filesystem::path asset_root_,sky_scene_;
     bool gpu_dirty_=true;
     QString gpu_error_;
     ViewportFrameProfile host_frame_profile_;

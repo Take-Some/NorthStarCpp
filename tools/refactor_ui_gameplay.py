@@ -1,5 +1,5 @@
 from pathlib import Path
-p=Path(__file__).resolve().parents[1]/"Projects/NorthStarFirstPersonPlatform/scripts/main.js"
+p=Path(__file__).resolve().parents[1]/"Projects/NorthStarFirstPersonPlatform/assets/scripts/main.js"
 s=p.read_text(encoding="utf-8-sig")
 a=s.index("        UI.setMission(")
 b=s.index("\n    }\n\n    #announce",a)

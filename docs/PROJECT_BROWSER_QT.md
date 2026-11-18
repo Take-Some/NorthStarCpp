@@ -23,8 +23,9 @@ category/tag, recent and favorite views, project details, and these operations:
 
 On every initial display and Refresh, the native catalog **re-scans the actual
 Projects directory** (including nested folders up to four levels deep), validates
-each project manifest and its startup scene, and merges external paths already
-registered in the catalog. Discovery is read-only: it does not implicitly modify
+each directory's \`northstarcpp.project.json\` manifest and merges external
+paths already registered in the catalog. The startup scene is optional:
+a project with no \`main.nscn\` can still open in an empty editor workspace. Discovery is read-only: it does not implicitly modify
 the favorites/history or overwrite the catalog. Symlinks and junctions are not
 followed; traversal is bounded to 5,000 directories and 500 discovered projects.
 The separate Scan Directory command remains available for registering projects
@@ -41,7 +42,14 @@ at launch time, and the UI reports the problem without terminating.
 - Create using the engine's native templates (Blank, Sandbox, Physics
   Playground, City Block, Architecture)
 - Import an existing project and scan a directory for other projects
-- Launch a project in the native editor
+- Launch by project **directory** (\`--project <folder>\`), with an optional
+  startup scene (\`--scene <file>\`) if one is present
+- Choose a **project-owned icon** through *Set Project Icon...*. The icon is
+  normalized to a 512 x 512 PNG saved as \`project_icon.png\` in the project root
+  and appears in the selected details pane and project card
+- Display real project images from \`project_cover.png\`,
+  \`project_thumbnail.png\` or \`Saved/Screenshots/ProjectPreview.png\` without
+  inventing scene screenshots. Project icons work even before a scene exists
 - Favorite, rename, duplicate, or remove a project from the list
 - Open the project's folder in the operating system
 
@@ -103,11 +111,17 @@ The distribution builder smoke launches the installed Project Browser with
 only the package and Windows system directories in PATH, demonstrating it
 does not rely on a global Qt installation.
 
-## Limitations
+## Project images and scene-independent discovery
 
-The current cards are generated from project metadata with Font Awesome
-icons. Actual project-scene thumbnail renderers are a separate future
-feature; the project catalog does not currently expose a thumbnail API.
+A valid project directory owns \`northstarcpp.project.json\`; the
+\`startup_scene\` entry may be absent or empty. Missing startup scenes do not
+invalidate the project or prevent creating a new scene in the editor.
+
+Images belong to the project directory, not the scene file. The browser
+displays a user-selected \`project_icon.png\` (or the project's existing image)
+on selection; scene captures can still be generated separately. A folder
+without the NorthStarCpp project manifest is not automatically considered a
+project, preventing ordinary asset directories from appearing as projects.
 
 ## Engine API provider selection (2026-11-15)
 

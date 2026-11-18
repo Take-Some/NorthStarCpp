@@ -1,0 +1,6 @@
+NorthStarCpp.Scene 3
+scene "Isaac - Original PC Mesh"
+streaming 150 220 1
+stream_budget 64 64
+layer "Default" 1
+entity 1 0 "Isaac" "Default" "" "" "characters/isaac/models/isaac.ydd" 0 0 0 1.00 67A0C0 0 0 0 0 0 1 1 1 0 1000000 1 0

@@ -3,11 +3,19 @@
 #include "qt_text_asset_editor.hpp"
 #include <northstarcpp/embedded_script_api.hpp>
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QHash>
+#include <QTimer>
 #include <QCompleter>
 #include <QStandardItemModel>
 #include <QAbstractItemView>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QInputDialog>
+#include <QMenu>
 #include <QProcess>
 #include <QListWidget>
 #include <QStandardPaths>
@@ -144,6 +152,111 @@ QStandardItemModel* apiCompletionModel(QObject* parent) {
     return model;
 }
 
+// One persistent TypeScript checker for all open JS/TS tabs. Never runs user
+// source code: only the SDK declarations and current editor buffer are parsed.
+// If Node/TypeScript is absent, QCompleter retains d.ts-indexed fallback.
+class TypeScriptCompletionService final:public QObject {
+public:
+    using Callback=std::function<void(QJsonObject const&)>;
+    static TypeScriptCompletionService& shared() {
+        static auto* instance=new TypeScriptCompletionService(
+            QCoreApplication::instance());
+        return *instance;
+    }
+    bool complete(QString const& source,int position,QString const& language,
+                  QString const& prefix,Callback callback) {
+        return request("complete",source,position,language,
+                       QJsonObject{{"prefix",prefix}},std::move(callback));
+    }
+    bool request(QString const& method,QString const& source,int position,
+                 QString const& language,QJsonObject options,Callback callback) {
+        if(!process_ || source.size()>800000 ||
+           position<0 || position>source.size())return false;
+        if(process_->state()==QProcess::Starting) {
+            // The first editor request may arrive before Node initializes.
+            // Queue it on startup; never block the GUI event thread.
+            connect(process_,&QProcess::started,this,
+                [this,method,source,position,language,options,
+                 callback=std::move(callback)]() mutable {
+                    request(method,source,position,language,options,
+                            std::move(callback));
+                },Qt::SingleShotConnection);
+            return true;
+        }
+        if(process_->state()!=QProcess::Running)return false;
+        qint64 const id=++nextId_;
+        QJsonObject request{
+            {"id",double(id)},{"method",method},
+            {"text",source},{"position",position},{"language",language}
+        };
+        for(auto it=options.constBegin();it!=options.constEnd();++it)
+            request.insert(it.key(),it.value());
+        QByteArray payload=QJsonDocument(request).toJson(QJsonDocument::Compact);
+        payload.append('\n');
+        pending_.insert(id,std::move(callback));
+        if(process_->write(payload)<0) {
+            pending_.remove(id);
+            return false;
+        }
+        return true;
+    }
+private:
+    explicit TypeScriptCompletionService(QObject* parent):QObject(parent) {
+        QString script=qEnvironmentVariable("NORTHSTARCPP_TS_SERVICE");
+        if(script.isEmpty()) {
+            QDir search(QCoreApplication::applicationDirPath());
+            for(int i=0;i<9;++i) {
+                QString const candidate=search.filePath(
+                    "tools/ts_sdk/ts_language_service.cjs");
+                if(QFileInfo::exists(candidate)) {
+                    script=candidate;break;
+                }
+                if(!search.cdUp())break;
+            }
+        }
+        QString const node=QStandardPaths::findExecutable("node");
+        if(node.isEmpty() || script.isEmpty() ||
+           !QFileInfo::exists(script)) return;
+        process_=new QProcess(this);
+        process_->setProgram(node);
+        process_->setArguments({script});
+        process_->setProcessChannelMode(QProcess::SeparateChannels);
+        connect(process_,&QProcess::readyReadStandardOutput,this,[this] {
+            buffer_.append(process_->readAllStandardOutput());
+            if(buffer_.size()>4*1024*1024) {
+                buffer_.clear();pending_.clear();return;
+            }
+            for(int newline=buffer_.indexOf('\n');newline>=0;
+                newline=buffer_.indexOf('\n')) {
+                QByteArray line=buffer_.left(newline);
+                buffer_.remove(0,newline+1);
+                auto doc=QJsonDocument::fromJson(line);
+                if(!doc.isObject())continue;
+                QJsonObject const reply=doc.object();
+                qint64 const id=qint64(reply.value("id").toDouble());
+                auto it=pending_.find(id);
+                if(it==pending_.end())continue;
+                Callback callback=std::move(it.value());
+                pending_.erase(it);
+                callback(reply);
+            }
+        });
+        connect(process_,&QProcess::readyReadStandardError,this,[this] {
+            process_->readAllStandardError(); // avoid unbounded pipe growth
+        });
+        connect(process_,QOverload<int,QProcess::ExitStatus>::of(
+            &QProcess::finished),this,[this](int,QProcess::ExitStatus) {
+            pending_.clear();
+            buffer_.clear();
+        });
+        process_->start();
+    }
+    QProcess* process_=nullptr;
+    QByteArray buffer_;
+    QHash<qint64,Callback> pending_;
+    qint64 nextId_=0;
+};
+
 class CodeEditor final:public QPlainTextEdit {
     class LineNumberArea final:public QWidget {
     public:
@@ -183,13 +296,34 @@ public:
                 current.cursor.clearSelection();
                 highlights.push_back(current);
             }
+            for(auto const& value:diagnosticItems_) {
+                QJsonObject const issue=value.toObject();
+                int const offset=issue.value("start").toInt(-1);
+                if(offset<0 || offset>=document()->characterCount())continue;
+                QTextCursor marker(document());
+                marker.setPosition(offset);
+                marker.setPosition(std::min(offset+
+                    issue.value("length").toInt(1),
+                    document()->characterCount()-1),QTextCursor::KeepAnchor);
+                QTextEdit::ExtraSelection highlight;
+                highlight.cursor=marker;
+                highlight.format.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
+                highlight.format.setUnderlineColor(
+                    issue.value("category").toString()=="error"?
+                        QColor("#ff626b"):QColor("#f2c26c"));
+                highlight.format.setToolTip(issue.value("message").toString());
+                highlights.push_back(highlight);
+            }
             setExtraSelections(highlights);
         });
         updateNumbersWidth();
     }
-    void enableNorthStarCompletion() {
-        auto* model=apiCompletionModel(this);
-        completer_=new QCompleter(model,this);
+    void enableNorthStarCompletion(Format format) {
+        apiModel_=apiCompletionModel(this);
+        tsModel_=new QStandardItemModel(this);
+        tsLanguage_=format==Format::TypeScript?
+            QStringLiteral("typescript"):QStringLiteral("javascript");
+        completer_=new QCompleter(apiModel_,this);
         completer_->setWidget(this);
         completer_->setCompletionMode(QCompleter::PopupCompletion);
         completer_->setCaseSensitivity(Qt::CaseInsensitive);
@@ -201,11 +335,229 @@ public:
         connect(completer_,QOverload<QString const&>::of(&QCompleter::activated),
                 this,[this](QString const& completion) {
             auto cursor=textCursor();
-            cursor.movePosition(QTextCursor::Left,QTextCursor::KeepAnchor,
-                                activePrefix_.size());
-            cursor.insertText(completion);
+            if(completionFromTypeScript_) {
+                cursor.movePosition(QTextCursor::Left,QTextCursor::KeepAnchor,
+                                    activeTsFragment_.size());
+                cursor.insertText(completion);
+            }else{
+                cursor.movePosition(QTextCursor::Left,QTextCursor::KeepAnchor,
+                                    activePrefix_.size());
+                QString const insertion=completionUsesRootAlias_?
+                    activePrefix_.left(activePrefix_.indexOf('.')+1)+
+                    completion.mid(QStringLiteral("UIRoot.").size()):completion;
+                cursor.insertText(insertion);
+            }
             setTextCursor(cursor);
         });
+        tsTimer_=new QTimer(this);
+        tsTimer_->setSingleShot(true);
+        tsTimer_->setInterval(75);
+        connect(tsTimer_,&QTimer::timeout,this,[this]{requestTsCompletion();});
+        diagnosticTimer_=new QTimer(this);
+        diagnosticTimer_->setSingleShot(true);
+        diagnosticTimer_->setInterval(350);
+        connect(diagnosticTimer_,&QTimer::timeout,this,[this]{requestDiagnostics();});
+        connect(this,&QPlainTextEdit::textChanged,this,[this]{
+            diagnosticTimer_->start();
+        });
+    }
+    // Query the persistent TypeScript checker without blocking the UI thread.
+    // Late results are ignored if the text or caret changed while parsing.
+    void requestTsCompletion() {
+        if(!completer_)return;
+        auto const cursor=textCursor();
+        int const position=cursor.position();
+        int const revision=document()->revision();
+        QString const line=cursor.block().text().left(cursor.positionInBlock());
+        static QRegularExpression const word(R"(([A-Za-z_$][\w$]*)$)");
+        auto const match=word.match(line);
+        QString const fragment=match.hasMatch()?match.captured(1):QString{};
+        QPointer<CodeEditor> const self(this);
+        TypeScriptCompletionService::shared().complete(
+            toPlainText(),position,tsLanguage_,fragment,
+            [self,position,revision,fragment](QJsonObject const& reply) {
+                if(!self || !reply.value("ok").toBool() ||
+                   self->textCursor().position()!=position ||
+                   self->document()->revision()!=revision)return;
+                auto entries=reply.value("items").toArray();
+                if(entries.isEmpty())return;
+                auto* model=self->tsModel_;
+                model->clear();
+                QSet<QString> seen;
+                for(auto const& value:entries) {
+                    auto const item=value.toObject();
+                    QString const name=item.value("name").toString();
+                    if(name.isEmpty() || seen.contains(name))continue;
+                    seen.insert(name);
+                    auto* row=new QStandardItem(name);
+                    QString const detail=item.value("detail").toString();
+                    QString const docs=item.value("documentation").toString();
+                    row->setToolTip(detail+(docs.isEmpty()?QString{}:
+                        QString("\n")+docs));
+                    model->appendRow(row);
+                }
+                if(!model->rowCount())return;
+                self->completionFromTypeScript_=true;
+                self->completionUsesRootAlias_=false;
+                self->activeTsFragment_=fragment;
+                self->completer_->setModel(model);
+                self->completer_->setCompletionPrefix(fragment);
+                if(!self->completer_->completionCount())return;
+                QRect rect=self->cursorRect();
+                rect.setWidth(std::max(260,
+                    self->completer_->popup()->sizeHintForColumn(0)+35));
+                self->completer_->complete(rect);
+            });
+    }
+    void setDiagnosticSink(std::function<void(QJsonArray const&)> sink) {
+        diagnosticSink_=std::move(sink);
+        if(diagnosticTimer_)diagnosticTimer_->start();
+    }
+    void requestDiagnostics() {
+        if(!completer_)return;
+        int const revision=document()->revision();
+        QPointer<CodeEditor> self(this);
+        TypeScriptCompletionService::shared().request(
+            "diagnostics",toPlainText(),textCursor().position(),tsLanguage_,
+            QJsonObject{},
+            [self,revision](QJsonObject const& reply) {
+                if(!self || self->document()->revision()!=revision ||
+                   !reply.value("ok").toBool())return;
+                self->diagnosticItems_=reply.value("items").toArray();
+                self->refreshDiagnosticSelections();
+                if(self->diagnosticSink_)
+                    self->diagnosticSink_(self->diagnosticItems_);
+            });
+    }
+    // A single edit group means Ctrl+Z reverts an entire quick-fix/rename.
+    bool applySemanticEdits(QJsonArray const& changes,int revision) {
+        if(isReadOnly() || document()->revision()!=revision)return false;
+        int const size=toPlainText().size();
+        int previous=size+1;
+        for(auto const& item:changes) {
+            auto e=item.toObject();
+            int const start=e.value("start").toInt(-1);
+            int const length=e.value("length").toInt(-1);
+            if(start<0 || length<0 || start+length>size ||
+               start+length>previous)return false;
+            previous=start;
+        }
+        QTextCursor cursor(document());
+        cursor.beginEditBlock();
+        for(auto const& item:changes) {
+            auto e=item.toObject();
+            cursor.setPosition(e.value("start").toInt());
+            cursor.setPosition(e.value("start").toInt()+
+                               e.value("length").toInt(),QTextCursor::KeepAnchor);
+            cursor.insertText(e.value("text").toString());
+        }
+        cursor.endEditBlock();
+        return true;
+    }
+    void requestQuickFix() {
+        int const revision=document()->revision();
+        int const position=textCursor().position();
+        QPointer<CodeEditor> self(this);
+        TypeScriptCompletionService::shared().request(
+            "codeActions",toPlainText(),position,tsLanguage_,QJsonObject{},
+            [self,revision](QJsonObject const& reply) {
+                if(!self || self->document()->revision()!=revision)return;
+                if(!reply.value("ok").toBool())return;
+                auto const actions=reply.value("items").toArray();
+                if(actions.isEmpty()) {
+                    self->setToolTip("No safe TypeScript fix for this diagnostic");
+                    return;
+                }
+                if(actions.size()>1) {
+                    // Never enter a nested Qt event loop for code actions.
+                    auto* menu=new QMenu(self);
+                    for(int i=0;i<actions.size();++i) {
+                        auto* option=menu->addAction(actions[i].toObject()
+                                                   .value("title").toString());
+                        option->setData(i);
+                    }
+                    connect(menu,&QMenu::triggered,self,
+                        [self,actions,revision](QAction* selected) {
+                            if(!self || !selected)return;
+                            int const chosen=selected->data().toInt();
+                            if(chosen>=0 && chosen<actions.size())
+                                self->applySemanticEdits(actions[chosen].toObject()
+                                    .value("edits").toArray(),revision);
+                        });
+                    connect(menu,&QMenu::aboutToHide,menu,&QObject::deleteLater);
+                    menu->popup(self->mapToGlobal(
+                        self->cursorRect().bottomLeft()));
+                    return;
+                }
+                self->applySemanticEdits(
+                    actions[0].toObject().value("edits").toArray(),revision);
+            });
+    }
+    void requestRename() {
+        if(isReadOnly())return;
+        bool confirmed=false;
+        QString const replacement=QInputDialog::getText(this,"Rename symbol",
+            "New identifier:",QLineEdit::Normal,{},&confirmed);
+        if(!confirmed || replacement.trimmed().isEmpty())return;
+        int const revision=document()->revision();
+        int const position=textCursor().position();
+        QPointer<CodeEditor> self(this);
+        TypeScriptCompletionService::shared().request(
+            "rename",toPlainText(),position,tsLanguage_,
+            QJsonObject{{"newName",replacement}},
+            [self,revision](QJsonObject const& reply) {
+                if(!self || self->document()->revision()!=revision)return;
+                if(!reply.value("ok").toBool()) {
+                    QMessageBox::information(self,"Rename",
+                        reply.value("error").toString());return;
+                }
+                auto edits=reply.value("items").toArray();
+                if(QMessageBox::question(self,"Rename symbol",
+                    QString("Rename %1 occurrence(s) of '%2' in this file?")
+                        .arg(edits.size()).arg(reply.value("symbol").toString()),
+                    QMessageBox::Yes|QMessageBox::No,QMessageBox::No)
+                    !=QMessageBox::Yes)return;
+                self->applySemanticEdits(edits,revision);
+            });
+    }
+    void requestFormat() {
+        if(isReadOnly())return;
+        int const revision=document()->revision();
+        QPointer<CodeEditor> self(this);
+        TypeScriptCompletionService::shared().request(
+            "format",toPlainText(),textCursor().position(),tsLanguage_,
+            QJsonObject{},
+            [self,revision](QJsonObject const& reply) {
+                if(!self || self->document()->revision()!=revision ||
+                   !reply.value("ok").toBool())return;
+                self->applySemanticEdits(reply.value("items").toArray(),revision);
+            });
+    }
+    void refreshDiagnosticSelections() {
+        QList<QTextEdit::ExtraSelection> selections;
+        QTextEdit::ExtraSelection active;
+        active.cursor=textCursor();active.cursor.clearSelection();
+        active.format.setBackground(QColor("#1c2b3a"));
+        active.format.setProperty(QTextFormat::FullWidthSelection,true);
+        selections.push_back(active);
+        for(auto const& value:diagnosticItems_) {
+            auto issue=value.toObject();
+            int const start=issue.value("start").toInt(-1);
+            if(start<0 || start>=document()->characterCount())continue;
+            QTextCursor marker(document());
+            marker.setPosition(start);
+            marker.setPosition(std::min(start+issue.value("length").toInt(1),
+                document()->characterCount()-1),QTextCursor::KeepAnchor);
+            QTextEdit::ExtraSelection selection;
+            selection.cursor=marker;
+            selection.format.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
+            selection.format.setUnderlineColor(
+                issue.value("category").toString()=="error"?
+                    QColor("#ff626b"):QColor("#f2c26c"));
+            selection.format.setToolTip(issue.value("message").toString());
+            selections.push_back(selection);
+        }
+        setExtraSelections(selections);
     }
 protected:
     bool event(QEvent* event) override {
@@ -234,10 +586,15 @@ protected:
                                      event->key()==Qt::Key_Space);
         if(!explicitComplete)QPlainTextEdit::keyPressEvent(event);
         if(completer_ &&
-           (explicitComplete || event->text()=="." ||
+           (explicitComplete || event->text()=="." || event->text()==":" ||
+            event->text()=="\"" || event->text()=="'" ||
             (!event->text().isEmpty() &&
              (event->text().front().isLetterOrNumber() ||
               event->text()=="_")))) {
+            if(completer_->model()!=apiModel_)
+                completer_->setModel(apiModel_);
+            completionFromTypeScript_=false;
+            tsTimer_->start();
             auto const cursor=textCursor();
             QString const input=cursor.block().text().left(cursor.positionInBlock());
             static QRegularExpression const word(
@@ -248,9 +605,25 @@ protected:
                 completer_->popup()->hide();
                 return;
             }
-            if(!prefix.isEmpty()) {
+            if(!prefix.isEmpty() || explicitComplete) {
                 activePrefix_=prefix;
-                completer_->setCompletionPrefix(prefix);
+                completionUsesRootAlias_=false;
+                QString lookup=prefix;
+                auto const dot=prefix.indexOf('.');
+                if(dot>0) {
+                    // Infer UI root variables from authored declarations.
+                    // Completions always come from embedded TS declarations.
+                    static QRegularExpression const rootDeclaration(
+                        R"re(\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*UIRoot\s*)?=\s*UI\.(?:createRoot|createSurface|loadAsset)\s*\()re");
+                    QString const scope=toPlainText().left(cursor.position());
+                    auto it=rootDeclaration.globalMatch(scope);
+                    while(it.hasNext())
+                        if(it.next().captured(1)==prefix.left(dot))
+                            completionUsesRootAlias_=true;
+                    if(completionUsesRootAlias_)
+                        lookup=QStringLiteral("UIRoot.")+prefix.mid(dot+1);
+                }
+                completer_->setCompletionPrefix(lookup);
                 if(completer_->completionCount()>0) {
                     QRect rect=cursorRect();
                     rect.setWidth(std::max(260,completer_->popup()->sizeHintForColumn(0)+35));
@@ -333,7 +706,17 @@ private:
     }
     LineNumberArea* gutter_=nullptr;
     QCompleter* completer_=nullptr;
+    QStandardItemModel* apiModel_=nullptr;
+    QStandardItemModel* tsModel_=nullptr;
+    QTimer* tsTimer_=nullptr;
+    QTimer* diagnosticTimer_=nullptr;
+    QJsonArray diagnosticItems_;
+    std::function<void(QJsonArray const&)> diagnosticSink_;
     QString activePrefix_;
+    QString activeTsFragment_;
+    QString tsLanguage_;
+    bool completionFromTypeScript_=false;
+    bool completionUsesRootAlias_=false;
 };
 
 class CodeHighlighter final:public QSyntaxHighlighter {
@@ -429,7 +812,7 @@ CodeEditor* makeCodeEditor(QWidget* parent,Format format,bool readOnly) {
     auto* source=new CodeEditor(parent);
     source->setReadOnly(readOnly);
     if(!readOnly && (format==Format::JavaScript || format==Format::TypeScript))
-        source->enableNorthStarCompletion();
+        source->enableNorthStarCompletion(format);
     new CodeHighlighter(source->document(),format);
     return source;
 }
@@ -537,6 +920,87 @@ public:
                 source_->centerCursor();
                 source_->setFocus();
             });
+        }
+        if((kind==Format::JavaScript || kind==Format::TypeScript) &&
+           !readOnly_) {
+            auto* languageTools=new QHBoxLayout;
+            auto* check=new QPushButton("Check Types / Syntax",this);
+            check->setObjectName("textAssetTypeCheck");
+            auto* fix=new QPushButton("Quick Fix (Ctrl+.)",this);
+            fix->setObjectName("textAssetQuickFix");
+            auto* rename=new QPushButton("Rename Symbol (F2)",this);
+            rename->setObjectName("textAssetRenameSymbol");
+            auto* format=new QPushButton("Format (Ctrl+Shift+I)",this);
+            format->setObjectName("textAssetFormat");
+            languageTools->addWidget(check);
+            languageTools->addWidget(fix);
+            languageTools->addWidget(rename);
+            languageTools->addWidget(format);
+            layout->addLayout(languageTools);
+            diagnostics_=new QListWidget(this);
+            diagnostics_->setObjectName("textAssetDiagnostics");
+            diagnostics_->setMaximumHeight(130);
+            diagnostics_->setStyleSheet(
+                "QListWidget{background:#141f2a;color:#e7daca;"
+                "border:1px solid #38485a;}");
+            layout->addWidget(diagnostics_);
+            source_->setDiagnosticSink([this](QJsonArray const& issues) {
+                diagnostics_->clear();
+                for(auto const& value:issues) {
+                    QJsonObject const item=value.toObject();
+                    QString const severity=item.value("category").toString();
+                    int const line=item.value("line").toInt();
+                    QString const description=
+                        QString("%1:%2  TS%3 [%4] %5")
+                          .arg(line).arg(item.value("column").toInt())
+                          .arg(item.value("code").toInt())
+                          .arg(severity,item.value("message").toString());
+                    auto* row=new QListWidgetItem(description,diagnostics_);
+                    row->setData(Qt::UserRole,line);
+                    row->setForeground(severity=="error"?
+                        QColor("#ff858c"):QColor("#e5bd78"));
+                    row->setToolTip(item.value("message").toString());
+                }
+                if(issues.isEmpty())
+                    new QListWidgetItem("No TypeScript/JavaScript issues",
+                                        diagnostics_);
+            });
+            connect(check,&QPushButton::clicked,source_,[this] {
+                source_->requestDiagnostics();
+            });
+            connect(fix,&QPushButton::clicked,source_,[this] {
+                source_->requestQuickFix();
+            });
+            connect(rename,&QPushButton::clicked,source_,[this] {
+                source_->requestRename();
+            });
+            connect(format,&QPushButton::clicked,source_,[this] {
+                source_->requestFormat();
+            });
+            auto* fixShortcut=new QShortcut(QKeySequence("Ctrl+."),source_);
+            connect(fixShortcut,&QShortcut::activated,source_,[this]{
+                source_->requestQuickFix();
+            });
+            auto* renameShortcut=new QShortcut(QKeySequence(Qt::Key_F2),source_);
+            connect(renameShortcut,&QShortcut::activated,source_,[this]{
+                source_->requestRename();
+            });
+            auto* formatShortcut=new QShortcut(
+                QKeySequence("Ctrl+Shift+I"),source_);
+            connect(formatShortcut,&QShortcut::activated,source_,[this]{
+                source_->requestFormat();
+            });
+            connect(diagnostics_,&QListWidget::itemActivated,source_,
+                [this](QListWidgetItem* item) {
+                    int const line=item->data(Qt::UserRole).toInt();
+                    if(line<=0)return;
+                    auto block=source_->document()->findBlockByNumber(line-1);
+                    if(!block.isValid())return;
+                    QTextCursor cursor(block);
+                    source_->setTextCursor(cursor);
+                    source_->centerCursor();
+                    source_->setFocus();
+                });
         }
         status_=new QLabel(this);
         layout->addWidget(status_);
@@ -843,12 +1307,14 @@ private:
 Format formatFor(QString const& filename) noexcept {
     QString const suffix=QFileInfo(filename).suffix().toLower();
     if(suffix=="md" || suffix=="markdown")return Format::Markdown;
-    if(suffix=="js")return Format::JavaScript;
+    if(suffix=="js" || suffix=="mjs" || suffix=="cjs" ||
+       suffix=="jsx")return Format::JavaScript;
     if(suffix=="vert")return Format::VertexShader;
     if(suffix=="frag" || suffix=="hlsl")return Format::FragmentShader;
-    if(suffix=="ts" || suffix=="tsx" || suffix=="jsx")return Format::TypeScript;
+    if(suffix=="ts" || suffix=="tsx" || suffix=="ysc")return Format::TypeScript;
+    if(suffix=="lua" || suffix=="py")return Format::Plain;
     if(suffix=="json" || suffix=="jsonc")return Format::Json;
-    if(suffix=="txt")return Format::Plain;
+    if(suffix=="txt" || suffix=="xml")return Format::Plain;
     return Format::Unsupported;
 }
 bool isEditable(Format kind) noexcept {

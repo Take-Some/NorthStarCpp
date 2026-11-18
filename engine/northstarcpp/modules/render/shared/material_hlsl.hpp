@@ -10,6 +10,9 @@ cbuffer Material : register(b1) {
     float4 base_color;
     float4 factors; // x=roughness,y=metallic,z=unlit,w=reserved
     uint4 present;  // x is bitmask of available textures
+#if defined(NS_GPU_RIGID)
+    row_major float4x4 rigid_world;
+#endif
 };
 Texture2D base_map : register(t0);
 Texture2D normal_map : register(t1);
@@ -91,6 +94,11 @@ P material_vs(V v) {
     }
     p.clip=mul(world,view_projection);
     p.world=world.xyz;p.normal=normal;
+#elif defined(NS_GPU_RIGID)
+    float4 world=mul(float4(v.pos,1),rigid_world);
+    p.clip=mul(world,view_projection);
+    p.world=world.xyz;
+    p.normal=normalize(mul(v.normal,(float3x3)rigid_world));
 #else
     p.clip=mul(float4(v.pos,1),view_projection);
     p.world=v.pos;p.normal=v.normal;

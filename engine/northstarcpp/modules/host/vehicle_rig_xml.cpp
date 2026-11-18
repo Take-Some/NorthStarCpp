@@ -1,6 +1,7 @@
 // NorthStar C++ declarative vehicle rig loader.
 // Strict project-authored XML. Plugin receives POD copies via Dynamics ABI v2.
 #include "vehicle_rig_xml.hpp"
+#include <northstarcpp/vehicle_powertrain_schema.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <cmath>
 #include <locale>
@@ -28,7 +29,8 @@ VehicleRigAsset parse_vehicle_rig_xml(std::string_view bytes) {
     boost::property_tree::read_xml(stream,tree,
         boost::property_tree::xml_parser::no_comments);
     auto const& parent=tree.get_child("NorthStarVehicleRig");
-    if(attr<unsigned>(parent,"version")!=2)
+    auto const version=attr<unsigned>(parent,"version");
+    if(version!=2 && version!=3)
         throw std::invalid_argument("Unsupported vehicle rig XML schema version");
     VehicleRigAsset asset;
     auto& r=asset.setup;
@@ -43,8 +45,9 @@ VehicleRigAsset parse_vehicle_rig_xml(std::string_view bytes) {
     r.abs_enabled=attr<unsigned>(parent,"abs");
     r.traction_control_enabled=attr<unsigned>(parent,"tcs");
     asset.contact_mode=parent.get<std::string>("<xmlattr>.contact_mode","flat");
-    if(asset.contact_mode!="flat"&&asset.contact_mode!="physics")
-        throw std::invalid_argument("Vehicle contact_mode must be flat or physics");
+    if(asset.contact_mode!="flat"&&asset.contact_mode!="physics"&&
+       asset.contact_mode!="heightfield")
+        throw std::invalid_argument("Vehicle contact_mode must be flat, heightfield or physics");
     asset.surface_friction=attr<float>(parent,"surface_friction");
     if(asset.surface_friction<.05f||asset.surface_friction>3.f)
         throw std::invalid_argument("Vehicle surface friction outside 0.05..3");
@@ -104,6 +107,32 @@ VehicleRigAsset parse_vehicle_rig_xml(std::string_view bytes) {
                         throw std::invalid_argument("Duplicate door visual binding");
             asset.door_visual_nodes.push_back(visual);
             asset.doors.push_back(door);
+        } else if(node.first=="Powertrain") {
+            if(version<3 || asset.powertrain.has_value())
+                throw std::invalid_argument(
+                    "Powertrain requires .nvehicle version 3 and a single definition");
+            NorthStarVehiclePowertrainConfig cfg{};
+            cfg.size=sizeof(cfg);
+            cfg.automatic=attr<unsigned>(node.second,"automatic");
+            cfg.reverse_ratio=attr<float>(node.second,"reverse_ratio");
+            cfg.final_drive=attr<float>(node.second,"final_drive");
+            cfg.efficiency=attr<float>(node.second,"efficiency");
+            cfg.peak_torque=attr<float>(node.second,"peak_torque");
+            cfg.idle_rpm=attr<float>(node.second,"idle_rpm");
+            cfg.redline_rpm=attr<float>(node.second,"redline_rpm");
+            cfg.shift_up_rpm=attr<float>(node.second,"shift_up_rpm");
+            cfg.shift_down_rpm=attr<float>(node.second,"shift_down_rpm");
+            cfg.shift_seconds=attr<float>(node.second,"shift_seconds");
+            for(auto const& gear:node.second) {
+                if(gear.first=="<xmlattr>")continue;
+                if(gear.first!="Gear" ||
+                   cfg.forward_gear_count>=NORTHSTARCPP_VEHICLE_MAX_FORWARD_GEARS)
+                    throw std::invalid_argument("Unknown powertrain gear or too many ratios");
+                cfg.ratios[cfg.forward_gear_count++]=attr<float>(gear.second,"ratio");
+            }
+            if(!vehicle_schema::valid_powertrain(cfg))
+                throw std::invalid_argument("Invalid vehicle powertrain XML");
+            asset.powertrain=cfg;
         } else if(node.first=="Seat") {
             if(asset.seats.size()>=NORTHSTARCPP_VEHICLE_MAX_SEATS)
                 throw std::invalid_argument("Vehicle rig seats exceed 64");

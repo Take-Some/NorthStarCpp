@@ -9,6 +9,8 @@ cbuffer PostFx : register(b0) {
     float4 exposure_params; // history valid, temporal response, reserved
     float4 film_params;     // same constant buffer layout as FXAA
     float4 film_extra;      // contrast, exposure EV, HDR, frame
+    float4 sun_screen;      // projected UV x/y, visible, reserved
+    float4 sun_optics;      // enabled, shafts intensity, flare intensity, reserved
 };
 Texture2D<float4> hdr_scene : register(t0);
 Texture2D<float4> hdr_bloom : register(t1);
@@ -55,6 +57,7 @@ float3 linear_to_srgb(float3 c) {
 }
 float4 hdr_tonemap_ps(FSOut input):SV_Target {
     float3 scene=hdr_scene.Load(int3(int2(input.pos.xy),0)).rgb;
+    scene+=ns_sun_optics(input.uv);
     float3 bloom=bloom_params.y>0.5 ?
         hdr_bloom.SampleLevel(scene_sampler,input.uv,0).rgb * bloom_params.x :
         float3(0,0,0);

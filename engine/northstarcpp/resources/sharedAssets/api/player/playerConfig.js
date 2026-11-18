@@ -10,7 +10,6 @@ class DefaultPlayerConfig {
             eyeHeight: 1.45,
             character: null,
             camera: {
-                initialMode: "third_person",
                 toggleKey: Keys.V,
                 transitionSeconds: 0.45,
                 minDistance: 0.5,
@@ -24,12 +23,14 @@ class DefaultPlayerConfig {
             },
             movement: {
                 jumpKey: Keys.Space,
+                walkKey: Keys.Control,
+                walkScale: 1.48 / 2.95,
                 sprintKey: Keys.Shift
             },
             footsteps: {
                 enabled: true,
                 walkStride: 1.25, runStride: 1.65, sprintStride: 1.9,
-                runSpeed: 3.2, sprintSpeed: 5.6
+                runSpeed: 2.215, sprintSpeed: 3.695
             },
             interaction: {
                 enabled: hasPawn,

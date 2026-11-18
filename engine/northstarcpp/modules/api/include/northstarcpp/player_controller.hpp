@@ -2,7 +2,8 @@
 // Stable authored Entity IDs, not transient Flecs handles or physics indices.
 #pragma once
 #include <northstarcpp/player_character_components.hpp>
-#include <northstarcpp/player_blueprint_controller.hpp>
+#include <northstarcpp/gameplay_possession_state.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include <northstarcpp/player_character_motor.hpp>
 #include <northstarcpp/player_camera_rig.hpp>
 #include <northstarcpp/camera.hpp>
@@ -30,61 +31,61 @@ inline std::optional<SceneComponentBlob const*> component(
 class PlayerController final {
 public:
     // No default Pawn means the controller is alive but unpossessed.
-    bool possessed() const noexcept {return pawn_id_!=0;}
-    std::uint64_t controlled_entity() const noexcept {return pawn_id_;}
-    std::optional<std::size_t> controlled_index(Scene const& scene) const noexcept {
-        return entity_index(scene,pawn_id_);
+    bool possessed() const noexcept {return binding_.possessed();}
+    std::uint64_t controlled_entity() const noexcept {return binding_.controlled_entity();}
+    std::uint64_t possession_revision() const noexcept {return binding_.revision();}
+    std::optional<PossessionEvent> poll_possession_event() noexcept {
+        return binding_.take_event();
     }
+    std::uint64_t dropped_possession_events() const noexcept {
+        return binding_.overwritten_events();
+    }
+    std::optional<std::size_t> controlled_index(Scene const& scene) const noexcept {
+        return binding_.controlled_index(scene);
+    }
+    // An explicit camera target is independent of Pawn possession. Without
+    // an override the camera follows the possessed Pawn. Cinematic and
+    // spectator views can therefore leave the controlled Pawn untouched.
+    bool has_view_target_override() const noexcept {return view_target_id_!=0;}
+    std::uint64_t view_target() const noexcept {
+        return view_target_id_ ? view_target_id_ : binding_.controlled_entity();
+    }
+    std::optional<std::size_t> view_target_index(Scene const& scene) const noexcept {
+        return entity_index(scene,view_target());
+    }
+    void set_view_target(Scene const& scene,std::uint64_t id) {
+        if(id && !entity_index(scene,id))
+            throw std::invalid_argument("View target entity missing");
+        view_target_id_=id;
+    }
+    void reset_view_target() noexcept {view_target_id_=0;}
     // Does not mutate scene or physics. Caller commits selection to physics
     // only after the receiving provider has acknowledged the handoff.
-    void possess(Scene const& scene,std::uint64_t id) {
-        auto index=entity_index(scene,id);
-        if(!index)
-            throw std::invalid_argument("Pawn entity missing");
-        // Visual visibility is not possession state. Blueprint Pawns hide
-        // their logical capsule but remain physically controllable.
-        if(!player_character::has_pawn(scene,id))
-            throw std::invalid_argument("Entity is not a Pawn");
-        pawn_id_=id;
+    bool possess(Scene const& scene,std::uint64_t id) {
+        return binding_.possess(scene,id);
     }
-    void unpossess() noexcept {pawn_id_=0;}
+    void unpossess() noexcept { (void)binding_.unpossess(); }
     void reconcile(Scene const& scene) noexcept {
-        if(!controlled_index(scene))unpossess();
+        // A destroyed Pawn invalidates possession, not the Controller itself.
+        (void)binding_.reconcile(scene);
+        if(view_target_id_ && !entity_index(scene,view_target_id_))
+            reset_view_target();
     }
-    // Auto-possess is component metadata; there is no SceneObject fallback.
-    // Ambiguous explicit auto-possess is an authoring error, not iteration order.
     bool auto_possess(Scene const& scene) {
-        std::uint64_t candidate=0;
-        // New Controller Entity owns possession, never the Pawn visual.
-        for(auto const& record:scene.components) {
-            if(record.type!=player_blueprint::controller_type ||
-               record.version!=player_blueprint::version)continue;
-            auto binding=player_blueprint::deserialize_controller(record.payload);
-            if(!binding || !binding->second)continue;
-            if(candidate && candidate!=binding->first)
-                throw std::invalid_argument("Multiple active PlayerController entities");
-            candidate=binding->first;
+        auto const startup=scene_pawn::startup_pawn(scene);
+        if(startup.conflict==scene_pawn::StartupConflict::Controllers)
+            throw std::invalid_argument("Multiple active PlayerController entities");
+        if(startup.conflict==scene_pawn::StartupConflict::Pawns)
+            throw std::invalid_argument("Multiple local auto-possess Pawns");
+        if(!startup.id) {
+            unpossess();
+            return false;
         }
-        if(candidate) {
-            possess(scene,candidate);
-            return true;
-        }
-        for(auto const& item:scene.components) {
-            if(item.type!=player_character::pawn_type ||
-               item.entity_id==0 || item.version!=player_character::version ||
-               !player_character::detail::pawn_valid(nullptr,item.version,
-                   item.payload.data(),item.payload.size()) ||
-               !player_character::detail::get32(item.payload.data(),4))
-                continue;
-            if(candidate && candidate!=item.entity_id)
-                throw std::invalid_argument("Multiple local auto-possess Pawns");
-            candidate=item.entity_id;
-        }
-        if(!candidate) {unpossess();return false;}
-        possess(scene,candidate);
+        possess(scene,startup.id);
         return true;
     }
 private:
-    std::uint64_t pawn_id_=0;
+    PossessionState binding_;
+    std::uint64_t view_target_id_=0;
 };
 } // namespace northstarcpp::gameplay

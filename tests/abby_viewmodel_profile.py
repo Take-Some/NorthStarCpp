@@ -64,6 +64,12 @@ def main() -> int:
     parser.add_argument("--frames", type=int, default=1000)
     parser.add_argument("--out", type=Path, default=ROOT/"_build_full_clean_2026-11-16"/"qa_fps_profiles")
     parser.add_argument("--timeout", type=int, default=170)
+    parser.add_argument("--native-autostop", action="store_true",
+        help="Stop after exactly the requested completed native frames")
+    parser.add_argument("--vulkan-diag", action="store_true",
+        help="Emit internal Vulkan fence/texture/skin counters")
+    parser.add_argument("--gpu", action="store_true",
+        help="Collect provider GPU timestamps (may stall the driver)")
     args = parser.parse_args()
     if args.frames < 1000 or args.frames > 100000:
         raise ValueError("Profiler requires 1000..100000 frames")
@@ -74,15 +80,24 @@ def main() -> int:
         working = Path(folder)
         project = working / "project"
         shutil.copytree(ROOT/"Projects/AbbyPistolDemo",project)
-        script = project/"scripts/main.js"
+        script = project/"assets/scripts/main.js"
+        if not script.is_file():
+            raise FileNotFoundError(f"Missing canonical project script asset: {script}")
         qa = (QA_SOURCE.replace("VIEW_MODE",args.view)
-                       .replace("FRAME_GOAL",str(args.frames+4)))
+                       .replace("FRAME_GOAL",str(args.frames*10 if args.native_autostop else args.frames+4)))
         script.write_text(script.read_text(encoding="utf-8")+
                           "\n"+qa+"\n",encoding="utf-8")
         env = os.environ.copy()
         env["NORTHSTARCPP_RENDER_PROVIDER"] = args.backend
         env["NORTHSTARCPP_PHYSICS_PROVIDER"] = "jolt"
         env["NORTHSTARCPP_PROFILE_FRAMES"] = str(args.frames)
+        if args.native_autostop:
+            env["NORTHSTARCPP_PROFILE_AUTOSTOP"] = "1"
+            env["NORTHSTARCPP_PROFILE_PARTIAL"] = "1"
+        if args.gpu:
+            env["NORTHSTARCPP_PROFILE_GPU_TIMESTAMPS"] = "1"
+        if args.vulkan_diag and args.backend == "vulkan":
+            env["NORTHSTARCPP_VULKAN_PROFILE_FRAMES"] = str(args.frames)
         env["NORTHSTARCPP_LOG_DIRECTORY"] = str(out/"logs")
         env["LOCALAPPDATA"] = str(working/"LocalAppData")
         (working/"LocalAppData").mkdir()
@@ -101,7 +116,7 @@ def main() -> int:
             rc=124
             output=(e.stdout or b"").decode("utf-8",errors="replace") if isinstance(e.stdout,bytes) else (e.stdout or "")
             errors=(e.stderr or b"").decode("utf-8",errors="replace") if isinstance(e.stderr,bytes) else (e.stderr or "")
-    prefix=args.backend+"_"+args.view
+    prefix=args.backend+"_"+args.view+("_gpu" if args.gpu else "")
     (out/(prefix+".stdout.log")).write_text(output,encoding="utf-8",errors="replace")
     (out/(prefix+".stderr.log")).write_text(errors,encoding="utf-8",errors="replace")
     reports=[]
@@ -110,11 +125,17 @@ def main() -> int:
             try:reports.append(json.loads(line[line.index("{"):]))
             except ValueError:pass
     profile=reports[-1] if reports else None
+    vulkan_reports=[]
+    for line in errors.splitlines():
+        if '"event":"northstarcpp.vulkan_frame_diagnostics"' in line:
+            try: vulkan_reports.append(json.loads(line[line.index("{"):]))
+            except ValueError: pass
     result={"renderer":args.backend,"view":args.view,
             "frames_requested":args.frames,"exit_code":rc,"timed_out":timed_out,
             "pass":rc==0 and not timed_out and profile is not None and
                 profile.get("frames")==args.frames,
             "profile":profile,
+            "vulkan_diagnostics":vulkan_reports[-1] if vulkan_reports else None,
             "grip_diagnostics":[line for line in errors.splitlines()
                 if "fps_grip=" in line or "bone_attachment=PASS" in line][:9],
             "qa_markers":[line for line in errors.splitlines()

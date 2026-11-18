@@ -1,7 +1,10 @@
 // Device subsystem: independent D3D12 implementation.
 #include "renderer_private.hpp"
+#include "../shared/height_fog.hpp"
 namespace northstarcpp::render::d3d12::detail {
 RendererState::RendererState(HWND window,bool software):hwnd(window){
+        height_fog_density=
+            northstarcpp::render::height_fog_density_from_environment();
         if(!IsWindow(hwnd)) throw std::runtime_error("Invalid D3D12 HWND");
         if(software)sun_shadow_resolution=256;
         // Set NORTHSTARCPP_DISABLE_FXAA=1 for pixel-perfect output / A-B QA.
@@ -18,18 +21,28 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         char enable_hdr[8]{};
         hdr_enabled=GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_HDR",
             enable_hdr,sizeof(enable_hdr))>0 && enable_hdr[0]=='1';
+        char enable_velocity[8]{};
+        velocity_enabled=hdr_enabled&&
+            GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_D3D12_VELOCITY",
+                enable_velocity,sizeof(enable_velocity))>0 &&
+            enable_velocity[0]=='1'&&enable_velocity[1]==0;
         char enable_aliasing[8]{};
         transient_aliasing_enabled=bloom_enabled &&
             GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_TRANSIENT_ALIASING",
                 enable_aliasing,sizeof(enable_aliasing))>0 &&
             enable_aliasing[0]=='1';
         char enable_shadows[8]{};
-        shadows_enabled=GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_SHADOWS",
-            enable_shadows,sizeof(enable_shadows))>0&&enable_shadows[0]=='1';
+        // Gameplay defaults: shadows are active unless explicitly disabled.
+        // The existing QA fixture opts out with NORTHSTARCPP_ENABLE_SHADOWS=0.
+        const DWORD shadow_setting=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_SHADOWS",enable_shadows,sizeof(enable_shadows));
+        shadows_enabled=shadow_setting==0 ||
+            (shadow_setting==1 && enable_shadows[0]=='1');
         char enable_pcss[8]{};
+        const DWORD pcss_setting=GetEnvironmentVariableA(
+            "NORTHSTARCPP_ENABLE_PCSS",enable_pcss,sizeof(enable_pcss));
         pcss_enabled=shadows_enabled &&
-            GetEnvironmentVariableA("NORTHSTARCPP_ENABLE_PCSS",
-                enable_pcss,sizeof(enable_pcss))>0 && enable_pcss[0]=='1';
+            (pcss_setting==0 || (pcss_setting==1 && enable_pcss[0]=='1'));
         // Experimental eight-tap ambient depth occlusion; opt in for QA.
         char gbuffer_version[8]{};
         gbuffer_v2=GetEnvironmentVariableA("NORTHSTARCPP_GBUFFER_VERSION",
@@ -45,14 +58,11 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         DWORD const debug_length=GetEnvironmentVariableA(
             "NORTHSTARCPP_GBUFFER_DEBUG",debug_mode,sizeof(debug_mode));
         if(debug_length>0 && debug_length<sizeof(debug_mode)) {
-            constexpr char const* names[]{
-                "off","albedo","normal","roughness","metallic",
-                "emissive","depth","ao","coverage"};
-            for(unsigned i=0;i<sizeof(names)/sizeof(names[0]);++i)
-                if(std::strcmp(debug_mode,names[i])==0) {
-                    gbuffer_debug_mode=i;
-                    break;
-                }
+            gbuffer_debug_mode=static_cast<unsigned>(
+                northstarcpp::render::parse_gbuffer_debug(debug_mode));
+            if(gbuffer_debug_mode>=9 && !gbuffer_v2)
+                throw std::invalid_argument(
+                    "GBuffer auxiliary debug requires NORTHSTARCPP_GBUFFER_VERSION=2");
         }
         check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"Create DXGI");
         if(software) {
@@ -104,7 +114,7 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;dh.NumDescriptors=buffer_count;
         check(device->CreateDescriptorHeap(&dh,IID_PPV_ARGS(&rtvs)),"Create RTV heap");
         stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=1;
+        dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=2;
         check(device->CreateDescriptorHeap(&dh,IID_PPV_ARGS(&dsvs)),"Create DSV heap");
         D3D12_ROOT_PARAMETER root_param{};
         root_param.ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -267,7 +277,7 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         mat_params[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
         mat_params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
         mat_params[1].Descriptor.ShaderRegister=1;
-        mat_params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        mat_params[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
         D3D12_DESCRIPTOR_RANGE mat_range{};
         mat_range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         mat_range.NumDescriptors=5;
@@ -329,6 +339,26 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
                 D3D12_COLOR_WRITE_ENABLE_ALL;
         check(device->CreateGraphicsPipelineState(&material_pso,
             IID_PPV_ARGS(&material_pipeline)),"Create authored PBR pipeline");
+        // A second vertex shader reads a GPU-resident local-space indexed
+        // mesh and transforms it with a 64-byte instance constant.
+        auto rigid_vs=compile_material_variant(
+            std::string("#define NS_GPU_RIGID 1\n")+authored_material_shader,
+            "material_vs","vs_5_0");
+        auto rigid_pso=material_pso;
+        rigid_pso.VS={rigid_vs->GetBufferPointer(),rigid_vs->GetBufferSize()};
+        check(device->CreateGraphicsPipelineState(&rigid_pso,
+            IID_PPV_ARGS(&rigid_material_pipeline)),
+            "Create indexed rigid PBR pipeline");
+        rigid_pso.NumRenderTargets=0;
+        for(auto& format:rigid_pso.RTVFormats)format=DXGI_FORMAT_UNKNOWN;
+        rigid_pso.BlendState.RenderTarget[0].RenderTargetWriteMask=0;
+        rigid_pso.PS={nullptr,0};
+        rigid_pso.DSVFormat=DXGI_FORMAT_D32_FLOAT;
+        rigid_pso.RasterizerState.DepthBias=1200;
+        rigid_pso.RasterizerState.SlopeScaledDepthBias=1.5f;
+        check(device->CreateGraphicsPipelineState(&rigid_pso,
+            IID_PPV_ARGS(&rigid_shadow_pipeline)),
+            "Create indexed rigid shadow pipeline");
         D3D12_DESCRIPTOR_HEAP_DESC material_heap{};
         material_heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         material_heap.NumDescriptors=static_cast<UINT>(material_batch_capacity*5u);
@@ -372,6 +402,35 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         resolve_pso.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         check(device->CreateGraphicsPipelineState(&resolve_pso,
             IID_PPV_ARGS(&deferred_pipeline)),"Create deferred lighting PSO");
+        if(velocity_enabled) {
+            auto motion_vs=compile_motion("motion_vs","vs_5_0");
+            auto motion_ps=compile_motion("motion_ps","ps_5_0");
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC motion_pso=resolve_pso;
+            motion_pso.VS={motion_vs->GetBufferPointer(),
+                           motion_vs->GetBufferSize()};
+            motion_pso.PS={motion_ps->GetBufferPointer(),
+                           motion_ps->GetBufferSize()};
+            motion_pso.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;
+            check(device->CreateGraphicsPipelineState(
+                &motion_pso,IID_PPV_ARGS(&motion_pipeline)),
+                "Create D3D12 RG16F camera motion PSO");
+            D3D12_DESCRIPTOR_HEAP_DESC motion_heap{};
+            motion_heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            motion_heap.NumDescriptors=1;
+            check(device->CreateDescriptorHeap(
+                &motion_heap,IID_PPV_ARGS(&motion_rtv_heap)),
+                "Create D3D12 velocity RTV heap");
+            auto upload=heap(D3D12_HEAP_TYPE_UPLOAD);
+            auto constants=memory(256);
+            check(device->CreateCommittedResource(
+                &upload,D3D12_HEAP_FLAG_NONE,&constants,
+                D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,
+                IID_PPV_ARGS(&motion_constants)),
+                "Create D3D12 motion camera upload");
+            check(motion_constants->Map(0,nullptr,
+                reinterpret_cast<void**>(&motion_constant_data)),
+                "Map D3D12 motion camera");
+        }
         if(hdr_enabled) {
             resolve_pso.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             check(device->CreateGraphicsPipelineState(&resolve_pso,
@@ -644,10 +703,28 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         sky_pso.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         check(device->CreateGraphicsPipelineState(&sky_pso,IID_PPV_ARGS(&sky_pipeline)),
             "Create native D3D12 skydome pipeline");
+        auto const sky_sdr_format=sky_pso.RTVFormats[0];
         if(hdr_enabled) {
             sky_pso.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
             check(device->CreateGraphicsPipelineState(&sky_pso,
                 IID_PPV_ARGS(&hdr_sky_pipeline)),"Create HDR skydome pipeline");
+        }
+        // GPU atmosphere is a fullscreen background, not a geometry dome.
+        // Keep a separate vertex shader and empty input layout: otherwise
+        // some D3D12 drivers reject the mixed SV_VertexID/POSITION signature.
+        auto sky_fullscreen_vs=compile_sky("sky_fullscreen_vertex_main","vs_5_0");
+        sky_pso.VS={sky_fullscreen_vs->GetBufferPointer(),
+                    sky_fullscreen_vs->GetBufferSize()};
+        sky_pso.InputLayout={nullptr,0};
+        sky_pso.RTVFormats[0]=sky_sdr_format;
+        check(device->CreateGraphicsPipelineState(&sky_pso,
+            IID_PPV_ARGS(&sky_fullscreen_pipeline)),
+            "Create fullscreen D3D12 GPU Sky pipeline");
+        if(hdr_enabled) {
+            sky_pso.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+            check(device->CreateGraphicsPipelineState(&sky_pso,
+                IID_PPV_ARGS(&hdr_sky_fullscreen_pipeline)),
+                "Create HDR fullscreen D3D12 GPU Sky pipeline");
         }
         D3D12_DESCRIPTOR_HEAP_DESC srv_desc{};
         srv_desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -676,6 +753,7 @@ RendererState::RendererState(HWND window,bool software):hwnd(window){
         };
         make_constant(sky_camera,&sky_camera_data);
         make_constant(sky_tint,&sky_tint_data);
+        std::memset(sky_tint_data,0,256);
         make_constant(hud_camera,&hud_camera_data);
         make_constant(grid_constant_buffer,&grid_constant_data);
         make_constant(grid_previous_buffer,&grid_previous_data);

@@ -1,5 +1,6 @@
 #include "editor_prefab_composition.hpp"
 #include "editor_tools.hpp"
+#include "../models/character_asset_namespace.hpp"
 #include <northstarcpp/assets.hpp>
 #include <cctype>
 #include <filesystem>
@@ -14,9 +15,6 @@
 
 namespace northstarcpp::editor::prefab_preview {
 namespace {
-constexpr std::size_t max_parts=4096;
-constexpr std::size_t max_vertices=600000;
-constexpr std::size_t max_triangles=120000;
 constexpr float radians=0.01745329251994329577f;
 
 void warning(Composition& result,std::string message) {
@@ -122,7 +120,6 @@ Composition compose(Scene const& prefab,DrawableLoader const& models,
         if(!layer.visible)hidden_layers.insert(layer.name);
     auto cube=unit_cube();
     bool have_bounds=false;
-    std::size_t total_vertices=0;
     for(auto const& actor:prefab.objects) {
         if(!actor.node.visible || hidden_layers.count(actor.node.layer))
             continue;
@@ -164,15 +161,23 @@ Composition compose(Scene const& prefab,DrawableLoader const& models,
         auto append_part=[&](shared_assets::MeshPart const& source,
                              std::uint32_t actor_color,bool placeholder) {
             auto const faces=source.indices.size()/3;
-            if(result.drawable.meshes.size()>=max_parts ||
-               source.vertices.size()>max_vertices-total_vertices ||
-               faces>max_triangles-result.triangles)
-                throw std::length_error("Prefab preview exceeds mesh or triangle budget");
+            // Do not impose an arbitrary polygon, vertex or mesh-section
+            // budget on authoring previews. Only reject true size overflows;
+            // std::vector and engine.assets own allocation/decoding limits.
+            if(result.drawable.meshes.size()==result.drawable.meshes.max_size() ||
+               result.materials.size()==result.materials.max_size() ||
+               faces>std::numeric_limits<std::size_t>::max()-result.triangles)
+                throw std::length_error("Prefab preview geometry exceeds container capacity");
             shared_assets::MeshPart part;
             part.name=actor.name+"/"+source.name;
             auto const assigned=material_overrides.find(actor.node.id);
+            // Native character YDDs retain importer-era YMAT paths.
+            // Match the canonical engine.material namespace used by Player.
+            auto const model_path=actor.node.asset.substr(
+                0,actor.node.asset.find('@'));
             auto const material_reference=assigned==material_overrides.end()?
-                source.material:assigned->second;
+                detail::rebase_embedded_character_material(
+                    model_path,source.material):assigned->second;
             part.material=material_reference;
             part.indices=source.indices;
             part.material_required=source.material_required;
@@ -226,7 +231,6 @@ Composition compose(Scene const& prefab,DrawableLoader const& models,
             }
             result.materials.push_back(std::move(m));
             result.drawable.meshes.push_back(std::move(part));
-            total_vertices+=source.vertices.size();
             result.triangles+=faces;
         };
         if(drawables) {
@@ -240,39 +244,18 @@ Composition compose(Scene const& prefab,DrawableLoader const& models,
         warning(result,"No visible geometry in this prefab");
     return result;
 }
-void mount_preview_assets(AssetStore& assets,
-                          std::filesystem::path const& content_root) {
-    namespace fs=std::filesystem;
-    assets.mount_directory("",content_root,100);
-    for(auto current=content_root.parent_path();!current.empty();) {
-        std::error_code ec;
-        auto const shared=current/"sharedAssets";
-        if(fs::is_directory(shared,ec) && !ec) {
-            ec.clear();
-            bool const already_mounted=fs::equivalent(shared,content_root,ec);
-            if(ec)
-                throw std::runtime_error("Cannot compare prefab preview VFS roots");
-            if(!already_mounted)
-                assets.mount_shared_assets(shared);
-            break;
-        }
-        auto const parent=current.parent_path();
-        if(parent==current)break;
-        current=parent;
-    }
-}
-
 Composition load_composition(Scene const& prefab,AssetStore const& assets) {
+    // Share decoded YTD data while loading all materials in one prefab.
+    // This avoids decompressing the same character atlas for every section.
+    MaterialLoadSession session(assets);
     return compose(prefab,[&](std::string const& ref) {
         auto const at=ref.find('@');
         auto const path=ref.substr(0,at);
-        if(assets.size(path)>64u*1024u*1024u)
-            throw std::length_error("Native model exceeds preview size limit");
         if(at!=std::string::npos)
             return std::vector<shared_assets::Drawable>{assets.load_drawable(ref)};
         return shared_assets::load_drawables(assets,path);
     },[&](std::string const& ref) {
-        return load_material_definition(assets,ref);
+        return session.load(ref);
     });
 }
 } // namespace northstarcpp::editor::prefab_preview

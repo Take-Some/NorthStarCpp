@@ -9,7 +9,7 @@
 
 namespace northstarcpp::editor {
 enum class AssetKind {
-    folder, mesh, material, texture, audio, scene, script, animation, shader, other, prefab, character, material_function, skeleton, collision
+    folder, mesh, material, texture, audio, scene, script, animation, shader, other, prefab, character, material_function, skeleton, collision, ui_document, particle
 };
 struct AssetRecord {
     std::string virtual_path;  // UTF-8, '/' separated, root-relative

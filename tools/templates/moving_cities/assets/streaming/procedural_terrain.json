@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "enabled": true,
+  "seed": 20261117,
+  "follow_entity": "CITYROOT Bastion",
+  "material": "materials/rustsea.ymat@ground_dry",
+  "chunk_width_m": 64.0,
+  "radius_chunks": 4,
+  "render_quads": 32,
+  "collision_quads": 16,
+  "max_lod": 3,
+  "base_height_m": 0.0,
+  "vertical_scale_m": 5.0,
+  "design": "Bounded relief: shallow gullies, rolling slopes and dunes. Tiles stream continuously in absolute world coordinates."
+}

@@ -148,9 +148,24 @@ void SceneAnimationPlayer::play(Scene const& scene, std::uint64_t id,
     playing_.insert_or_assign(id,Instance{std::move(clip),i,id,
         found->position,found->node.rotation,found->node.scale,
         0.f,speed,loop,false,false});
+    if(std::find(scene_order_.begin(),scene_order_.end(),id)==scene_order_.end())
+        scene_order_.push_back(id);
+    std::sort(scene_order_.begin(),scene_order_.end(),
+        [this](std::uint64_t a,std::uint64_t b) {
+            auto const x=playing_.at(a).scene_index;
+            auto const y=playing_.at(b).scene_index;
+            return x==y?a<b:x<y;
+        });
 }
-void SceneAnimationPlayer::stop(std::uint64_t id) noexcept { playing_.erase(id); }
-void SceneAnimationPlayer::clear() noexcept { playing_.clear(); }
+void SceneAnimationPlayer::stop(std::uint64_t id) noexcept {
+    playing_.erase(id);
+    scene_order_.erase(std::remove(scene_order_.begin(),scene_order_.end(),id),
+                       scene_order_.end());
+}
+void SceneAnimationPlayer::clear() noexcept {
+    playing_.clear();
+    scene_order_.clear();
+}
 bool SceneAnimationPlayer::active(std::uint64_t id) const noexcept {
     return playing_.count(id)!=0;
 }
@@ -169,12 +184,18 @@ SceneAnimationStatus SceneAnimationPlayer::status(std::uint64_t id) const {
     return {item.time,item.clip.duration(),item.speed,item.loop,item.paused,item.finished};
 }
 std::vector<SceneAnimationSample> SceneAnimationPlayer::advance(float seconds) {
+    std::vector<SceneAnimationSample> result;
+    advance_into(seconds,result);
+    return result;
+}
+void SceneAnimationPlayer::advance_into(float seconds,
+    std::vector<SceneAnimationSample>& result) {
     if (!std::isfinite(seconds) || seconds<0.f || seconds>0.25f)
         throw std::invalid_argument("Invalid animation frame delta");
-    std::vector<SceneAnimationSample> result;
-    result.reserve(playing_.size());
-    for (auto& entry:playing_) {
-        auto& anim=entry.second;
+    result.clear();
+    result.reserve(scene_order_.size());
+    for (auto const entity_id:scene_order_) {
+        auto& anim=playing_.at(entity_id);
         float const duration=anim.clip.duration();
         if (!anim.paused && !anim.finished && seconds>0.f) {
             auto const time=static_cast<double>(anim.time)+
@@ -196,9 +217,6 @@ std::vector<SceneAnimationSample> SceneAnimationPlayer::advance(float seconds) {
             add(anim.base_rotation,pose.rotation),
             multiply(anim.base_scale,pose.scale)});
     }
-    std::sort(result.begin(),result.end(),[](auto const& a,auto const& b){
-        return a.scene_index<b.scene_index;
-    });
-    return result;
+
 }
 } // namespace northstarcpp

@@ -70,6 +70,33 @@ typedef struct NorthStarPhysicsCharacterApi {
     int (*configure_motor)(void* world,uint32_t index,
         NorthStarPhysicsCharacterMotor const* motor);
 } NorthStarPhysicsCharacterApi;
+// Optional collision-resolved animation displacement. The rigidbody motor
+// consumes deltas as velocity during the next physics tick, allowing Jolt
+// broadphase/narrowphase contacts to prevent penetration. Legacy ABI 4 and
+// Character ABI 1 are unchanged. Unsupported providers fail explicitly.
+// Optional per-NPC motor extension. No change to core Physics ABI 4.
+// Each intent is expressed as planar normalized direction and speed (m/s),
+// applied by Jolt inside the same fixed-step collision solver as the player.
+// Clearing a command stops active planar driving, never teleports the NPC.
+#define NORTHSTARCPP_PHYSICS_AI_MOTOR_ABI 1u
+#define NORTHSTARCPP_PHYSICS_AI_MOTOR_MODULE_ABI 0x50484101u
+typedef struct NorthStarPhysicsAiMotorApi {
+    uint32_t abi_version;
+    int (*set_intent)(void* world,uint32_t body_index,
+                      float input_x,float input_z,float speed);
+    int (*clear_intent)(void* world,uint32_t body_index);
+} NorthStarPhysicsAiMotorApi;
+
+#define NORTHSTARCPP_PHYSICS_ROOT_MOTION_ABI 1u
+#define NORTHSTARCPP_PHYSICS_ROOT_MOTION_MODULE_ABI 0x50485208u
+typedef struct NorthStarPhysicsRootMotionApi {
+    uint32_t abi_version;
+    // Per simulation frame, world-space meters. No direct pose teleport.
+    // The provider must reject non-possessed or invalid targets.
+    int (*submit)(void* world,uint32_t controlled_index,
+        float dx,float dy,float dz,float seconds);
+} NorthStarPhysicsRootMotionApi;
+
 // Optional physics residency extension, independently versioned.
 // The original NorthStarPhysicsApi ABI 4 remains unchanged, so existing
 // providers continue to work (without sector-level collision eviction).
@@ -209,6 +236,16 @@ typedef struct NorthStarPhysicsChannelsApi {
 // Optional runtime rigid-body lifecycle extension. Stable, append-only body
 // indices; removal leaves a tombstone until the world is destroyed. Legacy
 // NORTHSTARCPP_PHYSICS_ABI 4 function tables remain unchanged.
+// Optional material response settings for any dynamic physics body.
+// Runtime clients do not need a new ABI-4 rigid-body layout.
+// restitution=0..1, friction=0..1; providers may decline if unsupported.
+#define NORTHSTARCPP_PHYSICS_BODY_MATERIAL_ABI 1u
+#define NORTHSTARCPP_PHYSICS_BODY_MATERIAL_MODULE_ABI 0x50484D01u
+typedef struct NorthStarPhysicsBodyMaterialApi {
+    uint32_t abi_version;
+    int (*configure)(void* world,uint32_t index,float friction,float restitution);
+} NorthStarPhysicsBodyMaterialApi;
+
 #define NORTHSTARCPP_PHYSICS_RUNTIME_ABI 1u
 #define NORTHSTARCPP_PHYSICS_RUNTIME_MODULE_ABI 0x50485202u
 typedef struct NorthStarPhysicsRuntimeApi {

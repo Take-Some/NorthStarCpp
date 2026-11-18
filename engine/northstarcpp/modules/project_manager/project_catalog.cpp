@@ -478,11 +478,23 @@ Project Catalog::inspect(fs::path const& path) const
                 project.required_renderer_features);
         }
         auto scene_name = data.get<std::string>("startup_scene", startup_name);
-        if (!safe_scene(scene_name))
+        // Empty is a valid choice for a project that has not authored
+        // its first scene. Non-empty paths remain strictly validated.
+        if (!scene_name.empty() && !safe_scene(scene_name))
             throw std::runtime_error("Unsafe startup scene path");
-        project.startup_scene = project.directory / fs::u8path(scene_name);
-        for (auto const& parent : project.startup_scene.parent_path()) {
-            (void)parent;
+        if(!scene_name.empty())
+            project.startup_scene = project.directory / fs::u8path(scene_name);
+        // UI identity is a project dependency, not a hardcoded runtime menu.
+        project.ui_default=data.get<std::string>("ui.default","");
+        if(!project.ui_default.empty()) {
+            auto const& ref=project.ui_default;
+            if(ref.size()>240 || ref.compare(0,3,"ui/")!=0 ||
+               ref.size()<7 || ref.compare(ref.size()-4,4,".nui")!=0 ||
+               ref.find("..")!=std::string::npos ||
+               ref.find('\\')!=std::string::npos ||
+               ref.find(':')!=std::string::npos ||
+               ref.find("//")!=std::string::npos)
+                throw std::runtime_error("Unsafe UI document reference in project manifest");
         }
         auto partial = project.directory;
         for (auto const& piece : fs::u8path(scene_name).parent_path()) {
@@ -490,14 +502,19 @@ Project Catalog::inspect(fs::path const& path) const
             if (redirected(partial))
                 throw std::runtime_error("Redirected startup scene directory");
         }
-        if (!fs::is_regular_file(project.startup_scene) || redirected(project.startup_scene)) {
-            project.status = Project::Status::missing_scene;
-            project.diagnostic = L"Create or restore the startup .nscn scene file";
-        } else if (!compatible(project.engine_version, engine_version_)) {
+        // A NorthStar project is a DIRECTORY with a valid project manifest,
+        // not a scene file. The startup scene is optional; a new/empty project
+        // can open in the editor and author its first scene there.
+        if (!compatible(project.engine_version, engine_version_)) {
             project.status = Project::Status::incompatible;
             project.diagnostic = L"Project targets a newer or different engine major version";
         } else {
             project.status = Project::Status::ready;
+            if (!fs::is_regular_file(project.startup_scene) ||
+                redirected(project.startup_scene)) {
+                project.diagnostic = L"Startup scene not found; the project workspace opens empty";
+                project.startup_scene.clear();
+            }
         }
         if (auto const tags = data.get_child_optional("tags")) {
             for (auto const& tag : *tags)
@@ -592,9 +609,50 @@ Project Catalog::create(std::wstring const& name, std::string const& template_id
     if (!fs::create_directory(target))
         throw std::runtime_error("Cannot create project directory");
     try {
-        for (auto const* sub : {"assets", "scripts", "config"})
+        for (auto const* sub : {"assets", "config"})
             fs::create_directory(target / sub);
+        fs::create_directories(target/"assets"/"scripts");
         save_scene(parse_scene_data(starter_scene(template_id)), target / startup_name);
+        // Every new project has an owned UI document and a script that mounts
+        // it. The Player still renders exclusively through engine.ui; no
+        // scene/menu widgets are constructed in project-manager C++.
+        atomic_write(target/"assets"/"ui"/"project_root.nui",R"NSUI(<?xml version='1.0' encoding='utf-8'?>
+<NorthStarUI version="3" target="screen" layer="project">
+  <Tokens>
+    <Token name="surface" type="color" value="#101f35cf" />
+    <Token name="text" type="color" value="#f0ca67ff" />
+  </Tokens>
+  <Styles>
+    <Style name="banner">
+      <Property name="padding" type="number" value="12" />
+      <Property name="background" token="surface" />
+    </Style>
+  </Styles>
+  <Elements>
+    <Panel id="panel" style="banner">
+      <Property name="x" type="number" value="18" />
+      <Property name="y" type="number" value="16" />
+      <Property name="width" type="number" value="360" />
+      <Property name="height" type="number" value="58" />
+    </Panel>
+    <Text id="project" parent="panel">
+      <Property name="text" type="string" value="NORTHSTAR PROJECT" />
+      <Property name="font_scale" type="number" value="2" />
+      <Property name="height" type="number" value="32" />
+      <Property name="color" token="text" />
+    </Text>
+  </Elements>
+</NorthStarUI>)NSUI");
+        atomic_write(target/"assets"/"scripts"/"main.js",
+            "// NorthStarCpp project UI entry. Author layout in assets/ui, not JS.\n"
+            "import {UI,Events} from \"@northstar/engine\";\n"
+            "let screen=null;\n"
+            "Events.on(\"start\",()=>{\n"
+            "  screen=UI.loadAsset(\"ui/project_root.nui\",{layer:\"project\"});\n"
+            "  screen.mount();\n"
+            "});\n"
+            "Events.on(\"stop\",()=>{screen?.dispose();screen=null;});\n");
+
 
         pt::ptree meta;
         meta.put("schema_version", 2);
@@ -605,6 +663,9 @@ Project Catalog::create(std::wstring const& name, std::string const& template_id
         meta.put("template", template_id);
         meta.put("category", to_utf8(type->category));
         meta.put("startup_scene", startup_name);
+        meta.put("ui.default", "ui/project_root.nui");
+        meta.put("ui.version", 3);
+        meta.put("ui.format", "northstar.ui/xml/3");
         meta.put("created_at", timestamp());
         meta.put("state", "scaffold");
         save_json(target / manifest_name, meta);

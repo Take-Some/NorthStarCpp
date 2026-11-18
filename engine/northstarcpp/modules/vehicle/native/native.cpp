@@ -1,7 +1,7 @@
 // NorthStarCpp replaceable engine.vehicle C ABI provider.
 // Native multi-wheel tyre dynamics, ABS, TCS, occupant seats and contact handoff.
 // The host's PhysicsScene remains authoritative for world collision geometry.
-#include <northstarcpp/vehicle_dynamics_plugin.h>
+#include <northstarcpp/vehicle_powertrain_plugin.h>
 #include "module_provider.hpp"
 #include "vehicle_physics.hpp"
 #include <algorithm>
@@ -22,7 +22,11 @@ void require(bool valid,char const* reason) {
 bool finite(float x) {return std::isfinite(x);}
 constexpr float bounds=1000000.f;
 using Vehicle=sim::Vehicle;
-struct World {std::map<std::uint32_t,Vehicle> vehicles;};
+struct World {
+    std::map<std::uint32_t,Vehicle> vehicles;
+    std::vector<std::uint32_t> sorted_ids; // O(log n) enumeration
+    std::vector<std::pair<std::uint32_t,Vehicle>> scratch; // reusable transactional update
+};
 World& checked(void* world) {
     require(world!=nullptr,"Missing engine.vehicle world");
     return *static_cast<World*>(world);
@@ -53,7 +57,8 @@ int attach(void* world,NorthStarVehicleDefinition const* def) noexcept {
                 def->maximum_steering<=1.3f &&
             finite(def->rolling_drag)&&def->rolling_drag>=0&&def->rolling_drag<=10.f,
             "Invalid vehicle chassis dimensions or driving limits");
-        auto& collection=checked(world).vehicles;
+        auto& state=checked(world);
+        auto& collection=state.vehicles;
         require(collection.size()<4096,"Vehicle world capacity reached");
         Vehicle v;
         v.definition=*def;
@@ -62,13 +67,23 @@ int attach(void* world,NorthStarVehicleDefinition const* def) noexcept {
         std::copy(def->position,def->position+3,v.state.position);
         v.state.heading=sim::angle(def->heading);
         sim::default_rig(v);
-        require(collection.emplace(def->entity_index,std::move(v)).second,
-            "Vehicle already attached to this entity");
+        auto const [it,inserted]=collection.emplace(def->entity_index,std::move(v));
+        require(inserted,"Vehicle already attached to this entity");
+        try {
+            auto destination=std::lower_bound(
+                state.sorted_ids.begin(),state.sorted_ids.end(),def->entity_index);
+            state.sorted_ids.insert(destination,def->entity_index);
+        }catch(...) {collection.erase(it);throw;}
     });
 }
 int detach(void* world,std::uint32_t id) noexcept {
     return guarded([&]{
-        require(checked(world).vehicles.erase(id)==1,"Unknown vehicle entity");
+        auto& state=checked(world);
+        require(state.vehicles.erase(id)==1,"Unknown vehicle entity");
+        auto found=std::lower_bound(state.sorted_ids.begin(),
+                                    state.sorted_ids.end(),id);
+        if(found!=state.sorted_ids.end() && *found==id)
+            state.sorted_ids.erase(found);
     });
 }
 int controls(void* world,std::uint32_t id,float gas,float steering,float brake) noexcept {
@@ -97,17 +112,23 @@ int step(void* world,float dt) noexcept {
     return guarded([&] {
         require(finite(dt)&&dt>=0&&dt<=.1f,
             "Vehicle timestep must be within 0..0.1 seconds");
-        auto& entities=checked(world).vehicles;
+        auto& state=checked(world);
+        auto& entities=state.vehicles;
         if(dt==0.f)return;
-        // Calculate into separate per-vehicle records; commit only if all valid.
-        std::vector<std::pair<std::uint32_t,Vehicle>> next;
-        next.reserve(entities.size());
+        // Keep the atomic frame-commit property while REUSING the scratch
+        // vector and wheel/seat allocations across all simulation frames.
+        // If any vehicle update fails, the visible world remains unchanged.
+        state.scratch.resize(entities.size());
+        std::size_t ordinal=0;
         for(auto const& item:entities) {
-            Vehicle proposed=item.second;
-            require(sim::step(proposed,dt),"Vehicle physics left valid world bounds");
-            next.emplace_back(item.first,std::move(proposed));
+            auto& next=state.scratch[ordinal++];
+            next.first=item.first;
+            next.second=item.second; // vector assignment reuses existing capacity
+            require(sim::step(next.second,dt),
+                    "Vehicle physics left valid world bounds");
         }
-        for(auto& item:next)entities.at(item.first)=std::move(item.second);
+        for(auto& item:state.scratch)
+            std::swap(entities.at(item.first),item.second);
     });
 }
 int read(void* world,std::uint32_t id,NorthStarVehicleState* out) noexcept {
@@ -119,10 +140,9 @@ int read(void* world,std::uint32_t id,NorthStarVehicleState* out) noexcept {
 int at(void* world,std::uint32_t ordinal,NorthStarVehicleState* out) noexcept {
     return guarded([&] {
         require(out&&out->size>=sizeof(*out),"Missing enumeration output");
-        auto& v=checked(world).vehicles;
-        require(ordinal<v.size(),"Vehicle ordinal is invalid");
-        auto found=v.begin();std::advance(found,ordinal);
-        *out=found->second.state;
+        auto const& state=checked(world);
+        require(ordinal<state.sorted_ids.size(),"Vehicle ordinal is invalid");
+        *out=state.vehicles.at(state.sorted_ids[ordinal]).state;
     });
 }
 std::uint32_t count(void* world) noexcept {
@@ -136,15 +156,15 @@ bool valid_wheel(NorthStarVehicleWheelConfig const& w) {
         finite(w.radius)&&w.radius>=.12f&&w.radius<=2.f &&
         finite(w.rest_length)&&w.rest_length>=.02f&&w.rest_length<=3.f &&
         finite(w.travel)&&w.travel>=.02f&&w.travel<=2.f &&
-        finite(w.spring_rate)&&w.spring_rate>=500.f&&w.spring_rate<=500000.f &&
-        finite(w.damper_rate)&&w.damper_rate>=0.f&&w.damper_rate<=100000.f &&
+        finite(w.spring_rate)&&w.spring_rate>=500.f&&w.spring_rate<=5000000000.f &&
+        finite(w.damper_rate)&&w.damper_rate>=0.f&&w.damper_rate<=1000000000.f &&
         finite(w.grip_long)&&w.grip_long>=.05f&&w.grip_long<=4.f &&
         finite(w.grip_lat)&&w.grip_lat>=.05f&&w.grip_lat<=4.f &&
         finite(w.steer_factor)&&w.steer_factor>=0.f&&w.steer_factor<=1.f &&
         finite(w.drive_factor)&&w.drive_factor>=0.f&&w.drive_factor<=1.f &&
         finite(w.brake_factor)&&w.brake_factor>=0.f&&w.brake_factor<=1.f &&
         finite(w.rotational_inertia)&&w.rotational_inertia>=.01f&&
-        w.rotational_inertia<=2000.f;
+        w.rotational_inertia<=5000000.f;
 }
 int configure(void* world,std::uint32_t id,NorthStarVehicleRig const* config) noexcept {
     return guarded([&] {
@@ -153,12 +173,12 @@ int configure(void* world,std::uint32_t id,NorthStarVehicleRig const* config) no
         require(c.wheel_count>=2&&c.wheel_count<=NORTHSTARCPP_VEHICLE_MAX_WHEELS &&
             c.seat_count<=NORTHSTARCPP_VEHICLE_MAX_SEATS &&
             c.wheels&&(c.seat_count==0||c.seats) &&
-            finite(c.mass)&&c.mass>=100.f&&c.mass<=100000.f &&
-            finite(c.yaw_inertia)&&c.yaw_inertia>=100.f&&c.yaw_inertia<=20000000.f &&
+            finite(c.mass)&&c.mass>=100.f&&c.mass<=1000000000.f &&
+            finite(c.yaw_inertia)&&c.yaw_inertia>=100.f&&c.yaw_inertia<=10000000000000.f &&
             finite(c.center_of_mass_y)&&c.center_of_mass_y>=0.f&&
                 c.center_of_mass_y<=10.f &&
-            finite(c.engine_force)&&c.engine_force>0.f&&c.engine_force<=1000000.f &&
-            finite(c.brake_force)&&c.brake_force>0.f&&c.brake_force<=1500000.f &&
+            finite(c.engine_force)&&c.engine_force>0.f&&c.engine_force<=5000000000.f &&
+            finite(c.brake_force)&&c.brake_force>0.f&&c.brake_force<=5000000000.f &&
             finite(c.aerodynamic_drag)&&c.aerodynamic_drag>=0.f&&
                 c.aerodynamic_drag<=500.f &&
             finite(c.rolling_resistance)&&c.rolling_resistance>=0.f&&
@@ -210,6 +230,7 @@ int configure(void* world,std::uint32_t id,NorthStarVehicleRig const* config) no
         v.rolling_resistance=c.rolling_resistance;
         v.abs_enabled=c.abs_enabled!=0;
         v.traction_enabled=c.traction_control_enabled!=0;
+        sim::refresh_rig_cache(v);
     });
 }
 std::uint32_t wheel_count(void* world,std::uint32_t id) noexcept {
@@ -285,6 +306,7 @@ int ground_contact(void* world,std::uint32_t id,
         require(contact->wheel_index<v.wheels.size(),"Unknown wheel contact index");
         auto& w=v.wheels[contact->wheel_index];
         w.explicit_contact=true;
+        v.heightfield_follow=true;
         w.ground_y=contact->ground_y;
         w.surface_mu=contact->friction;
         w.telemetry.in_contact=contact->in_contact;
@@ -385,6 +407,7 @@ std::uint32_t door_count(void* world,std::uint32_t id) noexcept {
     if(at==w->vehicles.end())return 0u;
     return static_cast<std::uint32_t>(at->second.doors.size());
 }
+#include "native_powertrain.inc"
 NorthStarVehicleCabinApi const cabin_api{
     NORTHSTARCPP_VEHICLE_CABIN_ABI,sizeof(NorthStarVehicleCabinApi),
     configure_doors,set_door,door_state,door_count
@@ -422,6 +445,8 @@ extern "C" NORTHSTARCPP_MODULE_EXPORT NorthStarModule const* northstar_module_qu
         basic_module,host,capability,version))return result;
     if(auto* result=northstarcpp::module_provider::match(
         dynamics_module,host,capability,version))return result;
+    if(auto* result=northstarcpp::module_provider::match(
+        cabin_module,host,capability,version))return result;
     return northstarcpp::module_provider::match(
-        cabin_module,host,capability,version);
+        powertrain_module,host,capability,version);
 }

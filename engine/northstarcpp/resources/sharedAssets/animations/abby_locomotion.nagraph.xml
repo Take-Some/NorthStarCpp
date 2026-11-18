@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AnimationGraph schema="1" initial="locomotion">
+  <!-- All references resolve through engine.assets; no absolute paths. -->
+  <Parameters>
+    <Float name="speed" default="0"/>
+  </Parameters>
+  <States>
+    <State name="locomotion" sync="gait">
+      <Blend1D parameter="speed">
+        <Point at="0" ref="characters/abby/animations/mm-explore.ycd@abby-mm-explore-idle"/>
+        <Point at="1" ref="characters/abby/animations/mm-explore.ycd@abby-mm-explore-walk-loop-fw"/>
+      </Blend1D>
+    </State>
+  </States>
+</AnimationGraph>

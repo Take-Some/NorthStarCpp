@@ -3,8 +3,11 @@
 #pragma once
 
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/scene_cost_profiler.hpp>
 
+#include <array>
 #include <cstddef>
+#include <optional>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -37,9 +40,18 @@ private:
         std::size_t operator()(CellKey const& key) const;
     };
 
-    std::vector<SceneObject> objects_;
+    struct ObjectBounds {
+        std::uint64_t id = 0;
+        Vector3 position{0.f, 0.f, 0.f};
+        float half_extent = 0.f;
+    };
+    std::vector<ObjectBounds> objects_;
     std::unordered_map<CellKey, std::vector<std::size_t>, Hash> cells_;
     std::vector<CellKey> object_cells_;
+    // Dense-bucket indices allow O(1) removal when moving between cells.
+    std::vector<std::size_t> object_slots_;
+    // Reused validation scratch avoids allocating per live update.
+    std::vector<CellKey> staged_cells_;
     float grid_size_ = 64.f;
     float maximum_extent_ = 0.f;
 };
@@ -61,11 +73,37 @@ struct SceneStreamingDiagnostics {
     std::size_t visible_entities = 0;
     std::size_t generation = 0;
     std::size_t cell_selection_passes = 0;
+    std::size_t portals_frustum_rejected = 0;
+    std::uint64_t last_update_cpu_us = 0; // SceneWorld CPU only; not GPU time
 };
 
 // Runtime HLOD proxy for static scene groups; collision always remains in
 // the original physics bodies. Geometry is an explicit authored-world AABB
 // approximation, not a generated mesh-LOD asset.
+// Plane half-space is dot(normal, position) + offset >= 0.
+// A camera frustum is optional, preserving old portal reachability behavior.
+struct SceneViewPlane {
+    Vector3 normal{0.f, 0.f, 1.f};
+    float offset = 0.f;
+};
+struct SceneViewFrustum {
+    std::array<SceneViewPlane, 6> planes{};
+};
+
+// CPU authoring and streaming counters; no unmeasured GPU/VRAM estimates.
+struct SceneCellTelemetry {
+    std::string name;
+    std::size_t authored_entities = 0;
+    std::size_t unique_authored_assets = 0;
+    std::size_t assigned_entities = 0;
+    std::size_t resident_entities = 0;
+    std::size_t visible_entities = 0;
+    std::size_t active_hlod_proxies = 0;
+    std::size_t hlod_replaced_entities = 0;
+    bool loaded = false;
+    bool payload_ready = false;
+};
+
 struct SceneHlodProxy {
     Vector3 center{0.f,0.f,0.f};
     Vector3 half_extent{1.f,1.f,1.f};
@@ -88,6 +126,9 @@ public:
     void set_layer_visible(std::string const& name, bool visible);
     void set_portal_open(std::string const& name, bool open);
     void pin_cell(std::string const& name, bool resident);
+    // Conservative portal-volume camera-frustum gate (optional).
+    void set_view_frustum(SceneViewFrustum const& frustum);
+    void clear_view_frustum() noexcept { view_frustum_.reset(); }
 
     bool cell_loaded(std::string const& name) const;
     // When enabled, disk-backed cells are not renderable/instantiated before
@@ -121,6 +162,10 @@ public:
     // Ordered load/unload transitions from the last update.
     std::vector<SceneCellTransition> const& cell_transitions() const { return transitions_; }
     SceneStreamingDiagnostics const& streaming_diagnostics() const { return diagnostics_; }
+    std::vector<SceneCellTelemetry> const& cell_telemetry() const { return cell_telemetry_; }
+    // Per-scene rolling CPU profile; GPU timing/bytes are optional and must
+    // be fed by the renderer from actual timestamp and memory queries.
+    SceneCostProfiler& cost_profiler() const {return cost_profiler_;}
 
 private:
     struct CellCandidate {
@@ -139,6 +184,9 @@ private:
     SceneSpatialIndex spatial_;
     std::unordered_map<std::string, std::size_t> cell_lookup_;
     std::unordered_map<std::uint64_t, std::size_t> id_lookup_;
+    // Static adjacency avoids scanning every portal for each reachable room.
+    std::unordered_map<std::string, std::vector<std::size_t>> portals_by_room_;
+    std::unordered_map<std::string, std::vector<Vector3>> portal_polygons_;
     std::unordered_set<std::string> pinned_;
     std::vector<std::uint8_t> loaded_cells_;
     std::vector<std::uint8_t> payload_ready_;
@@ -153,6 +201,9 @@ private:
     std::vector<SceneHlodProxy> hlod_proxies_;
     std::vector<SceneCellTransition> transitions_;
     SceneStreamingDiagnostics diagnostics_{};
+    mutable SceneCostProfiler cost_profiler_{};
+    std::vector<SceneCellTelemetry> cell_telemetry_;
+    std::optional<SceneViewFrustum> view_frustum_;
     std::size_t generation_ = 0;
 };
 

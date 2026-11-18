@@ -10,7 +10,7 @@ bool decode(std::uint8_t const* data,std::size_t size,
             std::vector<Track>& tracks,std::string& error) {
     tracks.clear();error.clear();
     try {
-        if(!data || size<schema::nef8_header || size>256ull*1024*1024)
+        if(!data || size<schema::nef8_header || size>max_container_bytes)
             throw std::runtime_error("NAC NEF8: missing or oversized file");
         // Shared validated NEF8 reader: bounded raw inflate and BLAKE3 hash.
         std::vector<std::uint8_t> const input(data,data+size);

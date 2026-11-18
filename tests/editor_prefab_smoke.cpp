@@ -2,6 +2,7 @@
 #include "editor_prefab.hpp"
 #include "editor_tools.hpp"
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/assets.hpp>
 #include <northstarcpp/collision_authoring.hpp>
 #include <northstarcpp/collision_mesh.hpp>
 #include <northstarcpp/collision_hulls.hpp>
@@ -151,5 +152,68 @@ int main(int argc, char** argv) {
     try { instantiate_prefab(source,persisted,{900000.f,0.f,0.f}); }
     catch (std::invalid_argument const&) { rejected=true; }
     if(!rejected || serialize_scene_v3(source)!=before) return 9;
+    // Engine sharedAssets should provide reusable weapon templates to
+    // every mounted project, with legacy transforms kept intact.
+    auto const shared=std::filesystem::path(__FILE__).parent_path()
+        .parent_path()/"engine/northstarcpp/resources/sharedAssets";
+    struct WeaponCase {
+        char const* prefab;
+        char const* mesh;
+        float size;
+        float mass;
+        float y;
+        bool collides;
+    };
+    WeaponCase const weapon_cases[]={
+        {"prefabs/weapon/pistol.nprefab","models/weapon/pistol/pistol.ydd",
+            1.f,.65f,0.f,true},
+        {"prefabs/weapon/pistol_shell.nprefab",
+            "models/weapon/pistol/pistol_shell.ydd",.05f,.006f,0.f,true},
+        {"prefabs/weapon/rifle_shell.nprefab",
+            "models/weapon/pistol/pistol_shell.ydd",.062f,.011f,0.f,true}
+    };
+    for(auto const& variant:weapon_cases) {
+        if(!std::filesystem::is_regular_file(shared/variant.prefab) ||
+           !std::filesystem::is_regular_file(shared/variant.mesh))
+            return 30;
+        auto const weapon=load_scene(shared/variant.prefab);
+        validate_scene(weapon);
+        if(weapon.version!=3 ||weapon.objects.size()!=1 ||
+           weapon.objects[0].node.parent!=0 ||
+           weapon.objects[0].node.asset!=variant.mesh ||
+           weapon.objects[0].node.collision!=variant.collides ||
+           std::abs(weapon.objects[0].size-variant.size)>1.e-5f ||
+           std::abs(weapon.objects[0].mass-variant.mass)>1.e-5f ||
+           std::abs(weapon.objects[0].position.y-variant.y)>1.e-5f ||
+           weapon.objects[0].node.scale.x!=1.f ||
+           weapon.objects[0].node.scale.y!=1.f ||
+           weapon.objects[0].node.scale.z!=1.f)
+            return 31;
+        if(std::string(variant.prefab).find("shell")!=std::string::npos &&
+           weapon.objects[0].node.layer!="Weapon debris")
+            return 32;
+    }
+
+    // Resolve canonical weapon prefabs through the actual VFS overlay in
+    // each existing project; project-local historical pistol files must
+    // not shadow the new engine-owned weapon/ namespace.
+    auto const repository=std::filesystem::path(__FILE__).parent_path()
+        .parent_path();
+    for(char const* project:{"AbbyPistolDemo","KaylaNightCity",
+                             "NorthStarFirstPersonPlatform"}) {
+        AssetStore mounted;
+        mounted.mount_project_assets(repository/"Projects"/project,shared);
+        for(auto const& variant:weapon_cases) {
+            // The canonical weapon subtree must resolve in every project.
+            auto const bytes=mounted.read(variant.prefab);
+            auto const resolved=parse_scene_data(
+                std::string(bytes.begin(),bytes.end()));
+            validate_scene(resolved);
+            if(resolved.objects.size()!=1 ||
+               resolved.objects[0].node.asset!=variant.mesh ||
+               std::abs(resolved.objects[0].mass-variant.mass)>1.e-5f)
+                return 33;
+        }
+    }
     return 0;
 }

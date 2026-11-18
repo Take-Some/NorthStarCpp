@@ -33,7 +33,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "Projects" / "NorthStarEngineQA"
 DEFAULT_MANIFEST = PROJECT / "qa.manifest.json"
-DEFAULT_OUTPUT = PROJECT / "reports"
+DEFAULT_OUTPUT = ROOT / "out" / "qa"
 SHORT_TIMEOUT = 100
 MAX_LOG_BYTES = 16 * 1024 * 1024
 
@@ -215,7 +215,7 @@ def run_release(build: Path, report: Path, python: str, logs: Path) -> list[dict
     package_root = report / "artifacts"
     package_root.mkdir(parents=True, exist_ok=True)
     dist_cmd = [python, "-m", "tools.build_dist", "--from-build", str(build),
-                "--build-type", "Release", "--output-dir", str(package_root)]
+                "--build-type", "Release", "--qa-only", "--output-dir", str(package_root)]
     code, took, log, output = command(dist_cmd, ROOT, 110, logs, "engine-package")
     results.append(case("engine-package", "release-packaging",
                         "passed" if code == 0 else "failed", took,
@@ -498,7 +498,7 @@ def execute(args: argparse.Namespace) -> tuple[dict, Path]:
 def build_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("quick","full","release"), default="full")
-    parser.add_argument("--build-dir", type=Path, default=ROOT/"out/gcc-shared-assets-release")
+    parser.add_argument("--build-dir", type=Path, default=ROOT/"out/build")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--run-id", default="qa-" + datetime.now(timezone.utc).strftime(

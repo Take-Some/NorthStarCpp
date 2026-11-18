@@ -20,4 +20,17 @@ deserialize_controller(std::string const& bytes) {
     if(!id||flag>1)return std::nullopt;
     return std::make_pair(id,flag!=0);
 }
+
+inline SceneComponentBlob const* controller_for_pawn(
+    Scene const& scene,std::uint64_t pawn) noexcept {
+    SceneComponentBlob const* inactive=nullptr;
+    for(auto const& record:scene.components) {
+        if(record.type!=controller_type || record.version!=version)continue;
+        auto const binding=deserialize_controller(record.payload);
+        if(!binding || binding->first!=pawn)continue;
+        if(binding->second)return &record;
+        if(!inactive)inactive=&record;
+    }
+    return inactive;
+}
 }

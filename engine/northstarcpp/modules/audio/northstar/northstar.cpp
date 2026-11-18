@@ -7,6 +7,7 @@
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 using namespace northstarcpp::native_audio;
@@ -31,13 +32,16 @@ void destroy(void* p) { delete static_cast<Output*>(p); }
 
 int play(void* p, NorthStarPcm16 const* pcm) {
     return guarded([&] {
-        if (!pcm) throw std::invalid_argument("Missing PCM audio");
+        if(!pcm)throw std::invalid_argument("Missing PCM audio");
+        auto prepared=Mixer::prepare(*pcm); // copy outside the device lock
         auto& out=checked(p);
         std::lock_guard<std::mutex> lock(out.mutex);
         NorthStarAudioVoiceOptions options{sizeof(NorthStarAudioVoiceOptions),
                                            1.0f,0,0,{0,0,0}};
-        out.mixer.stop_all();
-        out.mixer.play(*pcm,options);
+        // Legacy ABI-1 callers still overlap with all other voices.
+        // Only an explicit stop() may terminate an active sound.
+        if(!out.mixer.play(std::move(prepared),options))
+            throw std::runtime_error("NorthStar Audio voice budget exhausted");
     });
 }
 void stop(void* p) {
@@ -50,10 +54,11 @@ NorthStarAudioVoiceId play_voice(void* p, NorthStarPcm16 const* pcm,
                                  NorthStarAudioVoiceOptions const* options) {
     NorthStarAudioVoiceId id=0;
     guarded([&] {
-        if (!pcm || !options) throw std::invalid_argument("Missing PCM or voice options");
+        if(!pcm || !options)throw std::invalid_argument("Missing PCM or voice options");
+        auto prepared=Mixer::prepare(*pcm); // never memcpy under output lock
         auto& out=checked(p);
         std::lock_guard<std::mutex> lock(out.mutex);
-        id=out.mixer.play(*pcm,*options);
+        id=out.mixer.play(std::move(prepared),*options);
     });
     return id;
 }

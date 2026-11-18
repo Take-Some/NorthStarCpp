@@ -154,15 +154,15 @@
       "role": "D3D12 render provider with fallback paths"
     },
     {
-      "id": "audio_winmm",
+      "id": "audio_northstar",
       "kind": "provider",
-      "directory": "audio/winmm",
+      "directory": "audio/northstar",
       "targets": [
-        "northstarcpp_audio_winmm"
+        "northstarcpp_audio_northstar"
       ],
       "contract": "audio_plugin.h",
       "capability": "audio",
-      "role": "Audio provider for Windows"
+      "role": "Multivoice NorthStar Audio with spatial NAC and overlapping one-shot playback"
     },
     {
       "id": "input_win32",

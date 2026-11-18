@@ -80,6 +80,10 @@ void RendererState::record_deferred_pass(FramePassContext& context) {
             }
             std::memcpy(deferred_constant_data+384,normalized_shadow_bias,
                         sizeof(normalized_shadow_bias));
+            // 16-byte aligned slot after existing CSM constants (512-byte
+            // buffer). Density 0 is exactly the unmodified shader output.
+            float const fog_params[4]{height_fog_density,0.f,0.f,0.f};
+            std::memcpy(deferred_constant_data+400,fog_params,sizeof(fog_params));
             if(!dynamic_lights.empty()) {
                 if(!dynamic_light_bytes||!tile_index_bytes)
                     throw std::runtime_error("Tiled lighting upload not initialized");

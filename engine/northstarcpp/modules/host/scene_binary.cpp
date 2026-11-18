@@ -436,7 +436,11 @@ Scene decode_records(std::vector<Record> const& records) {
             r.offset=record.bytes.size();
         }
         if(r.offset!=record.bytes.size())
-            throw std::runtime_error("Scene ListFile record contains trailing bytes");
+            throw std::runtime_error("Scene ListFile record contains trailing bytes: kind="+
+                std::to_string(static_cast<unsigned>(record.kind))+
+                " version="+std::to_string(record.version)+
+                " id="+std::to_string(record.id)+
+                " remaining="+std::to_string(record.bytes.size()-r.offset));
     }
     for(auto id:old_owned_ids)scene_pawn::migrate_imported_local(scene,id);
     validate_scene(scene);

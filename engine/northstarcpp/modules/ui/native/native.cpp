@@ -4,6 +4,7 @@
 #include <northstarcpp/ui_plugin.h>
 #include "module_provider.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <cstring>

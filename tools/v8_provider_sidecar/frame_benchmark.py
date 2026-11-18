@@ -35,7 +35,7 @@ def run_mode(mode: str, frames: int, native_calls: int) -> dict:
         temp=Path(tmp)
         project=temp/"project"
         shutil.copytree(SOURCE,project)
-        script=project/"scripts/main.js"
+        script=project/"assets/scripts/main.js"
         script.parent.mkdir(parents=True,exist_ok=True)
         # Every mode has the same per-frame V8 update registration and
         # sample persistence. Only the optional engine.* call workload differs.

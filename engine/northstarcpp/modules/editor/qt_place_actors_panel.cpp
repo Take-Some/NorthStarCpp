@@ -73,7 +73,11 @@ QVector<PlaceActorEntry> availablePlaceActors() {
         {"light.point","Point Light","Lights",
          "Omnidirectional dynamic light (engine.render.light)"},
         {"light.spot","Spot Light","Lights",
-         "Cone-shaped dynamic light (engine.render.light)"}
+         "Cone-shaped dynamic light (engine.render.light)"},
+        {"light.directional","Directional Light","Lights",
+         "Scene-wide directional light (sun, no distance falloff)"},
+        {"light.sky","Sky Light","Lights",
+         "Scene-wide ambient fill; uniform sky contribution"}
     };
     // Provider-driven actor factories are offered only when a default, zero
     // initialized component is actually accepted by the active ECS schema.

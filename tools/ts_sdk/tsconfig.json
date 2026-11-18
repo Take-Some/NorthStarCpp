@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "baseUrl": "../..",
+    "paths": {
+      "@northstar/engine": [
+        "engine/northstarcpp/resources/sharedAssets/api/types/northstar-engine.d.ts"
+      ]
+    },
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": []
+  },
+  "files": [
+    "../../engine/northstarcpp/resources/sharedAssets/api/types/northstar-engine.d.ts",
+    "../../tests/embedded_ui_types_smoke.ts",
+    "../../tests/embedded_ui_declarative_types_smoke.ts",
+    "../../tests/engine_api_factory_types_smoke.ts",
+    "../../tests/render_shader_api_types_smoke.ts"
+  ]
+}

@@ -1,13 +1,18 @@
 #include "qt_editor_viewport.hpp"
 #include "../viewport/editor_grid.hpp"
+#include <northstarcpp/sky_project_config.hpp>
 #include "editor_tools.hpp"
 #include "editor_visual_prefab.hpp"
+#include "qt_material_authoring.hpp"
 #include <northstarcpp/collision_service.hpp>
 #include <northstarcpp/collision_wireframe.hpp>
 #include <northstarcpp/player_character_components.hpp>
 #include <northstarcpp/geometry_service.hpp>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QLabel>
+#include <QToolTip>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -86,6 +91,7 @@ protected:
     void paintEvent(QPaintEvent*) override {}
 };
 struct QtEditorViewport::GpuState {
+    unsigned preview_refresh_ticks=0;
     std::unique_ptr<northstarcpp::Viewport> renderer;
     explicit GpuState(WId nativeWindow) :
         renderer(std::make_unique<northstarcpp::Viewport>(
@@ -105,10 +111,44 @@ QtEditorViewport::QtEditorViewport(QWidget* parent):QWidget(parent) {
     setAcceptDrops(true);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
+    // Non-interactive drag cue: always a preview, never a scene mutation.
+    // Native GPU child windows should not intercept or own drag feedback.
+    dropCue_=new QLabel(this);
+    dropCue_->setObjectName("viewportDropFeedback");
+    dropCue_->setAttribute(Qt::WA_TransparentForMouseEvents,true);
+    dropCue_->setAttribute(Qt::WA_StyledBackground,true);
+    dropCue_->setStyleSheet(
+        "QLabel#viewportDropFeedback {background:#18322b;"
+        "color:#e9f8ef;border:1px solid #78c5a0;"
+        "border-radius:5px;padding:6px 9px;font-weight:600;}");
+    dropCue_->hide();
+    dropGhost_=new QLabel("+",this);
+    dropGhost_->setObjectName("viewportDropGhost");
+    dropGhost_->setAttribute(Qt::WA_TransparentForMouseEvents,true);
+    dropGhost_->setAttribute(Qt::WA_StyledBackground,true);
+    dropGhost_->setAlignment(Qt::AlignCenter);
+    dropGhost_->setFixedSize(44,44);
+    dropGhost_->setStyleSheet(
+        "QLabel#viewportDropGhost {background:rgba(30,74,60,180);"
+        "color:#e7ffe6;border:2px dashed #7edda9;"
+        "border-radius:22px;font-size:20px;font-weight:700;}");
+    dropGhost_->hide();
     gpu_timer_=new QTimer(this);
     gpu_timer_->setInterval(16);
     connect(gpu_timer_,&QTimer::timeout,this,[this] {
-        if(gpu_dirty_ && isVisible())drawGpu();
+        // An immutable prefab may take several seconds to stream 66 native
+    // YDRs. Refresh while assets arrive, without forcing redraws after
+    // residency stabilizes. The startup probe is bounded (<=600 ticks).
+#ifdef _WIN32
+    if(asset_preview_mode_ && !gpu_dirty_ && gpu_ && scene_ &&
+       gpu_->preview_refresh_ticks<600 &&
+       (++gpu_->preview_refresh_ticks%6u)==0u) {
+        auto const stats=gpu_->renderer->asset_stats();
+        if(stats.native_meshes<scene_->objects.size() && !stats.invalid_meshes)
+            gpu_dirty_=true;
+    }
+#endif
+    if(gpu_dirty_ && isVisible())drawGpu();
 #ifdef _WIN32
         if(gpuActive()) {
             auto status=gpu_->renderer->poll_shader_reload();
@@ -165,6 +205,22 @@ QtEditorViewport::QtEditorViewport(QWidget* parent):QWidget(parent) {
 bool QtEditorViewport::gpuActive() const noexcept {
     return draw_mode_==DrawMode::EngineGpu && gpu_ && gpu_surface_;
 }
+QPixmap QtEditorViewport::captureRenderedFrame() {
+#ifdef _WIN32
+    if(!gpuActive() || !gpu_->renderer ||
+       !gpu_->renderer->request_scene_frame_capture())
+        return {};
+    if(!renderGpuNow())return {};
+    auto frame=gpu_->renderer->read_scene_frame_capture();
+    if(!frame || frame->rgba.empty())return {};
+    QImage pixels(frame->rgba.data(),int(frame->width),int(frame->height),
+                  int(frame->width*4u),QImage::Format_RGBA8888);
+    // Deep copy before releasing the provider-owned frame bytes.
+    return QPixmap::fromImage(pixels.copy());
+#else
+    return {};
+#endif
+}
 bool QtEditorViewport::renderGpuNow() {
     if(!gpuActive())return false;
     gpu_dirty_=true;
@@ -180,6 +236,11 @@ QString QtEditorViewport::gpuAssetSummary() const {
             .arg(stats.native_meshes).arg(stats.material_batches)
             .arg(stats.textured_material_batches).arg(stats.cube_proxies)
             .arg(stats.invalid_meshes);
+        if(asset_preview_mode_) {
+            auto const [hits,vertices]=gpu_->renderer->preview_cache_frame_stats();
+            label+=QString(" | Preview cache: %1 hits / %2 vertices")
+                .arg(hits).arg(vertices);
+        }
         auto const q=host_frame_profile_.summarize();
         if(q.samples)
             label+=QString(" | CPU draw p50/p95/p99: %1/%2/%3 ms (n=%4)")
@@ -191,15 +252,32 @@ QString QtEditorViewport::gpuAssetSummary() const {
 #endif
     return gpu_error_.isEmpty()?"GPU renderer is not active":gpu_error_;
 }
-void QtEditorViewport::setAssetSources(std::filesystem::path root) {
+void QtEditorViewport::setAssetSources(std::filesystem::path root,std::filesystem::path scene) {
     asset_root_=std::move(root);
+    sky_scene_=std::move(scene);
 #ifdef _WIN32
-    if(gpu_ && !asset_root_.empty()) {
-        try {gpu_->renderer->set_asset_sources(asset_root_);}
+    if(gpu_) {
+        try {
+            gpu_->renderer->set_asset_sources(asset_root_);
+            reloadSceneSky();
+        }
         catch(std::exception const& e) {emit gpuUnavailable(QString::fromUtf8(e.what()));}
     }
 #endif
     refreshVisualPrefabPreview();
+    gpu_dirty_=true;
+}
+void QtEditorViewport::reloadSceneSky() {
+#ifdef _WIN32
+    if(gpu_) {
+        try {
+            gpu_->renderer->configure_project_sky(
+                project_sky::scene_reference(asset_root_,sky_scene_));
+        } catch(std::exception const& e) {
+            emit gpuUnavailable(QString::fromUtf8(e.what()));
+        }
+    }
+#endif
     gpu_dirty_=true;
 }
 std::size_t QtEditorViewport::queueCompiledShader(
@@ -229,8 +307,12 @@ void QtEditorViewport::ensureGpu() {
     if(!gpu_) {
         host_frame_profile_.clear();
         auto renderer=std::make_unique<GpuState>(gpu_surface_->winId());
-        if(!asset_root_.empty())
+        renderer->renderer->set_preview_static_cache(asset_preview_mode_);
+        if(!asset_root_.empty()) {
             renderer->renderer->set_asset_sources(asset_root_);
+            renderer->renderer->configure_project_sky(
+                project_sky::scene_reference(asset_root_,sky_scene_));
+        }
         gpu_=std::move(renderer);
     }
     gpu_surface_->show();
@@ -265,8 +347,10 @@ void QtEditorViewport::drawGpu() {
         QElapsedTimer cpuDrawTimer;
         cpuDrawTimer.start();
         auto const& renderScene=visual_preview_scene_?*visual_preview_scene_:*scene_;
+        gpu_->renderer->set_preview_static_cache(asset_preview_mode_);
         gpu_->renderer->draw(renderScene,selected_,false,nullptr,nullptr,false,
-                             &pose,nullptr,false,false,&gizmo);
+                             &pose,nullptr,false,false,
+                             asset_preview_mode_?nullptr:&gizmo);
         host_frame_profile_.sample(double(cpuDrawTimer.nsecsElapsed())/1.0e6);
         gpu_dirty_=false;
         gpu_error_.clear();
@@ -796,8 +880,8 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
         }
     if(!gpu_error_.isEmpty() || has_native_assets) {
         auto const message=!gpu_error_.isEmpty()?
-            QString("GPU VIEWPORT UNAVAILABLE — %1").arg(gpu_error_):
-            QString("PROXY VIEW — Models and materials are not rendered. "
+            QString("GPU VIEWPORT UNAVAILABLE РІР‚вЂќ %1").arg(gpu_error_):
+            QString("PROXY VIEW РІР‚вЂќ Models and materials are not rendered. "
                     "Select 'Engine GPU - Native Models & Materials'.");
         QRect banner(12,40,std::max(1,width()-24),58);
         painter.setPen(QPen(QColor("#9b633f"),1));
@@ -810,7 +894,7 @@ void QtEditorViewport::paintEvent(QPaintEvent*) {
     painter.setPen(QColor("#8ea6c2"));
     painter.drawText(QRect(14,height()-31,width()-28,22),
         Qt::AlignLeft|Qt::AlignVCenter,
-        QString("Objects: %1  |  %2  |  Fly: %3 m/s  |  Shift Г—3, Ctrl Г—0.25  |  F Focus")
+        QString("Objects: %1  |  %2  |  Fly: %3 m/s  |  Shift Р вЂњРІР‚вЂќ3, Ctrl Р вЂњРІР‚вЂќ0.25  |  F Focus")
             .arg(scene_?scene_->objects.size():0)
             .arg(draw_mode_==DrawMode::Wireframe?"Wireframe":
                  draw_mode_==DrawMode::Shaded?"Shaded proxy":"Shaded + edges")
@@ -1084,18 +1168,97 @@ void QtEditorViewport::focusOutEvent(QFocusEvent* event) {
     QWidget::focusOutEvent(event);
 }
 void QtEditorViewport::dragEnterEvent(QDragEnterEvent* event) {
-    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference") ||
-       event->mimeData()->hasFormat("application/x-northstar-placeable-id"))
-        event->acceptProposedAction();
-    else event->ignore();
+    bool const supported=event->mimeData() &&
+        (event->mimeData()->hasFormat("application/x-northstar-asset-reference") ||
+         event->mimeData()->hasFormat("application/x-northstar-placeable-id"));
+    if(supported)event->acceptProposedAction();
+    else {dropCue_->hide();dropGhost_->hide();event->ignore();}
 }
 void QtEditorViewport::dragMoveEvent(QDragMoveEvent* event) {
-    if(event->mimeData()->hasFormat("application/x-northstar-asset-reference") ||
-       event->mimeData()->hasFormat("application/x-northstar-placeable-id"))
-        event->acceptProposedAction();
-    else event->ignore();
+    auto const* mime=event->mimeData();
+    bool const placeable=mime && mime->hasFormat(
+        "application/x-northstar-placeable-id");
+    bool const asset=mime && mime->hasFormat(
+        "application/x-northstar-asset-reference");
+    if(!placeable && !asset) {
+        dropCue_->hide();dropGhost_->hide();QToolTip::hideText();
+        event->ignore();return;
+    }
+    QString const ref=QString::fromUtf8(mime->data(placeable?
+        "application/x-northstar-placeable-id":
+        "application/x-northstar-asset-reference")).trimmed();
+    bool const allowed=!ref.isEmpty() && ref.size()<=256 &&
+        (!placeable || (!ref.contains('/') && !ref.contains('\\')));
+    if(!allowed) {
+        dropCue_->hide();dropGhost_->hide();QToolTip::hideText();
+        event->ignore();return;
+    }
+    bool const material=!placeable && material_authoring::is_material(ref);
+    bool const texture=!placeable && material_authoring::is_texture(ref);
+    bool const prefab=!placeable && ref.endsWith(".nprefab",Qt::CaseInsensitive);
+    auto const modelPath=ref.section('@',0,0);
+    bool const mesh=!placeable && (modelPath.endsWith(".ydd",Qt::CaseInsensitive) ||
+        modelPath.endsWith(".ydr",Qt::CaseInsensitive) ||
+        modelPath.endsWith(".obj",Qt::CaseInsensitive));
+    if(!placeable && !material && !texture && !prefab && !mesh) {
+        dropCue_->hide();dropGhost_->hide();QToolTip::hideText();
+        event->ignore();return;
+    }
+    auto const ground=groundAt(event->position().toPoint());
+    QString const title=placeable?ref:ref.section('/',-1);
+    QString const verb=material?"Drop onto actor to assign material":
+        texture?"Drop onto actor to create material":"Drop to place";
+    QString const feedback=(material || texture)?
+        QString("%1: %2").arg(verb,title.left(50)):
+        QString("%1: %2   [%3, %4, %5]")
+            .arg(verb,title.left(50))
+            .arg(double(ground.x),0,'f',1)
+            .arg(double(ground.y),0,'f',1)
+            .arg(double(ground.z),0,'f',1);
+    dropCue_->setStyleSheet((material || texture)?
+        "QLabel#viewportDropFeedback {background:#3b3020;"
+        "color:#fceac7;border:1px solid #dfb96e;"
+        "border-radius:5px;padding:6px 9px;font-weight:600;}":
+        "QLabel#viewportDropFeedback {background:#18322b;"
+        "color:#e9f8ef;border:1px solid #78c5a0;"
+        "border-radius:5px;padding:6px 9px;font-weight:600;}");
+    dropCue_->setText(feedback);
+    dropCue_->adjustSize();
+    QPoint const pointer=event->position().toPoint();
+    int const x=std::clamp(pointer.x()+16,4,
+        std::max(4,width()-dropCue_->width()-4));
+    int const y=std::clamp(pointer.y()+18,4,
+        std::max(4,height()-dropCue_->height()-4));
+    dropCue_->move(x,y);
+    dropCue_->show();
+    dropCue_->raise();
+    // Placement is a non-mutating, spatially anchored preview, distinct
+    // from both the persistent selected Actor and its gizmo geometry.
+    if(!material && !texture) {
+        dropGhost_->setText(prefab?"P":mesh?"3D":"+");
+        auto const projectedGround=projected(ground);
+        QPoint spot=event->position().toPoint();
+        if(std::isfinite(projectedGround.x()) &&
+           std::isfinite(projectedGround.y()))
+            spot=projectedGround.toPoint();
+        dropGhost_->move(
+            std::clamp(spot.x()-22,0,std::max(0,width()-44)),
+            std::clamp(spot.y()-22,0,std::max(0,height()-44)));
+        dropGhost_->show();
+        dropGhost_->raise();
+    } else dropGhost_->hide();
+    // Native Win32 swapchain may occlude a sibling QWidget. Tooltip is
+    // a separate native surface in that case, with the same preview data.
+    if(gpuActive())
+        QToolTip::showText(mapToGlobal(pointer+QPoint(14,22)),feedback,this);
+    event->acceptProposedAction();
+}
+void QtEditorViewport::dragLeaveEvent(QDragLeaveEvent* event) {
+    dropCue_->hide();dropGhost_->hide();QToolTip::hideText();
+    event->accept();
 }
 void QtEditorViewport::dropEvent(QDropEvent* event) {
+    dropCue_->hide();dropGhost_->hide();QToolTip::hideText();
     auto const placeable=event->mimeData()->hasFormat(
         "application/x-northstar-placeable-id");
     if(!placeable &&

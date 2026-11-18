@@ -2,6 +2,7 @@
 #include "renderer_private.hpp"
 #include "../../shared/frame_memory_counters.hpp"
 #include "../shared/shader_disk_cache.hpp"
+#include "../shared/frame_texture_memo.hpp"
 namespace frame_memory = northstarcpp::diagnostics::frame_memory;
 
 namespace northstarcpp::render::d3d12::detail {
@@ -121,6 +122,10 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
         std::vector<MaterialTextureUpload> pending;
         UploadPages::Batch uploads(upload_pages,device.Get(),fence->GetCompletedValue());
         frame_memory::reserve(draws,count);
+        // One-call cache: repeated YDR sections share a texture handle.
+        // A later frame always revalidates content, even at the same address.
+        northstarcpp::render::FrameTextureMemo<
+            std::shared_ptr<MaterialGpuTexture>> texture_memo;
         UINT first_vertex=0;
         for(UINT i=0;i<count;++i) {
             auto const& input=batches[i];
@@ -137,7 +142,10 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
                 auto const& texture=input.textures[slot];
                 if(!texture.rgba8&&!texture.width&&!texture.height&&!texture.data_bytes)
                     continue;
-                draw.maps[slot]=material_texture(texture,slot==0||slot==4,pending,uploads);
+                auto const is_srgb=slot==0 || slot==4;
+                draw.maps[slot]=texture_memo.get(texture,is_srgb?1u:0u,[&] {
+                    return material_texture(texture,is_srgb,pending,uploads);
+                });
                 draw.params.present[0]|=1u<<slot;
             }
             if(!geometry_unchanged)
@@ -147,8 +155,26 @@ void RendererState::set_material_batches(NorthStarMaterialBatch const* batches,U
         }
         // Upload resources and descriptors are single-buffered. Validate and
         // prepare all incoming batches before touching the active frame.
+        // Single-buffered GPU resources remain untouched when the exact
+        // original materials, images and full-resolution vertices are reused.
+        // If ANY content differs, preserve the fence/wait before writing.
+        bool const reuse_existing_gpu=[&] {
+            if(!geometry_unchanged || !pending.empty() ||
+               count!=material_draws.size() || !material_vertex_gpu ||
+               !material_constant_gpu || !material_srv_heap ||
+               required_vertices>material_vertex_capacity ||
+               count>material_batch_capacity)return false;
+            for(UINT i=0;i<count;++i) {
+                if(std::memcmp(&draws[i].params,&material_draws[i].params,
+                               sizeof(MaterialParams))!=0)return false;
+                for(unsigned slot=0;slot<5;++slot)
+                    if(draws[i].maps[slot]!=material_draws[i].maps[slot])
+                        return false;
+            }
+            return true;
+        }();
         auto* old_heap=material_srv_heap.Get();
-        if(count) {
+        if(count && !reuse_existing_gpu) {
             wait();
             ensure_material_buffers(required_vertices,count);
         }

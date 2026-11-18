@@ -50,20 +50,7 @@ QString folderRoot(fs::path const& scene) {
     return qpath(scene.parent_path()/"assets");
 }
 fs::path sharedMaterialRoot() {
-    // Resolve the shared library relative to the installed editor or
-    // source development build without hardcoding a user's machine path.
-    auto parent=fs::u8path(
-        QCoreApplication::applicationDirPath().toUtf8().toStdString());
-    for(unsigned level=0;level<8;++level) {
-        auto const candidate=parent/"sharedAssets";
-        std::error_code ec;
-        if(fs::is_directory(candidate,ec) &&
-           !fs::is_symlink(candidate,ec))
-            return candidate;
-        if(parent==parent.parent_path())break;
-        parent=parent.parent_path();
-    }
-    return {};
+    return asset_paths::locate_shared_root(asset_paths::executable_dir());
 }
 bool availableMaterial(fs::path const& root,QString const& reference) {
     if(root.empty() || !material_authoring::is_material(reference))return false;

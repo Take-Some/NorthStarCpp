@@ -17,7 +17,7 @@ new Autowalk().install();
 '''
 SESSION='''import { Events, Player, Audio, Scene } from "@northstar/engine";
 let ticks=0,voice=0,step=null;
-const save=(name,data)=>engine.save.write(name,JSON.stringify(data));
+const save=(name,data)=>engine.storage.saves.write(name,JSON.stringify(data));
 Events.on("start",()=>{
  if(!Player.enabled || Player.index<0)throw Error("player not activated");
  save("scripting_start",{phase:"start",objects:Scene.objectCount()});
@@ -32,7 +32,7 @@ Events.on("update",dt=>{
  if(++ticks===140){
    save("scripting_update",{phase:"update",frames:ticks,
       hadFootstep:step!==null,voice,dt});
-   engine.session.quit();
+   engine.session.lifecycle.quit();
  }
 });
 Events.on("stop",()=>save("scripting_stop",{phase:"stop",ticks}));
@@ -44,12 +44,12 @@ def verify(player):
     with tempfile.TemporaryDirectory(prefix="northstar-footsteps-e2e-") as temp:
         project=Path(temp)/"project"
         shutil.copytree(ROOT/"Projects/NorthStarFirstPersonPlatform",project)
-        (project/"scripts/main.js").unlink()
-        (project/"scripts/playerConfig.js").unlink()
+        (project/"assets/scripts/main.js").unlink()
+        (project/"assets/scripts/playerConfig.js").unlink()
         for target,content in [
             ("player/playerMovement.js",MOVEMENT),
             ("player/playerSession.js",SESSION)]:
-            dest=project/"scripts"/target
+            dest=project/"assets/scripts"/target
             dest.parent.mkdir(parents=True,exist_ok=True)
             dest.write_text(content,encoding="utf-8")
         previous=os.environ.get("NORTHSTARCPP_AUDIO_PLUGIN")

@@ -107,13 +107,23 @@ void main() {
         vec3 lightColor=vec3(2.1);
         if(count>0) {
             GpuLight light=lighting.sources[i];
-            vec3 towardLight=light.position_range.xyz-vertex_world;
-            float distance=length(towardLight);
-            if(distance>=light.position_range.w || distance<.0001)continue;
-            L=towardLight/distance;
-            float radial=clamp(1.0-distance/light.position_range.w,0.0,1.0);
-            float attenuation=radial*radial;
-            if(light.direction_cone.w>=0.0) {
+            float kind=light.direction_cone.w;
+            if(kind<=-2.5) {
+                rgb+=base.rgb*light.color_intensity.rgb*light.color_intensity.w;
+                continue;
+            }
+            float attenuation=1.;
+            if(kind<=-1.5) {
+                L=normalize(-light.direction_cone.xyz);
+            } else {
+                vec3 towardLight=light.position_range.xyz-vertex_world;
+                float distance=length(towardLight);
+                if(distance>=light.position_range.w || distance<.0001)continue;
+                L=towardLight/distance;
+                float radial=clamp(1.0-distance/light.position_range.w,0.0,1.0);
+                attenuation=radial*radial;
+            }
+            if(kind>=0.0) {
                 vec3 direction=normalize(light.direction_cone.xyz);
                 float angle=dot(direction,-L);
                 attenuation*=smoothstep(light.direction_cone.w,

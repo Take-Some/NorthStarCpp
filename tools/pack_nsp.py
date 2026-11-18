@@ -39,6 +39,13 @@ def inventory(source: Path) -> list[tuple[str, Path, int, int]]:
         relative = path.relative_to(source)
         if any(part in EXCLUDE_NAMES for part in relative.parts):
             continue
+        # Character source research files (PAK/ICE/VRAM) are not runtime assets.
+        # Avoid packaging proprietary, redundant raw game data in shared NSPs.
+        if ((len(relative.parts)>=3 and relative.parts[0]=="characters" and
+                relative.parts[2]=="source") or
+            (len(relative.parts)>=3 and relative.parts[0]=="textures" and
+                relative.parts[1]=="sky" and relative.parts[2]=="source")):
+            continue
         if path.is_symlink():
             raise ValueError(f"Symlinks are not supported in NSP: {path}")
         if not path.is_file() or ".bak" in path.name.lower() or path.name.endswith(("~", ".tmp")):
@@ -113,8 +120,15 @@ def build_qt_icon_resource(source: Path, directory: Path, rcc: Path) -> Path:
     return bundle
 
 
-def pack(source: Path, output: Path, *, qt_rcc: Path | None = None) -> tuple[int, int]:
+def pack(source: Path, output: Path, *, qt_rcc: Path | None = None,
+         asset_registry: Path | None = None) -> tuple[int, int]:
     files = inventory(source)
+    if asset_registry is not None:
+        import json
+        from asset_pipeline import validate_inventory, verify_registry
+        registry = json.loads(asset_registry.read_text(encoding="utf-8"))
+        verify_registry(source, registry)
+        validate_inventory(registry, files)
     with tempfile.TemporaryDirectory(prefix="northstar-ui-rcc-") as ui_temp:
         if qt_rcc is not None:
             generated = build_qt_icon_resource(source, Path(ui_temp), qt_rcc)
@@ -214,6 +228,8 @@ def main() -> None:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--verify", type=Path)
     ap.add_argument("--qt-rcc", type=Path, help="Qt resource compiler for UI icons")
+    ap.add_argument("--asset-registry", type=Path,
+                    help="Validate stable IDs and source hashes before packing")
     args = ap.parse_args()
     if args.verify:
         count, size = verify(args.verify)
@@ -221,7 +237,8 @@ def main() -> None:
     else:
         if not args.root or not args.out:
             ap.error("--root and --out are required for packing")
-        count, size = pack(args.root, args.out, qt_rcc=args.qt_rcc)
+        count, size = pack(args.root, args.out, qt_rcc=args.qt_rcc,
+                           asset_registry=args.asset_registry)
         print(f"Packed NSP v1: {count} assets, {size} bytes -> {args.out}")
 
 

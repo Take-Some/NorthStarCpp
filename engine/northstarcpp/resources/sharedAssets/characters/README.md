@@ -20,6 +20,26 @@ Names are ASCII letters, digits, underscores and hyphens (maximum 72 chars).
           traversal.ycd
           fall-medium.ycd
 
+## Ellie (staged)
+
+`characters/ellie/ellie.character.json` and `prefabs/characters/ellie.nprefab`
+are registered for engine-wide reuse. The direct Python PAK importer now
+extracts real Ellie native YDD geometry previews (15 independent part files,
+47 submeshes with original twelve-source-influence streams), a partially
+reconstructed 1074-joint YMT, a native 397-texture YTD, and native 42-material
+XML YMAT. Original PAK, GPU and ICE animation buffers are retained locally
+in `characters/ellie/source/` (excluded from NSP archive and Git).
+
+The existing C++ NVRM parser can resolve the canonical shared YMAT and load
+source skin influences into the eight-weight CPU skinning path. Full linking,
+GPU skinning, the remaining 503 helper bind transforms, original ICE-to-YCD
+conversion, and viewport validation remain incomplete. The regular
+`ellie.nprefab` is **not** ready: it still targets the future `ellie.ydd`.
+Use `prefabs/characters/ellie_preview.nprefab` for geometry inspection.
+QA: `python tests/ellie_native_extraction_smoke.py` and
+`python tests/ellie_native_material_skin_smoke.py`.
+Full report: `characters/ellie/README.md`.
+
 The character descriptor uses schema northstar.character.v1. It lists the
 model, skeleton, appearance material and texture dictionary, and named
 animation clip references. Each character has its own resources; no fake

@@ -1,6 +1,7 @@
 #include "qa_scene_fixture.hpp"
 // CameraDirector invariants and behavior regression tests.
 #include <northstarcpp/camera.hpp>
+#include <northstarcpp/camera_owner_clearance.hpp>
 #include <northstarcpp/camera_track.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -214,6 +215,48 @@ int main() {
         for (int i=0;i<60;++i) zooming_out=smooth.update(.016f,person,&scene);
         if (!approx(zooming_out.position.z,-8.f,.03f)) return 36;
 
+        // Regression: a full YDD visual on a possessed Pawn has a solid head.
+        stage="owner-head-collision";
+        Scene owner_scene;
+        qa::append(owner_scene,{"Player",{0.f,0.f,0.f},1.8f,0xffffff,true,80.f});
+        qa::append(owner_scene,{"Skinned visual",{0.f,0.f,0.f},1.8f,0xffffff,false,0.f});
+        owner_scene.objects[1].node.parent=owner_scene.objects[0].node.id;
+        owner_scene.objects[1].node.asset="characters/test/models/hero.ydd@body";
+        CameraTarget owner_target;
+        owner_target.eye={0.f,1.45f,0.f};
+        owner_target.ignore_object=0;
+        CameraDirector owner_camera;
+        auto first_eye=owner_camera.update(.016f,owner_target,&owner_scene);
+        if(first_eye.position.z<.20f || first_eye.position.z>.30f)return 37;
+        // The production player Blueprint may reference the source prefab
+        // through a SkeletalMesh component, with no YDD on the Scene node.
+        Scene prefab_owner=owner_scene;
+        prefab_owner.objects[1].node.asset.clear();
+        SceneComponentBlob prefab_visual;
+        prefab_visual.entity_id=prefab_owner.objects[1].node.id;
+        prefab_visual.type="northstar.gameplay.skeletal_mesh";
+        prefab_visual.version=1;
+        prefab_visual.payload="0 0 0 0 \"\" \"\" \"prefabs/characters/abby.nprefab\"";
+        prefab_owner.components.push_back(prefab_visual);
+        CameraDirector prefab_camera;
+        auto const prefab_eye=prefab_camera.update(.016f,owner_target,&prefab_owner);
+        if(prefab_eye.position.z<.20f || prefab_eye.position.z>.30f)return 42;
+        owner_camera.set_mode(CameraMode::third_person,.35f);
+        for(int i=0;i<80;++i) {
+            auto view=owner_camera.update(.016f,owner_target,&owner_scene);
+            if(camera_collision::player_camera_inside_capsule(
+                view.position,Vector3{0.f,0.f,0.f},1.45f,.54f))return 38;
+        }
+        if(owner_camera.pose().position.z>=-.6f)return 39;
+        owner_camera.set_mode(CameraMode::first_person,.35f);
+        for(int i=0;i<80;++i) {
+            auto view=owner_camera.update(.016f,owner_target,&owner_scene);
+            if(camera_collision::player_camera_inside_capsule(
+                view.position,Vector3{0.f,0.f,0.f},1.45f,
+                camera_collision::first_person_head_radius))return 40;
+        }
+        if(owner_camera.pose().position.z<.20f ||
+           owner_camera.pose().position.z>.30f)return 41;
         try{camera.update(-0.1f,t,&scene);return 11;}
         catch(std::invalid_argument const&){}
         try{camera.set_zoom(2.f);return 12;}

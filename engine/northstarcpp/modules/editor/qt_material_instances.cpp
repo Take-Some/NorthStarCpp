@@ -21,7 +21,7 @@ QString qpath(fs::path const& value) {
     return QString::fromUtf8(s.data(),int(s.size()));
 }
 bool local_source(QString const& ref) {
-    return ref.endsWith(".material.json",Qt::CaseInsensitive) ||
+    return ref.endsWith(".ymat",Qt::CaseInsensitive) ||
            is_material_instance(ref);
 }
 void validate_overrides(QJsonObject const& overrides) {

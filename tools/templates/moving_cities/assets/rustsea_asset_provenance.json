@@ -1,0 +1,225 @@
+{
+  "license": "CC0 1.0 Universal",
+  "assets": [
+    {
+      "file": "models/industrial/factory_catwalk-straight.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/catwalk-straight.obj",
+      "sha256": "d4c48c8661c5c8144ab9895aa3ef0c7113af871600a8b71a1c8c88c40dfd37d0"
+    },
+    {
+      "file": "models/industrial/factory_catwalk-corner.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/catwalk-corner.obj",
+      "sha256": "3ceb5a753f9f9a22b5b5ad212b3149f639ab7be1508e0670f43694ac17ea03dc"
+    },
+    {
+      "file": "models/industrial/factory_catwalk-stairs.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/catwalk-stairs.obj",
+      "sha256": "16d5295e3bdd789ba6ea430bde21661aed99056c8ab5e001c16fb247a683edb2"
+    },
+    {
+      "file": "models/industrial/factory_machine.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/machine.obj",
+      "sha256": "cbcaa56fec56f4b6b8910c370029234395847d48f05b0a091953ad0dc6ade2e4"
+    },
+    {
+      "file": "models/industrial/factory_machine-fortified.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/machine-fortified.obj",
+      "sha256": "f53d32ed0609b28e81d17bc798500c26d61fba4a9d711e3ae341f663e3bcd662"
+    },
+    {
+      "file": "models/industrial/factory_machine-bed.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/machine-bed.obj",
+      "sha256": "a2fb81462736d787dce1d05eb7ec756e4f6dc54ff697e00ac1a0eeffbad5beea"
+    },
+    {
+      "file": "models/industrial/factory_pipe-large.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/pipe-large.obj",
+      "sha256": "9ebafc23b0cd528016f026f7a2a6f1692470c40d78588a2e83947f1eef91b7a1"
+    },
+    {
+      "file": "models/industrial/factory_pipe-large-bend.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/pipe-large-bend.obj",
+      "sha256": "11d5c468f4f9411088bd987b71dc62db6d2a38345bee9e83742ff4991d9516e7"
+    },
+    {
+      "file": "models/industrial/factory_pipe-large-valve.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/pipe-large-valve.obj",
+      "sha256": "1f8c171d198a78e6025f915f04fae27e98ad3eb91cb0572dd884889a27dec2af"
+    },
+    {
+      "file": "models/industrial/factory_crane.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/crane.obj",
+      "sha256": "5906f58368d17ad060661e85ba061111a5c03d41ca255de8e216411277ddf3b3"
+    },
+    {
+      "file": "models/industrial/factory_crane-lift.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/crane-lift.obj",
+      "sha256": "c75ba7a48f6b909b3705022a88c48f98f354d0aa1f572f13b67122011c336322"
+    },
+    {
+      "file": "models/industrial/factory_hopper-high-round.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/hopper-high-round.obj",
+      "sha256": "17edf3ec643e74bf54424f3ffb611c493f4d409f21a2b74d931454467b88f537"
+    },
+    {
+      "file": "models/industrial/factory_conveyor-long.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/conveyor-long.obj",
+      "sha256": "bae913f9e6a810732488e7e7711cf7fb80bbb3586c738498644cfd44d77fe548"
+    },
+    {
+      "file": "models/industrial/factory_cog-a.obj",
+      "source": "https://kenney.nl/assets/factory-kit",
+      "archive_entry": "Models/OBJ format/cog-a.obj",
+      "sha256": "bdde1139c8f941f1a01035ced29d5b5f37fd0db978c63dbbed1b739142aa7b52"
+    },
+    {
+      "file": "models/industrial/city_building-a.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/building-a.obj",
+      "sha256": "cb25a917a2470d9b72a71e96fec19fe226283d19dcd1c572327f722011f3adf0"
+    },
+    {
+      "file": "models/industrial/city_building-c.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/building-c.obj",
+      "sha256": "28ab333cd25b3295259d1a701db8d9d9253d8c41edc689b6642a2308359db2e4"
+    },
+    {
+      "file": "models/industrial/city_building-h.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/building-h.obj",
+      "sha256": "6de2186ebb24020da0e491572f977e9081f985f7f4c0e7e99a930bd22da9ece3"
+    },
+    {
+      "file": "models/industrial/city_chimney-basic.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/chimney-basic.obj",
+      "sha256": "c279db2385060ffd55155ae6373d1120eaba745a4a38fa99de9afef68ebf4b3f"
+    },
+    {
+      "file": "models/industrial/city_chimney-large.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/chimney-large.obj",
+      "sha256": "f35a50c24a861d82ac60ba58d3381696fcb766e1bb264557217663310b8d046f"
+    },
+    {
+      "file": "models/industrial/city_detail-tank-large.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/detail-tank-large.obj",
+      "sha256": "9cc64320c90f0b33c0635ad5c3175b082e5d88ed934fab5855cb23b49774fb4d"
+    },
+    {
+      "file": "models/industrial/city_water-tower.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/water-tower.obj",
+      "sha256": "e8e286237a189361f01043d5937d7f52f0f5195ba5ec22e6c0d47770b8ac6eaa"
+    },
+    {
+      "file": "models/industrial/city_shipping-container-a.obj",
+      "source": "https://kenney.nl/assets/city-kit-industrial",
+      "archive_entry": "Models/OBJ format/shipping-container-a.obj",
+      "sha256": "ee8d15b2f4f4990b0933fe0285ea8e4351b0ed9294beebddd1feaf6cbc79465c"
+    },
+    {
+      "file": "textures/rustsea/dry_ground_01_diff.jpg",
+      "source": "https://polyhaven.com/a/dry_ground_01",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dry_ground_01/dry_ground_01_diff_1k.jpg",
+      "sha256": "75222fc97a82b635a09cf8f2891dd58bc42e49599b9fda920b2c50193fe85e9f"
+    },
+    {
+      "file": "textures/rustsea/dry_ground_01_nor_dx.jpg",
+      "source": "https://polyhaven.com/a/dry_ground_01",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dry_ground_01/dry_ground_01_nor_dx_1k.jpg",
+      "sha256": "c2d0d899b707ec29687d4b2907a24ae706b11e59bc681e99475a1d309d363355"
+    },
+    {
+      "file": "textures/rustsea/dry_ground_01_rough.jpg",
+      "source": "https://polyhaven.com/a/dry_ground_01",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/dry_ground_01/dry_ground_01_rough_1k.jpg",
+      "sha256": "1e2587819279786a45b3a6b766cd75cd571e7e524b787ebd7e534bc7f9bd143e"
+    },
+    {
+      "file": "textures/rustsea/gravelly_sand_diff.jpg",
+      "source": "https://polyhaven.com/a/gravelly_sand",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_diff_1k.jpg",
+      "sha256": "bc1624594ce807f04eaa023f6f9df93ffefd20904570cd46ca302b954ef80eec"
+    },
+    {
+      "file": "textures/rustsea/gravelly_sand_nor_dx.jpg",
+      "source": "https://polyhaven.com/a/gravelly_sand",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_nor_dx_1k.jpg",
+      "sha256": "b136c8ff283ceb6d3bb2387d4f94a3a0b06cce35e787f36cf91e581eec56b045"
+    },
+    {
+      "file": "textures/rustsea/gravelly_sand_rough.jpg",
+      "source": "https://polyhaven.com/a/gravelly_sand",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_rough_1k.jpg",
+      "sha256": "57188f62c17950f96a5f2b8ce11bc9776e2b5bff8eff5c903402d89553ba3654"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_04_diff.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_04",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_04/rusty_metal_04_diff_1k.jpg",
+      "sha256": "37c6757c5b6b2229f61423c7e5013f970e4dafb48070d35f53ed6d08958ed288"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_04_nor_dx.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_04",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_04/rusty_metal_04_nor_dx_1k.jpg",
+      "sha256": "f6db58c8394f4c4541f0812f1535d3b956e87cb64a98ed7a0fd5060080c970a8"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_04_rough.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_04",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_04/rusty_metal_04_rough_1k.jpg",
+      "sha256": "02c2fe5dfd5f4f7a692659261b8c99e103f33fb1a4c363c3e763542fae32d4fe"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_04_metal.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_04",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_04/rusty_metal_04_metal_1k.jpg",
+      "sha256": "090689c9cc3d30f4d1a89dd1160fb85cec04d3492f75695bdc83bbb80b6ad30f"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_grid_diff.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_grid",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_grid/rusty_metal_grid_diff_1k.jpg",
+      "sha256": "c98f16ed7a712922c80f5cf1c385eb3188c155b187256e531f6146d6a535f779"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_grid_nor_dx.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_grid",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_grid/rusty_metal_grid_nor_dx_1k.jpg",
+      "sha256": "6aef8d0eef90d3dfb5478d82604eb92095d507356f18b8bcd5b55d8af4d6182e"
+    },
+    {
+      "file": "textures/rustsea/rusty_metal_grid_rough.jpg",
+      "source": "https://polyhaven.com/a/rusty_metal_grid",
+      "download": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/rusty_metal_grid/rusty_metal_grid_rough_1k.jpg",
+      "sha256": "418b589398a542eba5bea1827e6488e3742b91c83a05d9baa00c10970b1236c1"
+    }
+  ],
+  "external_files": [],
+  "canonical_materials": "materials/rustsea.ymat.xml",
+  "compiled_materials": "materials/rustsea.ymat",
+  "notes": [
+    "Kenney: https://kenney.nl/assets/factory-kit; https://kenney.nl/assets/city-kit-industrial",
+    "Poly Haven texture normals use nor_dx (DirectX green-channel convention).",
+    "Original source OBJ meshes are left geometrically unmodified.",
+    "The generator uses visually separate models and keeps existing collision geometry.",
+    "CC0 sources are included in the game project only; no copyrighted film art."
+  ]
+}

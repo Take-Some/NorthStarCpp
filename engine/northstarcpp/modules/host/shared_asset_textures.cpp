@@ -87,10 +87,10 @@ static std::vector<Texture> parse_texture_dictionary(
     std::vector<Texture> result;
     std::set<std::string> seen;
     std::uint64_t expected_mip = 0;
-    // A texture dictionary may deduplicate identical encoded byte ranges.
-    // Distinct ranges must never overlap; exact aliases are safe and common
-    // in large character dictionaries (including legacy character atlases).
-    std::map<std::uint64_t,std::uint64_t> payload_ranges;
+    // Validate the actual mip byte ranges globally. Some imported YTDs
+    // reuse identical tail blocks while their declared per-texture spans
+    // overlap, so comparing outer spans would reject valid dictionaries.
+    std::map<std::uint64_t,std::uint64_t> occupied_mip_ranges;
     for (std::size_t i = 0; i < file.entries; ++i) {
         auto const entry = table + entries + i * 64;
         auto const start = body.integer(entry + 8, 8);
@@ -110,25 +110,17 @@ static std::vector<Texture> parse_texture_dictionary(
             count <= mip_count - mip_start && (color_space == 1 || color_space == 2),
             "Invalid NETD texture entry");
         require(size > 0, "Empty NETD payload range");
-        auto next=payload_ranges.lower_bound(start);
-        if(next!=payload_ranges.end() && next->first==start) {
-            require(next->second==size, "Conflicting NETD aliased range");
-        } else {
-            if(next!=payload_ranges.end())
-                require(start+size<=next->first, "Overlapping NETD payload ranges");
-            if(next!=payload_ranges.begin()) {
-                auto previous=std::prev(next);
-                require(previous->first+previous->second<=start,
-                        "Overlapping NETD payload ranges");
-            }
-            payload_ranges.emplace_hint(next,start,size);
-        }
         auto name = body.string(table + names + name_offset, length);
         validate_name(name);
         require(seen.insert(name).second, "Duplicate YTD texture name");
         Texture texture{std::move(name), body.integer(entry, 8), static_cast<std::uint16_t>(format),
             color_space == 2, {}, {}};
-        auto next_offset = start;
+        std::uint64_t first_mip=payload_size;
+        std::uint64_t last_mip=0;
+        // Build a tightly packed per-texture copy. Imported dictionaries may
+        // reference shared blocks far away from the first mip; retaining the
+        // entire outer span wastes memory and incorrectly requires contiguous
+        // mip order.
         for (std::size_t j = 0; j < count; ++j) {
             auto const mip = table + mips + (mip_start + j) * 32;
             auto const offset = body.integer(mip, 8);
@@ -137,28 +129,72 @@ static std::vector<Texture> parse_texture_dictionary(
                 ((width + 3) / 4) * (format == 101 || format == 102 ? 8 : 16);
             auto const rows = (format == 1 || format == 2) ? height : (height + 3) / 4;
             require(format == 1 || format == 2 || (format >= 101 && format <= 105), "Unsupported NETD texture format");
-            require(offset == next_offset && offset - start <= size &&
+            // Validate every byte range before any pointer or subtraction.
+            require(offset >= start && offset - start <= size &&
                 length_bytes <= size - (offset - start) && length_bytes == row_bytes * rows &&
                 body.integer(mip + 16, 4) == width && body.integer(mip + 20, 4) == height &&
                 body.integer(mip + 24, 4) == j && body.integer(mip + 28, 4) == 0,
                 "Invalid NETD mip layout");
-            texture.mips.push_back({static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height),
-                static_cast<std::size_t>(offset - start), static_cast<std::size_t>(length_bytes)});
-            next_offset += length_bytes;
+            auto const next_range=occupied_mip_ranges.lower_bound(offset);
+            if(next_range!=occupied_mip_ranges.end() && next_range->first==offset) {
+                require(next_range->second==length_bytes,
+                        "Conflicting NETD mip alias size");
+            } else {
+                require(next_range==occupied_mip_ranges.end() ||
+                        length_bytes<=next_range->first-offset,
+                        "Overlapping NETD mip block ranges");
+                if(next_range!=occupied_mip_ranges.begin()) {
+                    auto const previous=std::prev(next_range);
+                    require(previous->first+previous->second<=offset,
+                            "Overlapping NETD mip block ranges");
+                }
+                occupied_mip_ranges.emplace_hint(next_range,offset,length_bytes);
+            }
+            first_mip=std::min(first_mip,offset);
+            last_mip=std::max(last_mip,offset+length_bytes);
+            // The runtime needs a compact texture and relative mip offsets;
+            // it does not need the original shared/padded source span.
+            auto const compact_offset=texture.data.size();
+            require(compact_offset<=payload_size &&
+                    length_bytes<=payload_size-compact_offset,
+                    "NETD compact texture exceeds dictionary payload");
+            auto const* encoded=body.at(payload+offset,length_bytes);
+            texture.data.insert(texture.data.end(),encoded,encoded+length_bytes);
+            texture.mips.push_back({static_cast<std::uint32_t>(width),
+                static_cast<std::uint32_t>(height),compact_offset,
+                static_cast<std::size_t>(length_bytes)});
             if (j + 1 < count)
                 require(width > 1 || height > 1, "NETD mip chain exceeds texture dimensions");
             width = width > 1 ? width / 2 : 1;
             height = height > 1 ? height / 2 : 1;
         }
-        require(next_offset == start + size, "NETD mip bytes differ from entry size");
-        auto const* data = body.at(payload + start, size);
-        texture.data.assign(data, data + size);
+        // Outer entries may include older shared mip blocks, but must
+        // precisely span all of their own referenced blocks.
+        require(first_mip==start && last_mip==start+size,
+                "NETD entry bounds do not match referenced mip blocks");
         if(legacy_bc3_mislabeled_bc7(texture))
             texture.format_id=103; // Correct effective GPU/software codec.
         expected_mip += count;
         result.push_back(std::move(texture));
     }
     require(expected_mip == mip_count, "Unclaimed NETD mip records");
+    // Enforce complete coverage of the payload with unique, non-overlapping
+    // encoded mip blocks and zero-only alignment gaps (<16 bytes). This
+    // preserves corruption detection even when entries have shared spans.
+    std::uint64_t covered=0;
+    for(auto const& [start,length]:occupied_mip_ranges) {
+        require(start>=covered, "Overlapping NETD mip block ranges");
+        auto const gap=start-covered;
+        require(gap<16, "Unexpected NETD mip payload gap");
+        if(gap) {
+            auto const* padding=body.at(payload+covered,gap);
+            require(std::all_of(padding,padding+gap,
+                [](std::uint8_t byte){return byte==0;}),
+                "Nonzero NETD mip padding");
+        }
+        covered=start+length;
+    }
+    require(covered==payload_size, "NETD payload has unclaimed trailing bytes");
     return result;
 }
 

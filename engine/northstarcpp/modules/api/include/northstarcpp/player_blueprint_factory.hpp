@@ -1,5 +1,5 @@
 #pragma once
-#include <northstarcpp/player_blueprint_controller.hpp>
+#include <northstarcpp/scene_pawn.hpp>
 #include <northstarcpp/player_blueprint_camera.hpp>
 #include <northstarcpp/player_blueprint_visual.hpp>
 #include <northstarcpp/player_blueprint_animation.hpp>
@@ -20,15 +20,8 @@ inline std::optional<Layout> layout(Scene const& scene,std::uint64_t pawn) {
             if(find(scene,id,player_character::motor_type))result.motor=id;
         }
     }
-    for(auto const& record:scene.components)
-        if(record.type==controller_type&&record.version==version) {
-            auto binding=deserialize_controller(record.payload);
-            if(binding&&binding->first==pawn&&
-               (!result.controller||binding->second)) {
-                result.controller=record.entity_id;
-                break;
-            }
-        }
+    if(auto const* controller=controller_for_pawn(scene,pawn))
+        result.controller=controller->entity_id;
     return result;
 }
 inline Layout create(Scene& scene,std::string name,Vector3 position,
@@ -45,14 +38,11 @@ inline Layout create(Scene& scene,std::string name,Vector3 position,
     for(float c:{position.x,position.y,position.z})
         if(!std::isfinite(c)||std::abs(c)>1000000.f)
             throw std::invalid_argument("Player position out of scene bounds");
-    if(auto_possess)
-        for(auto const& entry:scene.components)
-            if(entry.type==player_character::pawn_type &&
-               entry.version==player_character::version&&
-               player_character::detail::pawn_valid(nullptr,entry.version,
-                   entry.payload.data(),entry.payload.size()) &&
-               player_character::detail::get32(entry.payload.data(),4))
-                throw std::invalid_argument("Scene already owns a local Player Pawn");
+    if(auto_possess) {
+        auto const startup=scene_pawn::startup_pawn(scene);
+        if(startup.id || startup.conflict!=scene_pawn::StartupConflict::None)
+            throw std::invalid_argument("Scene already owns a local Player Pawn");
+    }
     Scene candidate=scene;
     // Stable identity order: Controller, Pawn, Motor, Camera, SkeletalMesh.
     Layout result{top+2,top+1,top+4,top+5,top+3};

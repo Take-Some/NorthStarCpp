@@ -1,5 +1,7 @@
 # NorthStarCpp — YMAT kind 30 loading and Win32 error dialog stabilization
 
+> **Document status:** Historical incident (2026-11-14). The JSON-kind-30 loader described below was subsequently removed. Current canonical material format and regression evidence: [XML YMAT Migration](YMAT_XML_ONLY_MIGRATION_2026-11-18.md).
+
 Date: 2026-11-14
 Status: fixed in C++ source and rebuilt the isolated Release QA Player; installed production distribution unchanged.
 

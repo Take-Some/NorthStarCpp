@@ -38,11 +38,27 @@ int main() {
     mixer.mix(output.data(),block_frames);
     if(mixer.voice_count()!=0 || mixer.stop(resampled)) return 8;
 
-    // Explicit voice budget with deterministic oldest-first replacement.
-    for(std::size_t i=0;i<max_voices+1;++i) {
+    // Full budget must never steal a still-playing voice.
+    std::uint64_t earliest=0;
+    for(std::size_t i=0;i<max_voices;++i) {
         auto id=mixer.play(pcm,position);
         if(id==0) return 9;
+        if(i==0)earliest=id;
     }
-    if(mixer.voice_count()!=max_voices) return 10;
+    if(mixer.play(pcm,position)!=0 || mixer.voice_count()!=max_voices)
+        return 10;
+    if(!mixer.stop(earliest) || mixer.voice_count()!=max_voices-1)
+        return 11;
+    if(!mixer.play(pcm,position))return 12;
+    mixer.stop_all();
+    std::vector<std::int16_t> soundtrack(34u*1024*1024);
+    soundtrack.front()=5000;
+    NorthStarPcm16 long_pcm{soundtrack.data(),
+        static_cast<std::uint32_t>(soundtrack.size()/2),48000,2};
+    auto const long_voice=mixer.play(long_pcm,normal);
+    if(!long_voice)return 13;
+    mixer.mix(output.data(),block_frames);
+    if(output[0]<=0 || mixer.voice_count()!=1 || !mixer.stop(long_voice))
+        return 14;
     return 0;
 }

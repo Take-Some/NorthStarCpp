@@ -189,8 +189,8 @@ class GameReleaseTests(unittest.TestCase):
         (self.project/"scripts/main.js").write_text("engine.on('start',()=>{});",encoding="utf8")
         count=copy_game_scripts(self.project,self.root/"game",self.scene)
         self.assertEqual(count,2)
-        self.assertTrue((self.root/"game/scripts/behaviors/cube.js").exists())
-        self.assertTrue((self.root/"game/scripts/main.js").exists())
+        self.assertTrue((self.root/"game/assets/scripts/behaviors/cube.js").exists())
+        self.assertTrue((self.root/"game/assets/scripts/main.js").exists())
 
     def test_reject_missing_script_component_resource(self):
         self.scene.write_text(
@@ -202,8 +202,8 @@ class GameReleaseTests(unittest.TestCase):
 
     def test_script_manifest_requires_provider(self):
         pkg=self.fake_release()
-        (pkg/"game/scripts").mkdir()
-        (pkg/"game/scripts/main.js").write_text("engine.on('start',()=>{});",encoding="utf8")
+        (pkg/"game/assets/scripts").mkdir(parents=True)
+        (pkg/"game/assets/scripts/main.js").write_text("engine.on('start',()=>{});",encoding="utf8")
         providers=[]
         for cap in sorted(CAPABILITIES):
             providers.append({"capability":cap,"provider":"test",

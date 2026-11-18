@@ -11,8 +11,16 @@ Device::Device(Mixer& mixer, std::mutex& mutex) : mixer_(mixer), mutex_(mutex) {
     format.wBitsPerSample = 16;
     format.nBlockAlign = 4;
     format.nAvgBytesPerSec = sample_rate*4;
-    if (waveOutOpen(&wave_, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        wave_ = nullptr; // Headless / missing audio device is nonfatal.
+    // The old Sleep(2) loop starved 5.3ms buffers whenever Windows extended
+    // a timer sleep to its default ~15.6ms scheduler quantum.
+    completion_event_=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    if(!completion_event_)return;
+    if(waveOutOpen(&wave_,WAVE_MAPPER,&format,
+                   reinterpret_cast<DWORD_PTR>(completion_event_),
+                   0,CALLBACK_EVENT)!=MMSYSERR_NOERROR) {
+        wave_=nullptr;
+        CloseHandle(completion_event_);
+        completion_event_=nullptr;
         return;
     }
     for (std::size_t i = 0; i < count; ++i) {
@@ -24,6 +32,8 @@ Device::Device(Mixer& mixer, std::mutex& mutex) : mixer_(mixer), mutex_(mutex) {
                 waveOutUnprepareHeader(wave_,&headers_[j],sizeof(WAVEHDR));
             waveOutClose(wave_);
             wave_=nullptr;
+            CloseHandle(completion_event_);
+            completion_event_=nullptr;
             return;
         }
         prepared_[i] = true;
@@ -39,6 +49,8 @@ Device::Device(Mixer& mixer, std::mutex& mutex) : mixer_(mixer), mutex_(mutex) {
             if (prepared_[i]) waveOutUnprepareHeader(wave_,&headers_[i],sizeof(WAVEHDR));
         waveOutClose(wave_);
         wave_=nullptr;
+        CloseHandle(completion_event_);
+        completion_event_=nullptr;
         available_=false;
         throw;
     }
@@ -46,6 +58,9 @@ Device::Device(Mixer& mixer, std::mutex& mutex) : mixer_(mixer), mutex_(mutex) {
 }
 Device::~Device() {
     running_.store(false);
+#ifdef _WIN32
+    if(completion_event_)SetEvent(completion_event_);
+#endif
     if (worker_.joinable()) worker_.join();
 #ifdef _WIN32
     if (wave_) {
@@ -54,10 +69,13 @@ Device::~Device() {
             if (prepared_[i]) waveOutUnprepareHeader(wave_,&headers_[i],sizeof(WAVEHDR));
         waveOutClose(wave_);
     }
+    if(completion_event_)CloseHandle(completion_event_);
 #endif
 }
 void Device::run() {
 #ifdef _WIN32
+    // Protect audio deadlines without starving render/game threads.
+    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_HIGHEST);
     while (running_.load()) {
         bool submitted = false;
         for (std::size_t i=0;i<count && running_.load();++i) {
@@ -75,8 +93,9 @@ void Device::run() {
             queued_[i] = true;
             submitted = true;
         }
-        if (!submitted)
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if(!submitted && running_.load())
+            // Wake when the device finishes a buffer; no coarse polling.
+            WaitForSingleObject(completion_event_,10);
     }
 #endif
 }

@@ -131,14 +131,18 @@ int main(int argc, char** argv)
                    entry.status == Project::Status::ready;
         })) return 21;
 
+        // Project identity is the manifest-owning directory, not main.nscn.
         auto broken = catalog.duplicate(duplicate.directory, L"Missing Scene", external_root);
         fs::remove(broken.startup_scene);
-        if (catalog.inspect(broken.directory).status != Project::Status::missing_scene)
-            return 18;
-        rejected = false;
-        try { catalog.opened(broken.directory); }
-        catch (std::exception const&) { rejected = true; }
-        if (!rejected) return 19;
+        auto const without_scene=catalog.inspect(broken.directory);
+        if(without_scene.status!=Project::Status::ready ||
+           !without_scene.startup_scene.empty())return 18;
+        catalog.opened(broken.directory);
+        entries=catalog.list();
+        if(!std::any_of(entries.begin(),entries.end(),[&](auto const& entry) {
+            return entry.directory==broken.directory &&
+                   entry.status==Project::Status::ready;
+        }))return 19;
 
         fs::remove_all(root, ignored);
         return 0;

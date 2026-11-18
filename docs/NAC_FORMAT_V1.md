@@ -22,7 +22,7 @@ native scene/material assets.
 | 14 | u16 flags | 0 |
 | 16 | u64 body offset | 128 + metadata byte size |
 | 24 | u64 compressed bytes | compressed audio body |
-| 32 | u64 expanded bytes | expanded PCM body, <=64 MiB |
+| 32 | u64 expanded bytes | expanded PCM body, ≤256 MiB |
 | 40 | u64 entry count | number of tracks, 1..1024 |
 | 48 | u64 metadata offset | 128 |
 | 56 | u64 metadata bytes | bounded JSON dictionary |
@@ -48,7 +48,8 @@ little-endian segments. Codec 1 denotes signed PCM16. CRC32 verifies
 each individual track in addition to the outer NEF8 BLAKE3.
 
 Limits: 1..1024 tracks per pack; mono/stereo 8..192 kHz; max 47 UTF-8
-name bytes; unique track names/IDs; <=64 MiB total expanded PCM bytes.
+name bytes, unique track names and IDs, and up to 256 MiB of total expanded PCM.
+The encoded NEF8 file also fits within the VFS limit of 256 MiB.
 Loop end is exclusive (0 means the end of the track).
 
 ## Runtime, Asset Browser and performance

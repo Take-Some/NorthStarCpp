@@ -1,0 +1,12 @@
+{
+  "schema": "northstar.character.v1",
+  "id": "characters/isaac",
+  "display_name": "Isaac",
+  "model": "characters/isaac/models/isaac.ydd",
+  "skeleton": "characters/isaac/models/isaac.ymt",
+  "appearance": {
+    "material": "characters/isaac/materials/isaac.ymat",
+    "textures": "characters/isaac/textures/isaac.ytd"
+  },
+  "animations": []
+}

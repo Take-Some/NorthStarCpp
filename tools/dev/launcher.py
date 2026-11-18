@@ -48,9 +48,13 @@ def native_app_state(root: Path, cfg: dict, target: str, project: Project | None
         kind = cfg.get("default_build_type", "Debug")
         if kind not in ("Debug", "Release", "RelWithDebInfo"):
             raise LauncherError("Invalid default build type.")
-        out = relative_path(root, cfg.get("build_root", "out") + "/gcc-" + kind.lower(),
+        out = relative_path(root, cfg.get("build_root", "out") + "/build",
                             "Native build directory")
         exe = out / (WINDOWS_APP_TARGETS[target] + ".exe")
+        from tools.build_layout import configured_build_type
+        actual = configured_build_type(out)
+        if actual != kind:
+            return RuntimeState(False, "Canonical out/build has a different configuration: {}. Run CMake configure for {}.".format(actual,kind))
         if not exe.is_file():
             return RuntimeState(False, f"Build the NorthStarCpp {target} with CMake/GCC first.")
         if project is None:
@@ -135,7 +139,7 @@ def status(root: Path = ROOT, cfg: dict | None = None) -> dict[str, Any]:
         out = build_path(cfg, cfg.get("default_build_type", "Debug"))
     else:
         out = root / cfg.get("build_root", "out") / (
-            "gcc-" + cfg.get("default_build_type", "Debug").lower())
+            "build")
     state = runtime_state(root, cfg)
     return {
         "engine": "NorthStarCpp",

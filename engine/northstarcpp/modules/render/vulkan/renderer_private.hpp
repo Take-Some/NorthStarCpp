@@ -22,12 +22,15 @@
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_timing_api.h>
+#include <northstarcpp/render_sky_api.h>
 #include <northstarcpp/render_device_api.h>
 #include <northstarcpp/render_pick_api.h>
 #include <northstarcpp/render_shader_reload_api.h>
 #include "../shared/render_graph.hpp"
+#include "renderer_frame_diagnostics.hpp"
 #include "../shared/gbuffer_semantics.hpp"
 #include "../shared/temporal_history.hpp"
+#include "../shared/temporal_instance_history.hpp"
 #include "../shared/tiled_light_cache.hpp"
 #include "../shared/render_graph_vulkan_executor.hpp"
 #include <array>
@@ -35,6 +38,9 @@
 #include <chrono>
 #include <deque>
 #include <future>
+#include <filesystem>
+#include <chrono>
+#include <mutex>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -62,6 +68,7 @@ struct MaterialSource {
     std::array<std::uint32_t,5> widths{},heights{};
     float roughness=1.f,metallic=0.f;
     std::uint32_t unlit=0;
+    bool sky_cloud_fields=false; // Packed cloud/flow data is linear UNORM.
     std::uint32_t blend_mode=0;
     float alpha_cutoff=0.5f;
     std::string variant_prefix;
@@ -110,6 +117,9 @@ struct Renderer {
     Renderer(const Renderer&)=delete;
     Renderer& operator=(const Renderer&)=delete;
     void draw(const NorthStarRenderFrame& frame);
+    void set_temporal_instances(const NorthStarRenderTemporalInstance* items, std::uint32_t count) {
+        temporal_instances_.stage(items,count);
+    }
     int pick_cube(std::uint32_t x,std::uint32_t y);
     void set_pick_triangles(const NorthStarRenderPickVertex*,std::uint32_t);
     void set_pick_cubes(const std::uint64_t*,std::uint32_t);
@@ -137,6 +147,13 @@ struct Renderer {
     bool shader_reload_status(const char* ref,NorthStarShaderReloadStatus& status) const;
     void set_lights(const NorthStarRenderLight* lights,std::uint32_t count);
     void set_sky(const NorthStarSky* source);
+    void set_gpu_sky_uniforms(const NorthStarGpuSkyUniforms* source);
+    // Capture requests submit an image->staging copy with the next frame.
+    // read_capture() polls the already-submitted fence without waiting.
+    void request_capture();
+    bool read_capture(std::uint8_t* pixels,std::uint32_t capacity,
+                      std::uint32_t* width,std::uint32_t* height);
+    void complete_capture();
     void set_ui_hover_fx(const NorthStarRenderUiHoverFx* fx) noexcept {
         ui_hover_fx_=fx?*fx:NorthStarRenderUiHoverFx{};
     }
@@ -151,6 +168,11 @@ private:
     void create_swapchain();
     void destroy_swapchain() noexcept;
     void create_pipeline();
+    void create_pipeline_cache();
+    void save_pipeline_cache() noexcept;
+    VkResult create_cached_graphics_pipelines(
+        std::uint32_t count,const VkGraphicsPipelineCreateInfo* infos,
+        VkPipeline* result);
     void destroy_pipeline() noexcept;
     void create_vertex_buffer();
     void destroy_vertex_buffer() noexcept;
@@ -188,6 +210,24 @@ private:
     void destroy_readback() noexcept;
     void create_depth();
     void create_deferred_resources();
+    void record_ssao_pass(VkCommandBuffer command);
+    void create_ssao_resource();
+    void create_hdr_resources();
+    void create_hdr_forward_graph();
+    void destroy_hdr_resources() noexcept;
+    void create_hdr_pipelines();
+    void record_hdr_luminance(VkCommandBuffer cmd);
+    void record_hdr_luminance_copy(VkCommandBuffer cmd);
+    void collect_hdr_exposure();
+    void record_hdr_velocity(VkCommandBuffer command);
+    void record_hdr_bloom(VkCommandBuffer command,unsigned level);
+    void record_hdr_compositor(VkCommandBuffer command,std::uint32_t image);
+    void create_csm_resources();
+    void destroy_csm_resources() noexcept;
+    void create_csm_pipelines();
+    void record_csm_pass(VkCommandBuffer command);
+    void update_csm_matrices();
+    void destroy_ssao_resource() noexcept;
     void destroy_deferred_resources() noexcept;
     void create_deferred_pipelines();
     void record_gbuffer(VkCommandBuffer command,const NorthStarRenderFrame& frame);
@@ -213,6 +253,9 @@ private:
     VkSurfaceKHR surface_=VK_NULL_HANDLE;
     VkPhysicalDevice physical_=VK_NULL_HANDLE;
     VkDevice device_=VK_NULL_HANDLE;
+    VkPipelineCache pipeline_cache_=VK_NULL_HANDLE;
+    std::filesystem::path pipeline_cache_path_;
+    std::mutex pipeline_cache_mutex_;
     VkQueue queue_=VK_NULL_HANDLE;
     std::uint32_t family_=0;
     VkSwapchainKHR swapchain_=VK_NULL_HANDLE;
@@ -222,7 +265,56 @@ private:
     // authored YDD/YDR and skinned material paths have deferred PSOs.
     bool deferred_enabled_=false;
     bool ssao_enabled_=false;
+    // Opt-in screen-space sun contact shadows (not a replacement for CSM).
+    bool contact_shadows_enabled_=false;
+    bool csm_enabled_=false;
+    bool hdr_enabled_=false;
+    bool auto_exposure_enabled_=false;
+    bool velocity_enabled_=false;
+    bool velocity_debug_=false;
+    bool exposure_pending_=false;
+    float adapted_exposure_ev_=0.f;
+    float exposure_speed_up_=1.5f;
+    float exposure_speed_down_=2.5f;
+    std::chrono::steady_clock::time_point exposure_last_frame_{};
+    static constexpr std::uint32_t luminance_dim_=8;
+    VkImage luminance_image_=VK_NULL_HANDLE;
+    VkDeviceMemory luminance_memory_=VK_NULL_HANDLE;
+    VkImageView luminance_view_=VK_NULL_HANDLE;
+    VkBuffer luminance_readback_buffer_=VK_NULL_HANDLE;
+    VkDeviceMemory luminance_readback_memory_=VK_NULL_HANDLE;
+    VkDescriptorSet luminance_descriptor_set_=VK_NULL_HANDLE;
+    VkPipeline luminance_pipeline_=VK_NULL_HANDLE;
+    static constexpr VkFormat hdr_format_=VK_FORMAT_R16G16B16A16_SFLOAT;
+    static constexpr unsigned bloom_levels_=4;
+    float bloom_strength_=0.18f;
+    float bloom_threshold_=1.05f;
+    float bloom_soft_knee_=0.50f;
+    unsigned bloom_quality_=3; // 0=off, 1=low, 2=medium, 3=high
+    unsigned active_bloom_levels_=bloom_levels_;
+    VkImage velocity_image_=VK_NULL_HANDLE;
+    VkDeviceMemory velocity_memory_=VK_NULL_HANDLE;
+    VkImageView velocity_view_=VK_NULL_HANDLE;
+    VkPipeline velocity_pipeline_=VK_NULL_HANDLE;
+    VkImage hdr_scene_image_=VK_NULL_HANDLE;
+    VkDeviceMemory hdr_scene_memory_=VK_NULL_HANDLE;
+    VkImageView hdr_scene_view_=VK_NULL_HANDLE;
+    std::array<VkImage,bloom_levels_> bloom_images_{};
+    std::array<VkDeviceMemory,bloom_levels_> bloom_memories_{};
+    std::array<VkImageView,bloom_levels_> bloom_views_{};
+    std::array<VkExtent2D,bloom_levels_> bloom_extents_{};
+    VkSampler hdr_sampler_=VK_NULL_HANDLE;
+    VkDescriptorSetLayout bloom_set_layout_=VK_NULL_HANDLE;
+    VkDescriptorSetLayout composite_set_layout_=VK_NULL_HANDLE;
+    VkDescriptorPool hdr_descriptor_pool_=VK_NULL_HANDLE;
+    std::array<VkDescriptorSet,bloom_levels_> bloom_descriptor_sets_{};
+    VkDescriptorSet composite_descriptor_set_=VK_NULL_HANDLE;
+    VkPipelineLayout bloom_pipeline_layout_=VK_NULL_HANDLE;
+    VkPipelineLayout composite_pipeline_layout_=VK_NULL_HANDLE;
+    VkPipeline bloom_pipeline_=VK_NULL_HANDLE;
+    VkPipeline composite_pipeline_=VK_NULL_HANDLE;
     bool gbuffer_v2_=false;
+    float height_fog_density_=0.f;
     NorthStarRenderPostFxSettings film_look_=northstarcpp::render::neutral_postfx();
     std::uint32_t film_frame_=0;
     std::array<VkFormat,4> gbuffer_formats_{{
@@ -244,6 +336,30 @@ private:
     VkDescriptorSet gbuffer_set_=VK_NULL_HANDLE;
     VkPipeline gbuffer_pipeline_=VK_NULL_HANDLE;
     VkPipeline deferred_resolve_pipeline_=VK_NULL_HANDLE;
+    VkPipeline ssao_pipeline_=VK_NULL_HANDLE;
+    VkImage ssao_image_=VK_NULL_HANDLE;
+    VkDeviceMemory ssao_memory_=VK_NULL_HANDLE;
+    VkImageView ssao_view_=VK_NULL_HANDLE;
+    VkExtent2D ssao_extent_{};
+    static constexpr std::uint32_t csm_cascades_=3;
+    static constexpr std::uint32_t csm_resolution_=1024;
+    struct alignas(16) CsmUniform {
+        float matrices[csm_cascades_][16]{};
+        float splits[4]{};
+    } csm_uniform_{};
+    VkImage csm_image_=VK_NULL_HANDLE;
+    VkDeviceMemory csm_image_memory_=VK_NULL_HANDLE;
+    VkImageView csm_array_view_=VK_NULL_HANDLE;
+    std::array<VkImageView,csm_cascades_> csm_layer_views_{};
+    VkSampler csm_sampler_=VK_NULL_HANDLE;
+    VkBuffer csm_buffer_=VK_NULL_HANDLE;
+    VkDeviceMemory csm_buffer_memory_=VK_NULL_HANDLE;
+    VkDescriptorSetLayout csm_descriptor_layout_=VK_NULL_HANDLE;
+    VkDescriptorPool csm_descriptor_pool_=VK_NULL_HANDLE;
+    VkDescriptorSet csm_descriptor_set_=VK_NULL_HANDLE;
+    VkPipelineLayout csm_pipeline_layout_=VK_NULL_HANDLE;
+    VkPipeline csm_primitive_pipeline_=VK_NULL_HANDLE;
+    VkPipeline csm_material_pipeline_=VK_NULL_HANDLE;
     VkPipelineLayout deferred_resolve_layout_=VK_NULL_HANDLE;
     VkImage depth_image_=VK_NULL_HANDLE;
     VkDeviceMemory depth_memory_=VK_NULL_HANDLE;
@@ -262,14 +378,17 @@ private:
     double timestamp_period_ns_=0.0;
     std::uint32_t timestamp_valid_bits_=0;
     NorthStarRenderTimingStats last_timing_{};
+    VulkanFrameDiagnostics diagnostics_;
     bool timing_pending_=false;
     void collect_completed_gpu_timing();
     northstarcpp::render::TemporalHistoryTracker temporal_tracker_;
     northstarcpp::render::TemporalFrameState temporal_frame_{};
+    northstarcpp::render::TemporalInstanceHistory temporal_instances_;
     VkShaderModule vertex_shader_=VK_NULL_HANDLE;
     VkShaderModule fragment_shader_=VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_=VK_NULL_HANDLE;
     VkPipeline pipeline_=VK_NULL_HANDLE;
+    VkPipeline pipeline_hdr_=VK_NULL_HANDLE;
     VkPipeline pick_pipeline_=VK_NULL_HANDLE;
     VkShaderModule material_vertex_shader_=VK_NULL_HANDLE;
     VkShaderModule material_fragment_shader_=VK_NULL_HANDLE;
@@ -303,12 +422,29 @@ private:
     VkDeviceMemory material_vertices_memory_=VK_NULL_HANDLE;
     VkBuffer lights_buffer_=VK_NULL_HANDLE;
     VkDeviceMemory lights_memory_=VK_NULL_HANDLE;
+    VkBuffer sky_uniform_buffer_=VK_NULL_HANDLE;
+    VkDeviceMemory sky_uniform_memory_=VK_NULL_HANDLE;
+    NorthStarGpuSkyUniforms gpu_sky_uniforms_{};
     std::vector<NorthStarRenderLight> dynamic_lights_;
     bool lights_dirty_=true;
     std::unordered_map<std::uint64_t,MaterialTextureGpu> material_texture_cache_;
     std::vector<MaterialSource> material_sources_;
+    // Sky is a regular unlit textured material, kept separate from the
+    // authored batches and rendered camera-relative at background depth.
+    // A changed sky is staged once; ordinary frames move the retained mesh.
+    MaterialSource sky_pending_source_;
+    bool sky_enabled_=false,sky_pending_=false;
+    std::size_t material_sky_index_=static_cast<std::size_t>(-1);
     std::vector<MaterialClipVertex> material_frame_vertices_;
     std::vector<MaterialDraw> material_draws_;
+    struct TransparentTriangle {
+        float distance=0.f;
+        std::size_t draw_id=0u;
+        std::uint32_t first=0u;
+    };
+    std::vector<TransparentTriangle> translucent_triangles_scratch_;
+    std::vector<MaterialClipVertex> translucent_vertices_scratch_;
+    std::vector<MaterialDraw> translucent_draws_scratch_;
     std::vector<VkDescriptorSet> material_sets_;
     std::vector<SkinSource> skinned_sources_;
     std::vector<SkinDraw> skin_draws_;
@@ -320,6 +456,8 @@ private:
     void destroy_skin_buffer(SkinBuffer& buffer) noexcept;
     SkinBuffer skin_input_,skin_output_,skin_palette_;
     VkDeviceSize skin_vertex_count_=0,skin_palette_floats_=0;
+    // Immutable skinned mesh topology is uploaded only when it actually changes.
+    bool skin_geometry_dirty_=true;
     VkDescriptorSetLayout skin_set_layout_=VK_NULL_HANDLE;
     VkDescriptorPool skin_descriptor_pool_=VK_NULL_HANDLE;
     VkDescriptorSet skin_set_=VK_NULL_HANDLE;
@@ -336,6 +474,7 @@ private:
     VkShaderModule world_vs_=VK_NULL_HANDLE,world_fs_=VK_NULL_HANDLE;
     VkPipelineLayout world_pipeline_layout_=VK_NULL_HANDLE;
     VkPipeline world_pipeline_=VK_NULL_HANDLE;
+    VkPipeline world_pipeline_hdr_=VK_NULL_HANDLE;
     bool material_textures_dirty_=true;
     // Full-detail native vehicles are never downsampled to satisfy a GPU cap.
     // MaterialClipVertex is 80 bytes; 8M input vertices need up to 640 MiB.
@@ -347,6 +486,10 @@ private:
     VkBuffer readback_buffer_=VK_NULL_HANDLE;
     VkDeviceMemory readback_memory_=VK_NULL_HANDLE;
     VkDeviceSize readback_capacity_=0;
+    bool capture_requested_=false;
+    bool capture_inflight_=false;
+    std::uint32_t capture_width_=0,capture_height_=0;
+    std::vector<std::uint8_t> capture_rgba_;
     static constexpr VkDeviceSize max_vertex_bytes_=16ull*1024*1024;
     std::vector<NorthStarRenderTriangleVertex> scene_;
     std::vector<ColoredVertex> frame_vertices_;
@@ -377,7 +520,7 @@ private:
     std::uint64_t minimum_pick_generation_=0;
     void destroy_async_pick() noexcept;
     std::uint32_t render_vertices_=0;
-    std::array<float,4> sky_clear_{0.037f,0.055f,0.09f,1.f};
+    std::array<float,4> sky_clear_{0.055f,0.075f,0.105f,1.f};
     // Native Vulkan RGBA8 engine.ui compositor, independent of world materials.
     std::vector<std::uint8_t> ui_cpu_rgba_;
     NorthStarRenderUiHoverFx ui_hover_fx_{};
@@ -397,6 +540,7 @@ private:
     VkPipelineLayout ui_pipeline_layout_=VK_NULL_HANDLE;
     VkPipeline ui_pipeline_=VK_NULL_HANDLE;
     northstarcpp::render::RenderGraphPlan graph_plan_;
+    northstarcpp::render::RenderGraphPlan hdr_forward_graph_plan_;
     northstarcpp::render::RenderGraphPlan deferred_graph_plan_;
     bool swapchain_transfer_src_=false;
     std::vector<bool> swapchain_seen_;

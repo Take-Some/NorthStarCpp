@@ -104,6 +104,7 @@ def project_files() -> dict[str, str | bytes]:
         "description": "FPS training level with moving targets, jumping, recoil, health and a pause menu.",
         "tags": ["FPS", "Platform", "Arena", "Target Practice"],
         "startup_scene": "main.nscn",
+        "ui": {"default": "ui/mission_hud.nui", "format": "northstar.ui/xml/3"},
         "scripting": {"runtime": "V8", "entry": "scripts/main.js"},
         "state": "playable-prototype",
         "genre": "first-person-target-range",
@@ -159,7 +160,8 @@ production pipeline. HUD weapon is a stylized renderer overlay.
 """
     script = (ROOT/"tools/templates/northstar_fps_arena.js").read_text(encoding="utf-8")
     return {
-        "scripts/main.js":script,
+        "assets/scripts/main.js":script,
+        "assets/ui/mission_hud.nui": (ROOT/"sharedAssets/ui/mission_hud.nui").read_text(encoding="utf-8"),
         "northstarcpp.project.json":json.dumps(meta,ensure_ascii=False,indent=2)+"\n",
         "main.nscn":encode_legacy_template(arena),
         "README.md":readme,
@@ -182,7 +184,7 @@ def run(verify: bool) -> int:
             if not path.is_file():
                 raise RuntimeError("FPS project is missing " + rel)
             # Project Manager and gameplay tools may extend manifest and README.
-            if rel in ("main.nscn", "gameplay/arena_stats.json", "scripts/main.js"):
+            if rel in ("main.nscn", "gameplay/arena_stats.json", "assets/scripts/main.js"):
                 if rel == "main.nscn":
                     # Independent zlib implementations may produce different
                     # compressed bytes for identical typed scene records.

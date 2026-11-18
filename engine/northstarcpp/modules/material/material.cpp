@@ -1,5 +1,5 @@
 // NorthStarCpp 2026 — first-class engine.material authoring asset loader.
-// JSON descriptors and native YMAT/YTD resolve through the current VFS.
+// Native XML YMAT/YTD resolve through the current VFS.
 #include <northstarcpp/material.hpp>
 #include "../models/character_asset_namespace.hpp"
 #include <northstarcpp/assets.hpp>
@@ -237,16 +237,16 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
     } pop{active,reference};
     bool const instance=suffix(reference,".material-instance.json");
     auto const native_entry=reference.find(".ymat@");
-    bool const authored=suffix(reference,".material.json");
     bool const compiled=suffix(reference,".ymat") ||
         (native_entry!=std::string::npos && native_entry+6<reference.size());
-    if(!safe(reference) || !(instance||authored||compiled))
+    if(!safe(reference) || !(instance||compiled))
         throw std::invalid_argument("Not a supported material or instance reference");
     MaterialDefinition result;
     std::array<std::string,5> refs{};
+    std::string native_opacity_mask;
     std::array<const char*,5> keys{"base_color_texture","normal_texture",
         "roughness_texture","metallic_texture","emissive_texture"};
-    if(instance||authored) {
+    if(instance) {
         if(assets.size(reference)>512*1024)
             throw std::invalid_argument("Material descriptor exceeds 512 KiB");
         auto const bytes=assets.read(reference);
@@ -269,20 +269,16 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
             if(*shader!="standard_lit"&&*shader!="unlit")
                 throw std::invalid_argument("Unsupported material shader");
             result.unlit=*shader=="unlit";
-        }else if(!instance)
-            throw std::invalid_argument("Material shader must be declared");
+        }
         if(auto value=props.get_optional<std::string>("base_color"))
             result.base_color=parse_hex(*value);
-        else if(!instance)
-            throw std::invalid_argument("Material Base Color must be declared");
+
         if(auto rough=props.get_optional<float>("roughness"))
             result.roughness=unit(*rough);
-        else if(!instance)
-            throw std::invalid_argument("Material roughness must be declared");
+
         if(auto metal=props.get_optional<float>("metallic"))
             result.metallic=unit(*metal);
-        else if(!instance)
-            throw std::invalid_argument("Material metallic must be declared");
+
         if(auto opacity=props.get_optional<float>("opacity"))
             result.opacity=unit(*opacity);
         if(auto cutoff=props.get_optional<float>("alpha_cutoff"))
@@ -341,7 +337,8 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
         }
         for(auto const& param:native.parameters) {
             if(param.name=="base_color" && param.values.size()>=3)
-                for(unsigned i=0;i<3;++i)result.base_color[i]=unit(param.values[i]);
+                for(unsigned i=0;i<std::min<std::size_t>(4,param.values.size());++i)
+                    result.base_color[i]=unit(param.values[i]);
             else if(param.name=="metallic" && !param.values.empty())
                 result.metallic=unit(param.values[0]);
             else if(param.name=="roughness" && !param.values.empty())
@@ -354,6 +351,9 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
             result.alpha_cutoff=unit(native.alpha_cutoff);
         }
         for(auto const& tex:native.textures) {
+            if(tex.slot=="opacity" && native.blend=="masked")
+                native_opacity_mask=detail::rebase_embedded_character_texture(
+                    reference,tex.reference);
             auto const slot=binding(tex.slot);
             if(slot<5)
                 refs[slot]=detail::rebase_embedded_character_texture(
@@ -363,6 +363,37 @@ MaterialDefinition load_material_recursive(AssetStore const& assets,
     for(unsigned i=0;i<5;++i)
         if(!refs[i].empty())
             result.textures[i]=load_texture(assets,refs[i],cache);
+    if(!native_opacity_mask.empty()) {
+        // Native character YMAT uses a dedicated transparency channel. The
+        // providers share a five-slot material ABI, so fold that source mask
+        // into the base-color alpha without inventing a sixth GPU sampler.
+        // The original source channels remain unmodified in the YTD.
+        auto const mask=load_texture(assets,native_opacity_mask,cache);
+        if(!mask.width || !mask.height ||
+           mask.rgba8.size()!=std::size_t(mask.width)*mask.height*4)
+            throw std::runtime_error("Character opacity mask is malformed");
+        auto& base=result.textures[0];
+        if(base.rgba8.empty()) {
+            base.width=mask.width;
+            base.height=mask.height;
+            base.rgba8.assign(std::size_t(base.width)*base.height*4,255);
+        }
+        if(!base.width || !base.height ||
+           base.rgba8.size()!=std::size_t(base.width)*base.height*4)
+            throw std::runtime_error("Character albedo cannot accept opacity mask");
+        for(std::uint32_t y=0;y<base.height;++y) {
+            auto const my=std::min<std::uint64_t>(mask.height-1,
+                (std::uint64_t(y)*mask.height)/base.height);
+            for(std::uint32_t x=0;x<base.width;++x) {
+                auto const mx=std::min<std::uint64_t>(mask.width-1,
+                    (std::uint64_t(x)*mask.width)/base.width);
+                auto const a=std::size_t(y*base.width+x)*4+3;
+                auto const mask_index=std::size_t(my*mask.width+mx)*4;
+                base.rgba8[a]=std::uint8_t(
+                    (std::uint32_t(base.rgba8[a])*mask.rgba8[mask_index]+127)/255);
+            }
+        }
+    }
     return result;
 }
 }
@@ -377,6 +408,10 @@ MaterialLoadSession::~MaterialLoadSession()=default;
 MaterialDefinition MaterialLoadSession::load(std::string const& reference) {
     std::unordered_set<std::string> active;
     return load_material_recursive(state_->assets,reference,active,0,&state_->cache);
+}
+MaterialImage load_native_texture_image(AssetStore const& assets,
+                                        std::string const& reference) {
+    return load_texture(assets,reference);
 }
 MaterialDefinition load_material_definition(AssetStore const& assets,
                                             std::string const& reference)

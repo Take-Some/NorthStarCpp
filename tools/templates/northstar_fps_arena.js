@@ -12,10 +12,10 @@
         // Add project-owned WAV files under assets/audio and set these paths.
         shotSound:null, reloadSound:null
     });
-    const down = key => engine.input.isDown(key);
+    const down = key => engine.input.keyboard.isDown(key);
     const controller = () => {
         for (let i = 0; i < 4; ++i) {
-            const pad = engine.input.gamepad(i);
+            const pad = engine.input.gamepads.gamepad(i);
             if (pad) return pad;
         }
         return null;
@@ -33,11 +33,11 @@
     function refreshTitle() {
         const status=paused ? " | PAUSED" : !alive() ? " | GAME OVER (ENTER TO RESTART)"
             : won() ? " | COMPLETE (ENTER TO RESTART)" : "";
-        engine.ui.setTitle(`NorthStar FPS Arena | ${hits}/${targets.size} hits | HP ${health} | Ammo ${ammo}/${reserve}${reloadTimer>0?" | RELOADING":""}${status}`);
+        engine.ui.viewport.setTitle(`NorthStar FPS Arena | ${hits}/${targets.size} hits | HP ${health} | Ammo ${ammo}/${reserve}${reloadTimer>0?" | RELOADING":""}${status}`);
     }
     function collectScene() {
         for(let start=0;;start+=256) {
-            const page=engine.scene.objects(start,256);
+            const page=engine.scene.entities.objects(start,256);
             for(const object of page) {
                 objects.set(object.index,object);
                 if(object.player) playerIndex=object.index;
@@ -57,12 +57,12 @@
     function fire() {
         if(!alive() || shotCooldown>0 || reloadTimer>0 || ammo===0) return;
         --ammo; ++shots; shotCooldown=settings.fireInterval;
-        engine.camera.shake(0.012,0.12);
-        if(settings.shotSound) engine.audio.play(settings.shotSound);
-        const eye=engine.player.eye();
+        engine.camera.effects.shake(0.012,0.12);
+        if(settings.shotSound) engine.audio.playback.play(settings.shotSound);
+        const eye=engine.player.motion.eye();
         const aim={x:Math.sin(yaw)*Math.cos(pitch),
             y:Math.sin(pitch),z:Math.cos(yaw)*Math.cos(pitch)};
-        const hit=engine.physics.sweepSphere(
+        const hit=engine.physics.queries.sweepSphere(
             eye.x,eye.y,eye.z,
             eye.x+aim.x*settings.weaponRange,
             eye.y+aim.y*settings.weaponRange,
@@ -70,14 +70,14 @@
         if(hit && targets.has(hit.index) && !targets.get(hit.index)) {
             targets.set(hit.index,true);
             ++hits;
-            engine.scene.setColor(hit.index,settings.hitColor);
+            engine.scene.transforms.setColor(hit.index,settings.hitColor);
             engine.logger.info("Arena target hit: "+objects.get(hit.index).name);
         }
     }
     function reload() {
         if(reloadTimer>0 || ammo===settings.magazine || reserve<=0) return;
         reloadTimer=settings.reloadSeconds;
-        if(settings.reloadSound) engine.audio.play(settings.reloadSound);
+        if(settings.reloadSound) engine.audio.playback.play(settings.reloadSound);
     }
     function movement(pad) {
         const buttons=pad ? pad.buttons : 0;
@@ -88,7 +88,7 @@
             (pad ? pad.leftY+Number(Boolean(buttons & 0x0001)) -
                 Number(Boolean(buttons & 0x0002)) : 0);
         const scale=Math.max(1,Math.hypot(dx,dz));
-        engine.player.move((dx*Math.cos(yaw)+dz*Math.sin(yaw))/scale,
+        engine.player.motion.move((dx*Math.cos(yaw)+dz*Math.sin(yaw))/scale,
             (dz*Math.cos(yaw)-dx*Math.sin(yaw))/scale);
     }
     function animateTargets() {
@@ -96,12 +96,12 @@
             if(targets.get(target.index)) continue;
             const x=target.origin.x+
                 Math.sin(elapsed*settings.movingFrequency+target.phase)*settings.movingAmplitude;
-            engine.scene.moveStatic(target.index,x,target.origin.y,target.origin.z);
+            engine.scene.transforms.moveStatic(target.index,x,target.origin.y,target.origin.z);
         }
     }
     function checkHazards() {
         if(damageCooldown>0) return;
-        const eye=engine.player.eye();
+        const eye=engine.player.motion.eye();
         const player={x:eye.x,y:eye.y-settings.eyeHeight,z:eye.z};
         for(const hazard of hazards) {
             const radius=hazard.size*0.5+0.90;
@@ -119,7 +119,7 @@
         collectScene();
         if(playerIndex<0 || targets.size===0)
             throw Error("Arena requires a player and targets");
-        engine.player.setEyeHeight(settings.eyeHeight);
+        engine.player.motion.setEyeHeight(settings.eyeHeight);
         engine.logger.info("Script-owned arena started: "+targets.size+" targets");
         refreshTitle();
     });
@@ -130,17 +130,17 @@
         const pause=down(keys.ESC) || Boolean(buttons & 0x0010);
         if(pause && !priorPause) {
             paused=!paused;
-            engine.session.pause(paused);
+            engine.session.lifecycle.pause(paused);
             refreshTitle();
         }
         priorPause=pause;
-        if(down(keys.EXIT) || Boolean(buttons & 0x0020)) engine.session.quit();
+        if(down(keys.EXIT) || Boolean(buttons & 0x0020)) engine.session.lifecycle.quit();
         const restart=down(keys.RESTART);
         if(restart && !priorRestart && (!alive() || won()))
-            engine.session.restart();
+            engine.session.lifecycle.restart();
         priorRestart=restart;
         if(paused || !alive() || won()) {
-            engine.player.move(0,0);
+            engine.player.motion.move(0,0);
             return;
         }
         elapsed+=dt;
@@ -153,22 +153,22 @@
                 ammo+=count; reserve-=count;
             }
         }
-        const pointer=engine.input.pointerDelta();
+        const pointer=engine.input.pointer.pointerDelta();
         yaw+=pointer.x*settings.sensitivity +
             (pad ? pad.rightX*2.5*dt : 0);
         pitch=clamp(pitch-pointer.y*settings.sensitivity +
             (pad ? pad.rightY*2.1*dt : 0),-settings.maxPitch,settings.maxPitch);
         if(Math.abs(yaw)>Math.PI) yaw%=2*Math.PI;
-        engine.camera.setAngles(yaw,pitch);
-        engine.camera.setZoom(engine.input.mouseDown(1)?1:0);
+        engine.camera.views.setAngles(yaw,pitch);
+        engine.camera.views.setZoom(engine.input.pointer.mouseDown(1)?1:0);
         movement(pad);
         const jump=down(keys.JUMP) || Boolean(buttons & 0x1000);
-        if(jump && !priorJump) engine.player.jump();
+        if(jump && !priorJump) engine.player.motion.jump();
         priorJump=jump;
         const reloadKey=down(keys.RELOAD) || Boolean(buttons & 0x4000);
         if(reloadKey && !priorReload) reload();
         priorReload=reloadKey;
-        if(engine.input.mouseDown(0) ||
+        if(engine.input.pointer.mouseDown(0) ||
            (pad && pad.rightTrigger>0.35)) fire();
         animateTargets();
         checkHazards();

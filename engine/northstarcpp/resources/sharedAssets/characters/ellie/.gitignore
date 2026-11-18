@@ -1,0 +1,17 @@
+# Assets derived from proprietary The Last of Us Part II Remastered game content.
+# Keep the public NorthStarCpp engine repository free of these binary resources.
+*.ydd
+*.ydr
+*.ymt
+*.ymat
+*.ytd
+*.ycd
+*.glb
+*.gltf
+*.fbx
+*.dds
+*.png
+*.pak
+*.vram
+*.iceanim
+*.vram.tmp

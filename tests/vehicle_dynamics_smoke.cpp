@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
+#include <string>
 namespace {
 void check(bool ok,char const* what) {
     if(!ok){std::fprintf(stderr,"FAIL vehicle dynamics: %s\n",what);std::exit(2);}
@@ -30,7 +31,7 @@ NorthStarVehicleDefinition definition() {
     d.rolling_drag=.01f;return d;
 }
 }
-int main() {
+int main(int argc,char** argv) {
     auto* legacy=northstar_module_query(NORTHSTARCPP_MODULE_ABI,
         NORTHSTARCPP_CAPABILITY_VEHICLE,NORTHSTARCPP_VEHICLE_ABI);
     auto* ext=northstar_module_query(NORTHSTARCPP_MODULE_ABI,
@@ -41,6 +42,110 @@ int main() {
     auto const& a=*static_cast<NorthStarVehicleApi const*>(legacy->api);
     auto const& d=*static_cast<NorthStarVehicleDynamicsApi const*>(ext->api);
     check(d.abi_version==2&&d.struct_size>=sizeof(d),"ABI v2 descriptor");
+    if(argc==2 && (std::string(argv[1])=="--rustsea" ||
+                   std::string(argv[1])=="--heightfield")) {
+        bool const terrain=std::string(argv[1])=="--heightfield";
+        void* city=a.create_world();
+        check(city!=nullptr,"create Rust Sea vehicle world");
+        NorthStarVehicleDefinition spec=definition();
+        spec.entity_index=100;spec.position[0]=0.f;
+        spec.position[1]=0.f;spec.position[2]=0.f;
+        spec.wheelbase=28.f;spec.maximum_speed=34.f;
+        spec.acceleration=2.4f;spec.braking=5.5f;
+        check(a.attach(city,&spec),"attach Bastion as engine.vehicle");
+        std::array<NorthStarVehicleWheelConfig,14> tracks{};
+        for(std::size_t k=0;k<tracks.size();++k) {
+            const float z=-21.f+7.f*float(k%7);
+            auto wheel=::wheel(k<7?-23.f:23.f,z,false,true);
+            wheel.mount[1]=2.85f;wheel.radius=1.88f;
+            wheel.rest_length=.18f;wheel.travel=terrain?1.f:.22f;
+            wheel.spring_rate=490000.f;wheel.damper_rate=42000.f;
+            wheel.grip_long=1.9f;wheel.grip_lat=2.3f;
+            wheel.rotational_inertia=1200.f;
+            tracks[k]=wheel;
+        }
+        NorthStarVehicleSeatConfig pilot{};pilot.size=sizeof(pilot);
+        pilot.position[1]=7.3f;pilot.position[2]=8.f;pilot.role=1;
+        NorthStarVehicleRig rig{};rig.size=sizeof(rig);
+        rig.mass=95000.f;rig.yaw_inertia=20000000.f;
+        rig.center_of_mass_y=2.7f;rig.engine_force=900000.f;
+        rig.brake_force=1300000.f;rig.aerodynamic_drag=10.f;
+        rig.rolling_resistance=.012f;rig.abs_enabled=1;
+        rig.traction_control_enabled=1;
+        rig.wheel_count=14;rig.wheels=tracks.data();
+        rig.seat_count=1;rig.seats=&pilot;
+        check(d.configure(city,spec.entity_index,&rig),"native 14 wheel city vehicle rig");
+        check(d.wheel_count(city,spec.entity_index)==14,"14 wheels accepted");
+        check(a.controls(city,spec.entity_index,1.f,0.f,0.f),"Bastion throttle");
+        for(int i=0;i<600;++i) {
+            if(terrain) {
+                NorthStarVehicleState before{};
+                before.size=sizeof(before);
+                check(a.read(city,spec.entity_index,&before),"terrain vehicle state");
+                for(std::uint32_t wi=0;wi<14u;++wi){
+                    auto const& wheel=tracks[wi];
+                    float const x=before.position[0]+wheel.mount[0];
+                    float const z=before.position[2]+wheel.mount[2];
+                    NorthStarVehicleGroundContact contact{
+                        sizeof(NorthStarVehicleGroundContact),wi,1u,
+                        -1.3f+0.9f*std::sin(z/50.f)+0.15f*std::cos(x/70.f),1.2f};
+                    check(d.ground_contact(city,spec.entity_index,&contact),
+                          "sample real terrain at Bastion wheel");
+                }
+            }
+            check(a.step(city,1.f/60.f),"10 second Bastion movement");
+        }
+        NorthStarVehicleState state{};state.size=sizeof(state);
+        check(a.read(city,spec.entity_index,&state),"read Bastion pose");
+        check(std::isfinite(state.position[2]) && state.position[2]>4.f &&
+              state.speed>1.f && state.speed<=34.f,
+              "Bastion world-space vehicle movement");
+        if(terrain) {
+            std::printf("terrain heave observed y=%f z=%f speed=%f\n",state.position[1],state.position[2],state.speed);
+            check(std::isfinite(state.position[1]) &&
+                  std::abs(state.position[1])>.02f &&
+                  std::abs(state.position[1])<2.f,
+                  "Damped terrain suspension must follow gentle height changes");
+            NorthStarVehicleMotionState traction{};
+            traction.size=sizeof(traction);
+            check(d.motion_state(city,spec.entity_index,&traction) &&
+                  traction.grounded_wheels>0,
+                  "At least one Bastion roadwheel must contact the heightfield");
+            std::printf("Bastion terrain heave y=%.3fm with %u contacts PASS\n",
+                state.position[1],traction.grounded_wheels);
+        }
+        NorthStarVehicleWheelState wheelState{};wheelState.size=sizeof(wheelState);
+        check(d.wheel_state(city,spec.entity_index,0,&wheelState) &&
+              (terrain || wheelState.in_contact) && std::isfinite(wheelState.spin_angle),
+              "Bastion odometry wheel telemetry");
+        check(a.controls(city,spec.entity_index,0.f,0.f,1.f),"Bastion brakes");
+        for(int i=0;i<420;++i) {
+            if(terrain) {
+                NorthStarVehicleState previous{};
+                previous.size=sizeof(previous);
+                check(a.read(city,spec.entity_index,&previous),"terrain brake pose");
+                for(std::uint32_t wi=0;wi<14u;++wi) {
+                    auto const& wh=tracks[wi];
+                    float const wx=previous.position[0]+wh.mount[0];
+                    float const wz=previous.position[2]+wh.mount[2];
+                    NorthStarVehicleGroundContact contact{
+                        sizeof(contact),wi,1u,
+                        -1.3f+0.9f*std::sin(wz/50.f)+
+                        0.15f*std::cos(wx/70.f),1.2f};
+                    check(d.ground_contact(city,spec.entity_index,&contact),
+                          "terrain brakes need fresh wheel contacts");
+                }
+            }
+            check(a.step(city,1.f/60.f),"Bastion braking simulation");
+        }
+        state.size=sizeof(state);
+        check(a.read(city,spec.entity_index,&state)&&std::abs(state.speed)<.7f,
+              "Bastion tracked vehicle stops");
+        std::printf("Sea of Rust engine.vehicle native 14-wheel Bastion: drive %.1fm PASS\\n",
+                    state.position[2]);
+        a.destroy_world(city);
+        return 0;
+    }
     std::array<NorthStarVehicleWheelConfig,8> wheels{{
         wheel(-1.f,3.45f,true,false),wheel(1.f,3.45f,true,false),
         wheel(-1.f,2.40f,true,false),wheel(1.f,2.40f,true,false),

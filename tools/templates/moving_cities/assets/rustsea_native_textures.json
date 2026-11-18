@@ -1,0 +1,49 @@
+{
+  "format": "NEF8 YTD NETD",
+  "texture_sets": {
+    "dry_ground_01": {
+      "textures": [
+        "diff",
+        "nor_dx",
+        "rough"
+      ],
+      "sha256": "dcbd49ef316472b434e35924bdaa0df5b922be7803e04656565e853b33340798",
+      "byte_size": 1398711
+    },
+    "gravelly_sand": {
+      "textures": [
+        "diff",
+        "nor_dx",
+        "rough"
+      ],
+      "sha256": "db6c5c463dcdfa21fec49865d1702daf8d9433daa58406a09e2e42de8fa36661",
+      "byte_size": 1495749
+    },
+    "rusty_metal_04": {
+      "textures": [
+        "diff",
+        "nor_dx",
+        "rough",
+        "metal"
+      ],
+      "sha256": "d6e529bbf12ed8b46bfa1d4ed30eaab0fccc528c5c1fa768411ae2aa6cddb420",
+      "byte_size": 1751261
+    },
+    "rusty_metal_grid": {
+      "textures": [
+        "diff",
+        "nor_dx",
+        "rough"
+      ],
+      "sha256": "6d61033cee030b277d82a91cac344367499f30b4ca7a50973315965eb1f2b5fe",
+      "byte_size": 1230213
+    },
+    "dust_cloud": {
+      "textures": [
+        "diff"
+      ],
+      "sha256": "a02a73644d07f92a577330238efd648c3728f7ff8b60e5494b0018ac9737274e",
+      "byte_size": 45205
+    }
+  }
+}

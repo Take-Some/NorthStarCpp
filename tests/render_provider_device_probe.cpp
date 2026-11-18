@@ -10,6 +10,7 @@
 #include <northstarcpp/render_postfx_api.h>
 #include <northstarcpp/render_lights_api.h>
 #include <northstarcpp/render_skinning_api.h>
+#include <northstarcpp/render_temporal_instances_api.h>
 #include <northstarcpp/render_surfaces_api.h>
 #include <northstarcpp/render_timing_api.h>
 #include <northstarcpp/render_features_api.h>
@@ -146,11 +147,15 @@ void print(Results const& data) {
 }
 int main(int argc,char** argv) {
     Results result;
+    bool parity_fixture=false;
+    bool velocity_fixture=false;
     if(argc<2 || argc>5) {
         result.error="Usage: render_provider_gpu_probe <DLL> [--full] [--stress=1000]";
         print(result);return 2;
     }
     for(int i=2;i<argc;++i) {
+        if(std::strcmp(argv[i],"--parity")==0){parity_fixture=true;continue;}
+        if(std::strcmp(argv[i],"--velocity")==0){velocity_fixture=true;parity_fixture=true;continue;}
         if(std::strcmp(argv[i],"--postfx")==0){result.postfx_stress=true;continue;}
         if(std::strcmp(argv[i],"--full")==0) {
             result.full=true;continue;
@@ -246,6 +251,9 @@ int main(int argc,char** argv) {
         auto const* skin_api=extension<NorthStarRenderSkinnedMaterialsApi>(query,
             NORTHSTARCPP_RENDER_SKINNED_MATERIALS_MODULE_ABI,
             NORTHSTARCPP_RENDER_SKINNED_MATERIALS_ABI);
+        auto const* temporal_api=extension<NorthStarRenderTemporalInstancesApi>(
+            query,NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_MODULE_ABI,
+            NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_ABI);
         auto const* surface_api=extension<NorthStarRenderSurfacesApi>(query,
             NORTHSTARCPP_RENDER_SURFACES_MODULE_ABI,
             NORTHSTARCPP_RENDER_SURFACES_ABI);
@@ -284,6 +292,25 @@ int main(int argc,char** argv) {
         require(renderer!=nullptr,std::string("Hardware GPU initialization failed: ")+
              (base->last_error()?base->last_error():"unknown error"));
         result.created=true;
+        if(result.provider=="d3d12" || result.provider=="vulkan") {
+            require(temporal_api && temporal_api->set_instances,
+                "Missing temporal-instance API on native renderer");
+            NorthStarRenderTemporalInstance item{};
+            item.instance_id=0x101u;
+            item.world_transform[0]=item.world_transform[5]=
+                item.world_transform[10]=item.world_transform[15]=1.f;
+            float bones[16]{};
+            bones[0]=bones[5]=bones[10]=bones[15]=1.f;
+            item.bone_palette=bones;
+            item.joint_count=1;
+            require(temporal_api->set_instances(renderer,&item,1)!=0,
+                "Temporal instance submission failed");
+            std::array<NorthStarRenderTemporalInstance,2> duplicates{item,item};
+            require(temporal_api->set_instances(renderer,duplicates.data(),2)==0,
+                "Duplicate instance IDs were accepted");
+            require(temporal_api->set_instances(renderer,&item,1)!=0,
+                "Failed temporal update damaged retained instance state");
+        }
         if(result.provider=="d3d12") {
             require(result.shader_reload_v2,
                     "D3D12 provider lacks Shader Reload ABI v2");
@@ -332,7 +359,18 @@ int main(int argc,char** argv) {
         frame.cubes=&cube;frame.count=1;frame.selected=-1;
         frame.camera_fov_y_degrees=70.f;
         frame.camera_near_clip=.1f;frame.camera_far_clip=250.f;
-        frame.verify_pixels=1;
+        if(parity_fixture) {
+            // Controlled cross-backend camera; otherwise D3D12 defaults to
+            // a third-person orbit while Vulkan uses its forward camera.
+            // Render identical view/projection, cube and triangle input.
+            frame.first_person=1u;
+            frame.camera_override=1u;
+            frame.camera_yaw=0.f;
+            frame.camera_pitch=0.f;
+            frame.camera_roll=0.f;
+            frame.camera_x=frame.camera_y=frame.camera_z=0.f;
+        }
+        frame.verify_pixels=velocity_fixture?0u:(parity_fixture?11u:1u);
         if(triangles && triangles->set_triangles) {
             NorthStarRenderTriangleVertex verts[]{
                 {-1.5f,-1.1f,5.f,0xff4444u},
@@ -345,6 +383,14 @@ int main(int argc,char** argv) {
         bool const initial_frame_ok=api->draw(renderer,&frame);
         require(initial_frame_ok,std::string("GPU frame/readback failed: ")+
                 (base->last_error()?base->last_error():"unknown"));
+        if(velocity_fixture) {
+            // Frame 0 invalidates history; frame 1 must produce non-zero
+            // pixel velocities on static geometry when the camera moves.
+            frame.camera_x+=0.30f;
+            frame.verify_pixels=11u;
+            require(api->draw(renderer,&frame),
+                "Second-frame GPU velocity capture failed");
+        }
         result.geometry=true;
         if(result.provider=="d3d12" ||
            (result.provider=="vulkan" && result.postfx_stress)) {
@@ -553,6 +599,71 @@ int main(int argc,char** argv) {
                     require(!graph_api->set_batches_v2(renderer,&variant,1),
                         "Vulkan accepted shader directives outside graph whitelist");
                 }
+                    // Three intersecting screen-space translucent layers.
+                    // Run the same scene in reversed submission order in two
+                    // separate GPU processes; their mode-10 pixel captures
+                    // must be identical after global back-to-front sorting.
+                    char layered[8]{};
+                    if(GetEnvironmentVariableA(
+                        "NORTHSTARCPP_TEST_TRANSPARENT_LAYERS",
+                        layered,sizeof(layered))>0 && layered[0]=='1') {
+                        char reverse_flag[8]{};
+                        const bool reverse=GetEnvironmentVariableA(
+                            "NORTHSTARCPP_TEST_TRANSPARENT_REVERSE",
+                            reverse_flag,sizeof(reverse_flag))>0 &&
+                            reverse_flag[0]=='1';
+                        static constexpr char red_def[]=
+                            "#define NS_GRAPH_BASE(p) (float4(1,0,0,1))\n";
+                        static constexpr char green_def[]=
+                            "#define NS_GRAPH_BASE(p) (float4(0,1,0,1))\n";
+                        static constexpr char blue_def[]=
+                            "#define NS_GRAPH_BASE(p) (float4(0,0,1,1))\n";
+                        static constexpr const char* colors[]{
+                            red_def,green_def,blue_def};
+                        static constexpr std::uint8_t white[]{255,255,255,255};
+                        std::array<NorthStarMaterialBatchV2,3> layers{};
+                        std::array<std::array<NorthStarMaterialVertex,6>,3>
+                            layer_vertices{};
+                        for(unsigned i=0;i<3;++i) {
+                            unsigned index=reverse?2u-i:i;
+                            for(unsigned j=0;j<6;++j) {
+                                layer_vertices[i][j]=quad[j];
+                                layer_vertices[i][j].z=5.f-float(index);
+                            }
+                            auto& layer=layers[i];
+                            layer.material=batch;
+                            layer.material.vertices=layer_vertices[i].data();
+                            layer.material.vertex_count=6;
+                            layer.material.unlit=1u;
+                            layer.material.textures[0]={white,1u,1u,4u};
+                            layer.graph_hlsl_defines=colors[index];
+                            layer.graph_hlsl_bytes=
+                                static_cast<std::uint32_t>(
+                                    std::strlen(colors[index]));
+                            layer.blend_mode=2u;
+                            layer.opacity=.62f;
+                            layer.alpha_cutoff=.5f;
+                        }
+                        require(graph_api->set_batches_v2(renderer,
+                            layers.data(),3u),"Layered translucency submission failed");
+                        if(result.provider=="d3d12") {
+                            // D3D12 compiles graph PSOs asynchronously.
+                            // Warm the exact three materials before GPU capture,
+                            // otherwise the only visible pixel is the sky.
+                            frame.verify_pixels=0u;
+                            for(unsigned warmup=0;warmup<20;++warmup) {
+                                require(api->draw(renderer,&frame),
+                                    "D3D12 translucent PSO warmup failed");
+                                std::this_thread::sleep_for(100ms);
+                            }
+                        }
+                        frame.verify_pixels=10u;
+                        if(!api->draw(renderer,&frame))
+                            throw std::runtime_error(std::string(
+                                "Layered translucent GPU readback failed: ")+
+                                (base->last_error()?base->last_error():"unknown"));
+                        frame.verify_pixels=3u;
+                    }
                 result.graph=true;
             }
             if(result.skin_supported &&

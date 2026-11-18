@@ -1,10 +1,14 @@
 #include "qt_editor_window.hpp"
+#include "qt_editor_keyboard_shortcuts.hpp"
+#include "qt_editor_command_palette.hpp"
 #include "qt_place_actors_panel.hpp"
 #include <northstarcpp/scene_camera_actor.hpp>
 #include <northstarcpp/camera.hpp>
 #include "../render/shared/render_light_components.hpp"
 #include <QMimeData>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QListWidget>
 #include <northstarcpp/player_character_components.hpp>
@@ -178,13 +182,45 @@ bool QtEditorWindow::runPlaceActorsSmoke() {
 
         placeActorById("light.point",{1.f,0.f,2.f});
         placeActorById("light.spot",{4.f,0.f,5.f});
+        placeActorById("light.directional",{0.f,0.f,0.f});
+        placeActorById("light.sky",{0.f,0.f,0.f});
         if(!scene_component_schema("engine.render.light"))
             throw std::runtime_error("Light ECS schema missing");
         const auto lights=render::scene_render_lights(scene_);
-        if(lights.size()!=2 || lights[0].direction_cone[3]>=0.f ||
+        if(lights.size()!=4 || lights[0].direction_cone[3]>=0.f ||
            lights[1].direction_cone[3]<0.f ||
+           lights[2].direction_cone[3]!=-2.f ||
+           lights[3].direction_cone[3]!=-3.f ||
            std::abs(lights[0].position_range[1]-2.5f)>.001f)
-            throw std::runtime_error("Point/Spot GPU light bridge invalid");
+            throw std::runtime_error("Four-kind GPU light bridge invalid: count="+
+                std::to_string(lights.size())+" components="+
+                std::to_string(scene_.components.size())+
+                (lights.size()>0?" pointCone="+
+                    std::to_string(lights[0].direction_cone[3])+" pointY="+
+                    std::to_string(lights[0].position_range[1]):"")+
+                (lights.size()>1?" spotCone="+
+                    std::to_string(lights[1].direction_cone[3]):"")+
+                (lights.size()>2?" dirCone="+
+                    std::to_string(lights[2].direction_cone[3]):"")+
+                (lights.size()>3?" skyCone="+
+                    std::to_string(lights[3].direction_cone[3]):""));
+        if(!placeActors_->hasEntry("light.directional") ||
+           !placeActors_->hasEntry("light.sky"))
+            throw std::runtime_error("Missing directional/sky Place Actors entries");
+        if(!lightSettings_ || !lightType_ || !lightApply_ ||
+           lightType_->currentIndex()!=3 || lightSettings_->isHidden())
+            throw std::runtime_error("Sky Light details inspector unavailable");
+        lightIntensity_->setValue(.5);
+        lightApply_->click();
+        auto updated=render::scene_render_lights(scene_);
+        if(updated.size()!=4 ||
+           std::abs(updated[3].color_intensity[3]-.5f)>1e-4f)
+            throw std::runtime_error("Light property editing did not reach GPU scene");
+        undo();
+        updated=render::scene_render_lights(scene_);
+        if(updated.size()!=4 ||
+           std::abs(updated[3].color_intensity[3]-.30f)>1e-4f)
+            throw std::runtime_error("Light edits are not undoable");
         auto searchOutliner=[this](QString const& filter,QString const& expected) {
             outlinerSearch_->setText(filter);
             bool found=false;
@@ -252,6 +288,7 @@ bool QtEditorWindow::runPlaceActorsSmoke() {
             throw std::runtime_error("Dropped actor is not undoable");
         return true;
     } catch(std::exception const& e) {
+        std::fprintf(stderr,"[ERROR] [Place Actors smoke] %s\n",e.what());
         log("Place Actors smoke: "+QString::fromUtf8(e.what()));
         return false;
     }
@@ -267,6 +304,168 @@ bool QtEditorWindow::runSmoke(QString const& base) {
             QCoreApplication::processEvents();
         }
         refreshProviderInspector();
+        // Details search does not change the values or widget identity of
+        // existing Inspector controls; it only changes visible form rows.
+        auto* filter=findChild<QLineEdit*>("detailsPropertySearch");
+        auto* transformGroup=findChild<QToolButton*>("detailsCategoryTransform");
+        if(!filter || !transformGroup ||
+           !findChild<QToolButton*>("detailsCategoryPhysics")) {
+            log("smoke: searchable/collapsible Details sections missing");
+            return false;
+        }
+        QFormLayout* detailsForm=nullptr;
+        for(auto* candidate:filter->parentWidget()->findChildren<QFormLayout*>()) {
+            int matchRow=-1;
+            QFormLayout::ItemRole role;
+            candidate->getWidgetPosition(mass_,&matchRow,&role);
+            if(matchRow>=0) {detailsForm=candidate;break;}
+        }
+        if(!detailsForm) {
+            log("smoke: Details form no longer accessible");
+            return false;
+        }
+        int massRow=-1,identityRow=-1;
+        QFormLayout::ItemRole itemRole;
+        detailsForm->getWidgetPosition(mass_,&massRow,&itemRole);
+        detailsForm->getWidgetPosition(objectName_,&identityRow,&itemRole);
+        if(massRow<0 || identityRow<0)return false;
+        filter->setText("Mass");
+        if(!detailsForm->isRowVisible(massRow) ||
+            detailsForm->isRowVisible(identityRow)) {
+            log("smoke: Details field search failed to filter label rows");
+            return false;
+        }
+        filter->setText("group:Transform field:Mass");
+        if(!detailsForm->isRowVisible(massRow) ||
+           detailsForm->isRowVisible(identityRow)) {
+            log("smoke: scoped Details group/field search failed");
+            return false;
+        }
+        filter->setText("group:Actor field:Mass");
+        auto* searchFeedback=findChild<QLabel*>("detailsSearchFeedback");
+        if(detailsForm->isRowVisible(massRow) || !searchFeedback ||
+           !searchFeedback->text().contains("No properties match")) {
+            log("smoke: Details no-results feedback failed");
+            return false;
+        }
+        filter->clear();
+        // The real shortcuts registry must reject binding the Play action
+        // to an already occupied editor shortcut.
+        auto custom=shortcuts::collect(this);
+        int playIndex=-1;
+        for(int i=0;i<custom.size();++i)
+            if(custom[i].id=="playGameAction")playIndex=i;
+        if(playIndex<0 ||
+           !shortcuts::isConflict(this,custom,playIndex,
+               QKeySequence("Ctrl+Shift+P"),nullptr)) {
+            log("smoke: keyboard-shortcut collision detection missing");
+            return false;
+        }
+        if(!shortcuts::isConflict(this,custom,playIndex,
+           QKeySequence("Ctrl+Shift+P, Ctrl+1"),nullptr)) {
+            log("smoke: prefix-ambiguous keyboard shortcut was accepted");
+            return false;
+        }
+        if(!findChild<QAction*>("editKeyboardShortcutsAction")) {
+            log("smoke: Keyboard Shortcuts menu entry missing");
+            return false;
+        }
+        // Viewport drag overlay must be transient; hovering must never
+        // instantiate an entity or modify the authored Scene V3.
+        QMimeData dragMime;
+        dragMime.setData("application/x-northstar-placeable-id","geometry.cube");
+        auto countBeforeDrag=scene_.objects.size();
+        QDragEnterEvent enter(QPoint(46,57),Qt::CopyAction,
+                             &dragMime,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(viewport_,&enter);
+        QDragMoveEvent move(QPoint(48,58),Qt::CopyAction,
+                           &dragMime,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(viewport_,&move);
+        auto* cue=viewport_->findChild<QLabel*>("viewportDropFeedback");
+        auto* ghost=viewport_->findChild<QLabel*>("viewportDropGhost");
+        if(!cue || cue->isHidden() || !ghost || ghost->isHidden() ||
+           !cue->text().contains("geometry.cube") ||
+           scene_.objects.size()!=countBeforeDrag) {
+            log("smoke: non-mutating viewport drop feedback failed");
+            return false;
+        }
+        QDragLeaveEvent leave;
+        QCoreApplication::sendEvent(viewport_,&leave);
+        if(!cue->isHidden() || !ghost->isHidden()) {
+            log("smoke: viewport drag cue or ghost not hidden after leave");
+            return false;
+        }
+        QMimeData materialMime;
+        materialMime.setData("application/x-northstar-asset-reference",
+                             "materials/test.ymat");
+        QDragEnterEvent materialEnter(QPoint(48,58),Qt::CopyAction,
+                                      &materialMime,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(viewport_,&materialEnter);
+        QDragMoveEvent materialMove(QPoint(48,58),Qt::CopyAction,
+                                    &materialMime,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(viewport_,&materialMove);
+        if(!materialMove.isAccepted() || !ghost->isHidden() ||
+           !cue->text().contains("assign material") ||
+           scene_.objects.size()!=countBeforeDrag) {
+            log(QString("smoke: material drop feedback failed accepted=%1 text=%2 actors=%3 baseline=%4")
+                .arg(materialMove.isAccepted()).arg(cue->text())
+                .arg(scene_.objects.size()).arg(countBeforeDrag));
+            return false;
+        }
+        QCoreApplication::sendEvent(viewport_,&leave);
+
+        // The editor's UE-inspired UX must route to the existing QAction
+        // registry; don't accidentally shadow Play/Save or undo shortcuts.
+        auto* findCommand=findChild<QAction*>("editorCommandPaletteAction");
+        auto* immersive=findChild<QAction*>("immersiveViewportAction");
+        auto* layout=findChild<QAction*>("defaultEditorLayoutAction");
+        auto* assetLayout=findChild<QAction*>("assetEditorLayoutAction");
+        if(!findCommand || !immersive || !layout || !assetLayout ||
+            findCommand->shortcut()!=QKeySequence("Ctrl+Shift+P") ||
+            immersive->shortcut()!=QKeySequence(Qt::Key_F11) ||
+            !findChild<QToolButton*>("toolbarFindCommand")) {
+            log("smoke: command palette / immersive layout commands missing");
+            return false;
+        }
+        {
+            QtEditorCommandPalette palette(this);
+            auto* filter=palette.findChild<QLineEdit*>("commandPaletteSearch");
+            auto* results=palette.findChild<QListWidget*>("commandPaletteResults");
+            if(!filter || !results) {
+                log("smoke: command palette search/results absent");
+                return false;
+            }
+            filter->setText("Play In Editor");
+            if(results->count()==0 ||
+               !results->item(0)->text().contains("Play In Editor")) {
+                log("smoke: palette did not find the real Play QAction");
+                return false;
+            }
+            filter->setText("definitely-not-a-real-editor-command");
+            if(results->count()!=0) {
+                log("smoke: nonexistent commands must not appear");
+                return false;
+            }
+        }
+        QByteArray const beforeImmersive=saveState(1);
+        toggleImmersiveViewport();
+        if(!immersiveViewport_ || !immersive->isChecked() ||
+           (outlinerDock_ && outlinerDock_->isVisible())) {
+            log("smoke: F11 failed to focus viewport");
+            return false;
+        }
+        toggleImmersiveViewport();
+        if(immersiveViewport_ || immersive->isChecked() ||
+           !immersiveWorkspaceBefore_.isEmpty() ||
+           (outlinerDock_ && !outlinerDock_->isVisible())) {
+            log("smoke: F11 failed to restore docked workspace");
+            return false;
+        }
+        if(beforeImmersive.isEmpty()) {
+            log("smoke: missing original dock layout snapshot");
+            return false;
+        }
+
         // PIE transport controls are a single icon strip backed by Qt
         // resources; verify all nine bundled 64x64 RGBA assets, not a
         // filesystem dependency that only works in a developer's cwd.
@@ -341,7 +540,35 @@ bool QtEditorWindow::runSmoke(QString const& base) {
             log("smoke: authoring toolbar / placement palette regression");
             return false;
         }
-        auto* collisionWire=findChild<QCheckBox*>("viewportCollisionWireframe");
+        // Main menu mirrors the UE-style separation of scene editing,
+        // dock windows, asset workflows and play controls.
+        auto topMenu=[this](QString title)->QMenu* {
+            for(auto* action:menuBar()->actions()) {
+                auto* menu=action->menu();
+                if(menu && QString(menu->title()).remove('&')==title)
+                    return menu;
+            }
+            return nullptr;
+        };
+        auto* editMenu=topMenu("Edit");
+        auto* windowMenu=topMenu("Window");
+        auto* toolsMenu=topMenu("Tools");
+        auto* playMenu=topMenu("Play");
+        bool containsPlacement=false;
+        if(editMenu)for(auto* action:editMenu->actions())
+            containsPlacement|=action->text().startsWith("Add ");
+        if(!editMenu || !windowMenu || !toolsMenu || !playMenu ||
+           containsPlacement || !playMenu->actions().contains(playAction_) ||
+           !findChild<QAction*>("showContentBrowserAction") ||
+           !findChild<QAction*>("createUiDocumentAction") ||
+           kind_from_extension(fs::path("test.nui"))!=AssetKind::ui_document ||
+           kind_from_extension(fs::path("locomotion.nagraph.xml"))!=
+               AssetKind::animation ||
+           findChild<QDockWidget*>("textAssetWorkspaceDock")) {
+            log("smoke: editor menus or modal asset workflow regressed");
+            return false;
+        }
+                auto* collisionWire=findChild<QCheckBox*>("viewportCollisionWireframe");
         auto* collisionShape=findChild<QComboBox*>("collisionShape");
         if(!collisionShape || !findChild<QComboBox*>("collisionObjectType") ||
            !findChild<QSpinBox*>("collisionSplitsNum") ||
@@ -459,6 +686,29 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         if(locate(actor)!=stable) {
             log("smoke: selection rebuilt the Outliner unexpectedly");return false;
         }
+        // Transform-only edits keep QTreeWidgetItem identity/expansion intact.
+        editScene([actor](Scene& scene) {
+            scene.objects[std::size_t(actor)].position.y+=1.f;
+        },actor);
+        if(locate(actor)!=stable) {
+            log("smoke: transform-only edit rebuilt the Outliner");return false;
+        }
+        editScene([actor](Scene& scene) {
+            scene.objects[std::size_t(actor)].node.parent=0;
+        },actor);
+        if(locate(actor)!=stable || !stable->parent() ||
+           stable->parent()->data(0,Qt::UserRole).toInt()!=-1) {
+            log("smoke: hierarchy reparent destroyed an existing Outliner row");
+            return false;
+        }
+        // Restore the authored hierarchy before later NEF8 roundtrip checks.
+        editScene([actor,parentId](Scene& scene) {
+            scene.objects[std::size_t(actor)].node.parent=parentId;
+        },actor);
+        if(locate(actor)!=stable) {
+            log("smoke: hierarchy restoration replaced the Outliner row");
+            return false;
+        }
         if(!stable || stable->icon(1).isNull() ||
            !(stable->flags()&Qt::ItemIsEditable)) {
             log("smoke: eye or inline rename is missing");return false;
@@ -494,6 +744,12 @@ bool QtEditorWindow::runSmoke(QString const& base) {
             if(!px_->property("mixedValues").toBool() ||
                !px_->suffix().contains('*')) {
                 log("smoke: mixed position property is not indicated");
+                return false;
+            }
+            auto* input=px_->findChild<QLineEdit*>();
+            if(!input || !QMetaObject::invokeMethod(input,"textEdited",Qt::DirectConnection,
+                                                   Q_ARG(QString,input->text()))) {
+                log("smoke: cannot simulate explicit edit of mixed property");
                 return false;
             }
             QMetaObject::invokeMethod(px_,"editingFinished",Qt::DirectConnection);
@@ -557,6 +813,44 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         if(scene_.objects[0].position.x!=x0 ||
            scene_.objects[std::size_t(actor)].position.x!=x1) {
             log("smoke: batch undo not atomic");return false;
+        }
+
+        // Ctrl+D duplicates the complete extended selection in one
+        // editor transaction and the next Ctrl+Z undoes both objects.
+        auto const batchOriginalCount=scene_.objects.size();
+        duplicateSelected();
+        if(scene_.objects.size()!=batchOriginalCount+2) {
+            log("smoke: batch duplicate should append two actors");
+            return false;
+        }
+        undo();
+        if(scene_.objects.size()!=batchOriginalCount) {
+            log("smoke: batch duplicate Undo was not atomic");
+            return false;
+        }
+        // Undo may restore primary selection only; explicitly select both
+        // IDs to test the semantic batch delete path.
+        selectedActorIds_={
+            scene_.objects[0].node.id,
+            scene_.objects[std::size_t(actor)].node.id
+        };
+        selection_=0;
+        updateOutliner();updateInspector();
+        auto const deleting=selectedActorIds_;
+        deleteSelected();
+        // Removing a selected parent also cascades to all descendants,
+        // including selected children: exact removed count need not be 2.
+        bool remains=false;
+        for(auto const& obj:scene_.objects)
+            remains|=deleting.count(obj.node.id)!=0;
+        if(remains || scene_.objects.size()>=batchOriginalCount) {
+            log("smoke: batch delete failed to remove selected subtrees");
+            return false;
+        }
+        undo();
+        if(scene_.objects.size()!=batchOriginalCount) {
+            log("smoke: batch delete Undo was not atomic");
+            return false;
         }
         chooseObject(0);
         outliner_->expandAll();
@@ -935,12 +1229,12 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         QJsonObject blue=red;
         blue.insert("name","Blue");
         blue.insert("base_color","#286adb");
-        ma::save_descriptor(content,"Materials/Red.material.json",red);
-        ma::save_descriptor(content,"Materials/Blue.material.json",blue);
+        ma::save_descriptor(content,"Materials/Red.ymat",red);
+        ma::save_descriptor(content,"Materials/Blue.ymat",blue);
         auto const redSphere=ma::sphere_preview(
-            content,"Materials/Red.material.json",96);
+            content,"Materials/Red.ymat",96);
         auto const blueSphere=ma::sphere_preview(
-            content,"Materials/Blue.material.json",96);
+            content,"Materials/Blue.ymat",96);
         if(redSphere.isNull() || blueSphere.isNull() ||
            redSphere.size()!=QSize(96,96) ||
            qRed(redSphere.pixel(48,48))<=qBlue(redSphere.pixel(48,48)) ||
@@ -964,49 +1258,49 @@ bool QtEditorWindow::runSmoke(QString const& base) {
         }
         refreshMaterialChoices(true);
         if(!materialPicker_ ||
-           materialPicker_->findData("Materials/Red.material.json")<0 ||
-           materialPicker_->findData("Materials/Blue.material.json")<0 ||
+           materialPicker_->findData("Materials/Red.ymat")<0 ||
+           materialPicker_->findData("Materials/Blue.ymat")<0 ||
            materialPicker_->findData(textured)<0) {
             log("smoke: Inspector material picker lost project entries");return false;
         }
         int const materialActor=static_cast<int>(scene_.objects.size()-1);
         chooseObject(materialActor);
-        assignMaterial(materialActor,"Materials/Red.material.json");
-        if(materialPicker_->currentData().toString()!="Materials/Red.material.json") {
+        assignMaterial(materialActor,"Materials/Red.ymat");
+        if(materialPicker_->currentData().toString()!="Materials/Red.ymat") {
             log("smoke: Material picker does not follow selected scene actor");
             return false;
         }
         auto const blueIndex=materialPicker_->findData(
-            "Materials/Blue.material.json");
+            "Materials/Blue.ymat");
         materialPicker_->setCurrentIndex(blueIndex); // Actual Qt change signal.
         if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
-           "Materials/Blue.material.json") {
+           "Materials/Blue.ymat") {
             log("smoke: Material picker did not assign asset");return false;
         }
         undo();
         if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
-           "Materials/Red.material.json") {
+           "Materials/Red.ymat") {
             log("smoke: Material choice Undo failed");return false;
         }
         redo();
         if(editor_tools::actor_material(scene_,std::size_t(materialActor))!=
-           "Materials/Blue.material.json" ||
+           "Materials/Blue.ymat" ||
            !saveScene() || !openScene(sceneFile) ||
            editor_tools::actor_material(scene_,std::size_t(materialActor))!=
-           "Materials/Blue.material.json") {
+           "Materials/Blue.ymat") {
             log("smoke: Material choice NSCN save/load failed");return false;
         }
         // Verify async worker icon updates, not just the generated preview.
         QElapsedTimer timer;
         timer.start();
-        while(!materialSpheres_.contains("Materials/Blue.material.json") &&
+        while(!materialSpheres_.contains("Materials/Blue.ymat") &&
               timer.elapsed()<6500) {
             QCoreApplication::processEvents();
             QThread::msleep(10);
         }
         auto const entry=materialPicker_->findData(
-            "Materials/Blue.material.json");
-        if(!materialSpheres_.contains("Materials/Blue.material.json") ||
+            "Materials/Blue.ymat");
+        if(!materialSpheres_.contains("Materials/Blue.ymat") ||
            entry<1 || materialPicker_->itemIcon(entry).isNull()) {
             log("smoke: async material sphere icon missing from picker");
             return false;

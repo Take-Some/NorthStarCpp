@@ -1,7 +1,0 @@
-NorthStarCpp.Scene 3
-scene "Abby"
-streaming 150 220 1
-stream_budget 64 64
-layer "Default" 1
-entity 1 0 "Abby" "Default" "" "" "characters/abby/models/abby.ydd" 0 0 0 1.00 67A0C0 0 0 0 0 0 1 1 1 0 1000000 1 0
-component 1 "northstar.animation.default" 1 "636861726163746572732f616262792f616e696d6174696f6e732f6d6d2d6578706c6f72652e79636440616262792d6d6d2d6578706c6f72652d69646c65"

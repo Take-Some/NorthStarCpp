@@ -49,7 +49,7 @@ contract. No legacy Python browser or new engine ABI is involved.
 QA build directory: `out/material-editor-v3-p0-20261115`.
 
 - `northstarcpp_prefab_browser` checks the real
-  `Projects/NorthStarFirstPersonPlatform/prefabs/pistol.nprefab`:
+  `Projects/NorthStarFirstPersonPlatform/prefabs/weapon/pistol.nprefab`:
   original YDD reference, mass, collision, actor count, preview, anchored
   placement, traversal resistance. Also checks nested Content prefabs
   and invalid asset quarantine.

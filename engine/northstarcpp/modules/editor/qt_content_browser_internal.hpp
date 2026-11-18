@@ -3,6 +3,7 @@
 #include <QString>
 #include <filesystem>
 namespace northstarcpp::editor::browser_internal {
+inline constexpr int folderSourceRole=Qt::UserRole+65;
 inline QString qt(std::filesystem::path const& path) {
     auto const value=path.generic_u8string();
     return QString::fromUtf8(value.data(),static_cast<int>(value.size()));

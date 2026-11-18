@@ -77,6 +77,9 @@ declare module "@northstar/engine" {
         static setZoom(amount: number): void;
         /** One-shot post-effect offset, metres and seconds. */
         static shake(amplitudeMetres: number, seconds: number): void;
+        /** Physical first-person sight kick, recovered by a spring. */
+        static recoil(pitchRadians: number, yawRadians?: number,
+            recoverySeconds?: number): void;
         /** Teleport/shot cut: clear follow interpolation but preserve active track time. */
         static cut(): void;
         /** Play one cinematic rail from the active VFS. */
@@ -103,6 +106,8 @@ declare module "@northstar/engine" {
         /** VFS gameplay/camera_presets.json. */
         static applyPreset(id: string): void;
         static createViewController(options?: CameraOptions): CameraViewController;
+        static lookAt(source: string, position: Vector3, target: Vector3,
+            options?: {fovY?: number;priority?: number;blendSeconds?: number}): void;
     }
 
     // BEGIN GENERATED INPUT ENUMS: tools/dev/generate_input_typings.py
@@ -398,8 +403,35 @@ declare module "@northstar/engine" {
         static normalized2D(x: number, y: number): {x: number; y: number};
     }
 
+    export interface AudioRequest {
+        asset: string;
+        /** NAC track ID or prefix. Ignored options are rejected for WAV. */
+        clip?: string;
+        variation?: number;
+        gain?: number;
+        /** Optional 3D source position for NAC voice playback. */
+        position?: Vector3;
+    }
+    export class AudioVoice {
+        private constructor();
+        readonly id:number;
+        readonly active:boolean;
+        stop():boolean;
+        setGain(gain:number):this;
+        setPosition(position:Vector3):this;
+        dispose():boolean;
+    }
     export class Audio {
+        static supportsVoices():boolean;
+        static playVoice(request:AudioRequest | string,
+            options?:Omit<AudioRequest,"asset">):AudioVoice;
+        /** Policy-free playback, requires a native provider. */
+        static play(request: AudioRequest | string,
+            options?: Omit<AudioRequest, "asset">): number | void;
         static playWav(path: string): number;
+        /** Spatial NAC playback where provider voices ABI 2 is available. */
+        static playNacAt(path:string,clip:string,position:Vector3,
+            variation?:number,gain?:number):number;
         /** Play a matching clip variant from a NEF8/NAC pack through engine.audio. */
         static playNac(path: string, prefix: string,
                        variation?: number, gain?: number): number;
@@ -454,14 +486,21 @@ declare module "@northstar/engine" {
     }
 
     export interface CharacterStates {
+        /** Project-defined animation labels remain authored data. */
+        [state:string]:string | undefined;
         idle?: string;
         walking?: string;
+        running?: string;
+        sprinting?: string;
         jumping?: string;
         falling?: string;
     }
 
     export interface CharacterTuning {
         walkSpeed?: number;
+        walkToRun?: number;
+        runToSprint?: number;
+        gaitHysteresis?: number;
         teleportSpeed?: number;
         airborneSpeed?: number;
         headingSeconds?: number;
@@ -481,8 +520,40 @@ declare module "@northstar/engine" {
         suggested: string;
     }
 
+    /** Character-owned locomotion and optional, authored contact sounds. */
+    export interface CharacterFootstepOptions {
+        enabled?: boolean;
+        walkStride?: number;
+        runStride?: number;
+        sprintStride?: number;
+        runSpeed?: number;
+        sprintSpeed?: number;
+        sounds?: Readonly<Record<string, string | {
+            asset: string;
+            clip?: string;
+            clips?: Partial<Record<"walk"|"run"|"sprint", string>>;
+            gain?: number;
+        }>>;
+    }
     export interface CharacterOptions {
-        resources: CharacterResources;
+        /** Optional when the project renders an existing scene Pawn itself. */
+        resources?: CharacterResources;
+        prefab?: string;
+        entityName?: string;
+        renderedByProject?: boolean;
+        firstPersonViewmodel?: {
+            forward?:number;drop?:number;right?:number;
+            armPitch?:number;ads?:boolean;
+        };
+        footsteps?: CharacterFootstepOptions;
+        /** Grounded locomotion reference speeds in metres per second. */
+        locomotion?: {
+            walkSpeed?:number;runSpeed?:number;sprintSpeed?:number;
+            walkToRun?:number;runToSprint?:number;
+            movementThreshold?:number;hysteresis?:number;
+            smoothingSeconds?:number;
+            minPlaybackRate?:number;maxPlaybackRate?:number;
+        };
         states?: CharacterStates;
         tuning?: CharacterTuning;
         initialHeading?: number;
@@ -513,23 +584,27 @@ declare module "@northstar/engine" {
         enabled: boolean;
         eyeHeight?: number;
         character?: CharacterOptions | null;
+        /** Player gameplay profile: the shared weapon controller validates
+         *  its additional muzzle/ejection socket requirements at startup. */
+        weapon?: {enabled:false} | (Partial<WeaponProfile> & {
+            enabled:true;prefab:string;magazineSize:number;
+            reserveAmmo:number;roundsPerSecond:number;
+            reloadSeconds:number;range:number;sweepRadius:number;
+        });
         camera?: CameraOptions;
         look?: {
             mouseSensitivity?: number;
+            /** RMB fine-aim multiplier in first person, 0.1..1.0. */
+            adsSensitivityMultiplier?: number;
             maxPitch?: number;
             gamepadYawSpeed?: number;
             gamepadPitchSpeed?: number;
             aimOnRightMouse?: boolean;
         };
-        movement?: {jumpKey?: number; sprintKey?: number};
-        footsteps?: {
-            enabled?: boolean;
-            walkStride?: number;
-            runStride?: number;
-            sprintStride?: number;
-            runSpeed?: number;
-            sprintSpeed?: number;
-        };
+        movement?: {jumpKey?: number; sprintKey?: number;
+                    walkKey?: number; walkScale?: number};
+        /** Backward-compatible alias. Prefer character.footsteps. */
+        footsteps?: CharacterFootstepOptions;
         interaction?: {
             enabled?: boolean;
             useKey?: number;
@@ -544,6 +619,20 @@ declare module "@northstar/engine" {
         };
     }
 
+    export interface PlayerMotionState {
+        readonly pawn:string;
+        readonly state:"idle"|"moving"|"jumping"|"falling";
+        readonly horizontalSpeed:number;
+        readonly verticalSpeed:number;
+        readonly fallDistance:number;
+        readonly impactSpeed:number;
+        readonly grounded:boolean;
+        readonly moving:boolean;
+        readonly landed:boolean;
+    }
+    export interface PlayerActionEvent extends Omit<PlayerMotionState,"landed"> {
+        readonly previous:string;
+    }
     export class Player {
         static configure(config: PlayerConfiguration): Readonly<PlayerConfiguration>;
         static readonly config: Readonly<PlayerConfiguration>;
@@ -562,6 +651,11 @@ declare module "@northstar/engine" {
         static move(worldX: number, worldZ: number): void;
         /** Requested movement input, independent of externally moved platforms. */
         static motion(): {x: number; z: number};
+        /** True physics-frame locomotion state; null before simulation. */
+        static motionState(): PlayerMotionState | null;
+        /** Native post-physics event, for example Player.on("land", callback). */
+        static on(action: string, handler:(event: PlayerActionEvent)=>void):()=>boolean;
+        static once(action: string, handler:(event: PlayerActionEvent)=>void):()=>boolean;
         /** Physics contact query. Surface uses the collider's authored tag. */
         static ground(): {
             grounded: boolean;
@@ -579,6 +673,7 @@ declare module "@northstar/engine" {
     export interface SceneEntity {
         index: number;
         id?: string;
+        parent?: number | string | null;
         name?: string;
 
         mass?: number;
@@ -591,6 +686,8 @@ declare module "@northstar/engine" {
         name?: string;
         position: Vector3;
         size?: number;
+        /** Native model visual scale, independent of the collision proxy. */
+        scale?: Vector3;
         mass?: number;
         color?: number;
         asset?: string;
@@ -608,7 +705,7 @@ declare module "@northstar/engine" {
 
     export class Prefab {
         /** Instantiate supported Scene V3 .nprefab objects via VFS. */
-        static instantiate(path: string, options?: {position?: Vector3}): PrefabInstance;
+        static instantiate(path: string, options?: {position?: Vector3; collision?: boolean; physics?: "authored"|"visual"}): PrefabInstance;
     }
 
     export class Entity {
@@ -616,6 +713,10 @@ declare module "@northstar/engine" {
         readonly index: number;
         readonly alive: boolean;
         readonly snapshot: SceneEntity | null;
+        readonly position: Vector3 | null;
+        getComponent<T=unknown>(name:string):T;
+        hasComponent(name:string):boolean;
+        setComponent(name:string,value:Record<string,unknown>):this;
         setPosition(position: Vector3): this;
         setRotation(eulerDegrees: Vector3): this;
         setColor(rgb: number): this;
@@ -623,10 +724,16 @@ declare module "@northstar/engine" {
         destroy(): boolean;
     }
 
-    export interface AuthoredEntityHandle {
+    export class AuthoredEntityHandle {
+        private constructor();
         readonly id: string;
         readonly index: number;
         readonly alive: boolean;
+        readonly snapshot: SceneEntity | null;
+        readonly position: Vector3 | null;
+        getComponent<T=unknown>(name:string):T;
+        hasComponent(name:string):boolean;
+        setComponent(name:string,value:Record<string,unknown>):this;
         setPosition(position: Vector3): this;
         setRotation(eulerDegrees: Vector3): this;
     }
@@ -642,6 +749,7 @@ declare module "@northstar/engine" {
         static requireByName(name: string): SceneEntity;
         /** Reuse authored Entity: non-owning handle, no second prefab instance. */
         static handleByName(name: string): AuthoredEntityHandle | null;
+        static handle(index: number): AuthoredEntityHandle | null;
         static require(index: number): SceneEntity;
         /** Canonical current Pawn, provided by native PlayerController. */
         static findPawn(): SceneEntity | null;
@@ -653,16 +761,20 @@ declare module "@northstar/engine" {
         static setColor(index: number, rgb: number): void;
         /** Presentation-only: one persistent skinned entity across camera modes. */
         static setVisualMode(index: number,
-            mode: "world" | "first_person_arms",
-            settings?: { forward?: number; drop?: number; armPitch?: number }): void;
+            mode: "world" | "first_person_arms" | "first_person_body",
+            settings?: { forward?: number; drop?: number; armPitch?: number; right?: number;
+                ads?: boolean; recoilBack?: number; recoilArm?: number }): void;
         /** Attach a visual Entity to a named animated skeletal joint in the active frame. */
         static attachToBone(childIndex: number, parentIndex: number,
             bone: string, offset?: Vector3, rotation?: Vector3,
             alignment?: "socket" | "camera_forward"): void;
+        /** Transform a weapon-local point by the last rendered skeletal attachment.
+         *  Null means the socket has not been evaluated; no camera fallback. */
+        static attachmentPoint(childIndex: number, localPoint: Vector3): Vector3 | null;
         /** Remove the runtime bone constraint without destroying the child. */
         static detachFromBone(childIndex: number): void;
         /** Animate native YDD/YDR geometry using an original YCD clip. */
-        static playAnimation(index: number, clipReference: string): void;
+        static playAnimation(index: number, clipReference: string, playbackRate?: number): void;
         /** Remove the runtime animation override, preserving authored data. */
         static stopAnimation(index: number): void;
     }
@@ -674,12 +786,170 @@ declare module "@northstar/engine" {
         fraction: number;
     }
 
+    export class Collision {
+        static sweepSphere(from:Vector3,to:Vector3,radius?:number,ignoreIndex?:number):PhysicsHit|null;
+        static lineOfSight(from:Vector3,to:Vector3,
+            options?:{radius?:number;ignoreIndex?:number}):boolean;
+        /** Returns sphere center at contact, not actual collider contact. */
+        static traceSphere(from:Vector3,to:Vector3,radius?:number,ignoreIndex?:number):
+            Readonly<{hit:PhysicsHit;point:Vector3}>|null;
+    }
+    export interface ParticleEmission {position:Vector3;direction?:Vector3;scale?:number}
+    export class Particles {
+        static available(effect?:string):boolean;
+        static emit(effect:string,options:ParticleEmission):boolean;
+        static tryEmit(effect:string,options?:ParticleEmission):boolean;
+    }
+    export interface PhysicsContactEvent {
+        readonly first:number;
+        readonly second:number;
+        readonly phase:number;
+        readonly response:number;
+    }
     export class Physics {
         static sweepSphere(from: Vector3, to: Vector3,
             radius: number, ignoreIndex?: number): PhysicsHit | null;
         static applyImpulse(index: number, impulse: Vector3): void;
+        /** Jolt/compatible provider optional body friction and bounce coefficients. */
+        static setBodyMaterial(index:number,material?:{
+            friction?:number;restitution?:number}):boolean;
+        /** Drains physics contacts: -1 is native ground, 0=Begin/1=End. */
+        /** Subscribe to a single globally-drained native contact stream. */
+        static onContacts(callback:(events:readonly PhysicsContactEvent[],
+            dt:number)=>void):()=>boolean;
+        static contacts():readonly PhysicsContactEvent[];
+        static readonly contactEpoch:number;
+        static resetContacts():void;
+        /** Legacy manual poll; reads snapshot while dispatcher is subscribed. */
+        static pollContacts(max?:number):ReadonlyArray<PhysicsContactEvent>;
     }
 
+    /** Physics-authoritative two-stage shot: camera target followed by an
+     *  actual muzzle-origin sweep. Used by any project-defined firearm. */
+    export class WeaponBallistics {
+        static solve(options: {
+            weaponIndex: number;
+            muzzleLocal: Vector3;
+            /** Ejection port; if absent, no physical casing origin is assumed. */
+            ejectionLocal?: Vector3;
+            barrelAxisLocal?: Vector3;
+            /** auto: sight for first-person hip fire and ADS; barrel for other modes. */
+            mode?: "auto" | "sight" | "barrel";
+            eye?: Vector3;
+            aimDirection?: Vector3;
+            range: number;
+            radius: number;
+            adsRadius?: number;
+            aimRadius?: number;
+            ignoreIndex?: number;
+        }): {
+            muzzle: Vector3;
+            aimPoint: Vector3;
+            /** Muzzle-origin shot direction converging on the camera target in FPS. */
+            direction: Vector3;
+            /** Actual current barrel orientation from the weapon transform. */
+            barrelDirection: Vector3;
+            mode: "sight" | "barrel";
+            casing: {origin: Vector3;right: Vector3;up: Vector3} | null;
+            effects: {
+                flash: {origin: Vector3;direction: Vector3};
+                smoke: {origin: Vector3;direction: Vector3};
+                casing: {origin: Vector3;right: Vector3;up: Vector3} | null;
+            };
+            hit: PhysicsHit | null;
+            blocked: boolean;
+            cameraRay: {from: Vector3;to: Vector3};
+            shotRay: {from: Vector3;to: Vector3};
+        } | null;
+    }
+
+    /** Shared runtime service for every firearm; particles are short-lived,
+     *  casing prefabs are real Jolt bodies without a despawn timer. */
+    export interface WeaponRecoil {
+        amplitude?: number; duration?: number;
+        pitchRadians?: number; yawRadians?: number; recoverySeconds?: number;
+        /** Physical viewmodel snap along sight line, metres. */
+        weaponBackMeters?: number;
+        /** Additive arm/elbow impulse, normalized 0..1. */
+        armImpulse?: number;
+        snapSeconds?: number; accentSeconds?: number;
+        settleSeconds?: number; aftershock?: number;
+    }
+    /** Optional ADS-specific camera kick; keeps weapon profiles data-driven. */
+    export interface WeaponRecoilProfile extends WeaponRecoil {
+        aimDownSights?: WeaponRecoil;
+        shotPattern?: Array<{pitchScale:number;yawScale:number}>;
+        patternYawRadians?: number;
+    }
+    export class WeaponEffects {
+        /** Process real rigid-body collision events and play shell NAC cues. */
+        static update(dt:number):void;
+        static advanceMotion(dt:number): Readonly<{backMeters:number;armImpulse:number;active:boolean}>;
+        static viewMotion(): Readonly<{backMeters:number;armImpulse:number;active:boolean}>;
+        static resetMotion():void;
+        static kick(options?: WeaponRecoil): Readonly<{shake:boolean;rotation:boolean}>;
+        static fire(options: {
+            shot: {
+                muzzle: Vector3;
+                barrelDirection: Vector3;
+                casing: {origin: Vector3;right: Vector3;up: Vector3} | null;
+            };
+            casingType?: "pistol" | "rifle";
+            casingPrefab?: string | null;
+            shellImpulse?: number;
+            casingAudio?: string | null;
+            casingMaterial?: {friction?:number;restitution?:number};
+            emitCasing?: boolean;
+            recoil?: WeaponRecoil | null;
+        }): Readonly<{
+            particles: boolean;
+            casing: {readonly root: Entity;readonly alive: boolean} | null;
+            serial: number;
+            casingFailed: boolean;
+        }>;
+        static stats(): Readonly<{
+            shots:number;casingFailures:number;trackedShells:number;
+            contactSounds:number;rollSounds:number}>;
+    }
+
+    export interface WeaponProfile {
+        enabled: boolean; prefab: string; displayName?: string;
+        grip?: {bone:string;offset?:Vector3;rotation?:Vector3;
+            firstPersonRotation?:Vector3;
+            aimDownSights?:{
+                forward?:number;drop?:number;right?:number;armPitch?:number;
+            }};
+        muzzleLocal: Vector3; ejectionLocal?: Vector3; barrelAxisLocal?:Vector3;
+        magazineSize:number;reserveAmmo:number;roundsPerSecond:number;
+        reloadSeconds:number;range:number;sweepRadius:number;aimSweepRadius?:number;
+        fireMode?:"semi"|"auto";recoil?:WeaponRecoilProfile;
+        animations?: {dictionary:string;idle?:string;fire?:string;reload?:string;empty?:string};
+        audio?: string;casingType?:"pistol"|"rifle";casingPrefab?:string;
+        emitCasing?: boolean; shellImpulse?:number;fireGain?:number;
+        casingAudio?:string;
+        casingMaterial?:{friction?:number;restitution?:number};
+        hudAsset?:string;hudLayer?:string;impactImpulse?:number;fireAnimationSeconds?:number;
+        /** For unheld or AI-owned weapons, this is the spawn anchor in world metres. */
+        position?:Vector3;
+        cameraRecoil?:boolean;
+        controlHint?:string;
+    }
+    export class WeaponController extends Script {
+        constructor(options?: {
+            profile?: (()=>WeaponProfile|null|undefined)|null;
+            holder?: (()=>PrefabInstance|Entity|AuthoredEntityHandle|null|undefined)|null;
+            /** Explicit input source for NPC/AI, no keyboard read is performed. */
+            controls?: (()=>{trigger:boolean;reload:boolean})|null;
+            aim?: (()=>{eye?:Vector3;direction?:Vector3;mode?:"auto"|"sight"|"barrel"})|null;
+            onHit?: ((event:{hit:PhysicsHit;shot:unknown;target:SceneEntity|null;
+                      weapon:WeaponController})=>void)|null;
+        });
+        readonly equipped:boolean;readonly ammo:number;readonly reserveAmmo:number;
+        readonly reloading:boolean;readonly status:string;readonly weaponIndex:number;
+        reload():boolean;
+        /** Explicit scripted shot with shared physics, VFX and ammunition. */
+        fire():boolean;
+    }
     export class Session {
         static pause(paused: boolean): void;
         static quit(): void;
@@ -690,8 +960,37 @@ declare module "@northstar/engine" {
         static loadScene(path: string): boolean;
     }
 
-    export interface UiNode { id: string; type: "panel" | "text" | "button" | "image" | "input";
-        parent?: string; props?: Record<string, string | number | boolean>; }
+    export type UiValue = string | number | boolean;
+    /** Native document properties; custom project/provider keys remain valid. */
+    export interface UiProperties {
+        x?: number; y?: number; width?: number; height?: number;
+        padding?: number; gap?: number; radius?: number;
+        color?: string; background?: string; border?: string;
+        text?: string; source?: string; opacity?: number;
+        font_scale?: number; font?: string;
+        visible?: boolean; enabled?: boolean; primary?: boolean;
+        position?: string; fit?: string;
+        [name: string]: UiValue | undefined;
+    }
+    export type UiEventName = "click" | "change" | "focus" | "blur" |
+                              "key" | "pointer" | "press";
+    /** Data-only scene-independent UI descriptor. No JSON or native handles. */
+    export interface UiDeclaration {
+        id: string;
+        type: "panel" | "text" | "button" | "image" | "input";
+        props?: UiProperties;
+        text?: string;
+        caption?: string;
+        source?: string;
+        parent?: string;
+        children?: UiDeclaration[];
+        events?: Partial<Record<UiEventName,(event:UiEvent)=>void>>;
+    }
+    export interface UiDocument {
+        nodes: UiDeclaration[];
+    }
+    export interface UiNode { id: string; type: UiDeclaration["type"];
+        parent?: string; props?: Record<string, UiValue>; }
     /** Scoped authoring helper: child IDs inherit the group's parent. */
     export interface UIGroup {
         panel(id: string, props?: Record<string,string | number | boolean>): this;
@@ -712,8 +1011,15 @@ declare module "@northstar/engine" {
         readonly size: number;
         has(id: string): boolean;
         snapshot(): UiNode[];
-        on(id: string, event: "click" | "change" | "focus" | "blur" | "key" | "pointer", callback: (event:UiEvent)=>void): this;
+        /** Atomically reconcile a typed nested tree without duplicate GPU uploads. */
+        render(
+            document: UiDeclaration | UiDeclaration[] | UiDocument,
+            options?: {preserveRuntimeOverrides?: boolean}
+        ): this;
+        on(id: string, event: UiEventName, callback: (event:UiEvent)=>void): this;
         onClick(id: string, callback: (event:UiEvent)=>void): this;
+        onPointer(id: string, callback: (event:UiEvent)=>void): this;
+        onPress(id: string, callback: (event:UiEvent)=>void): this;
         onChange(id: string, callback: (event:UiEvent)=>void): this;
         off(id: string, event: string, callback: (event:UiEvent)=>void): this;
         group(id: string, props?: Record<string,string | number | boolean>, build?: ((children:UIGroup)=>void) | null, parent?: string): this;
@@ -727,11 +1033,19 @@ declare module "@northstar/engine" {
         batch(callback: (root: this) => void): this;
         remove(id: string): this; clear(): this;
         mount(): this; unmount(): this; dispose(): void;
+        setTransient(id: string, changes: Record<string, string | boolean | number>): this;
         setText(id: string, text: string): this; setProgress(id: string, fraction: number): this; }
     export class UI {
         static setTitle(title: string): void;
         static createRoot(layer?: string): UIRoot;
         static createSurface(entityId: string | number, options?: WorldUiOptions): UIRoot;
+        /** Create an editable UI root from a .nui asset mounted by the shared/project VFS. */
+        static loadAsset(path: string, options?: WorldUiOptions & {entityId?: string | number}): UIRoot;
+        /** Manually check loaded .nui files and update live roots; automatically polled in development. */
+        static reloadChangedAssets(): number;
+        /** Advance .nui numeric animation tracks by one frame delta (seconds). */
+        static advanceAnimations(dt: number): void;
+        static playAssetAnimation(root: UIRoot, name: string): boolean;
         static hasSurface(entityId: string | number): boolean;
         static mountSurface(entityId: string | number, layer: string, elements: UiNode[], options?: WorldUiOptions): void;
         static unmountSurface(entityId: string | number): void;
@@ -741,11 +1055,306 @@ declare module "@northstar/engine" {
         static clear(): void;
     }
 
+    export interface VehiclePose {
+        index: number; x: number; y: number; z: number;
+        heading: number; speed: number; waypointActive: boolean;
+    }
+    export interface VehicleMotion {
+        forwardSpeed: number; lateralSpeed: number; yawRate: number;
+        longitudinalSlip: number; lateralSlip: number;
+        distance: number; groundedWheels: number;
+    }
+    export interface VehiclePowertrainState {
+        /** -1 = reverse, 0 = neutral, 1..8 = forward ratio. */
+        gear: number;
+        /** Engine revolutions per minute. */
+        rpm: number;
+        torqueNm: number;
+        wheelForceN: number;
+        shiftingSeconds: number;
+    }
+    /** Provider-neutral engine.vehicle API. Dynamics and cab geometry are
+     * configured with project-owned .nvehicle XML, never in game scripts. */
+    export interface VehicleControls {throttle?:number;steer?:number;brake?:number}
+    export interface VehicleDestination {x:number;z:number;speed:number;radius?:number}
+    export interface VehicleHandle {
+        readonly index:number;readonly state:VehiclePose;readonly motion:VehicleMotion;
+        readonly powertrain:VehiclePowertrainState;
+        drive(options:VehicleControls):boolean;
+        navigate(destination:VehicleDestination):boolean;
+        selectGear(gear:number):boolean;stop():boolean;detach():boolean;
+    }
+    export interface VehicleDoorState {
+        fraction:number;
+        [field:string]:number|boolean;
+    }
+    export class Vehicle {
+        static available():boolean;
+        static handle(index:number):VehicleHandle;
+        static drive(index:number,options:VehicleControls):boolean;
+        static navigate(index:number,destination:VehicleDestination):boolean;
+        static attach(index:number,wheelbase:number,maxSpeed:number):boolean;
+        static configureRig(index:number,path:string):boolean;
+        static controls(index:number,throttle:number,steering:number,brake:number):boolean;
+        static waypoint(index:number,x:number,z:number,speed:number,radius?:number):boolean;
+        static state(index:number):VehiclePose;
+        static motion(index:number):VehicleMotion;
+        static powertrainState(index:number):VehiclePowertrainState;
+        static selectGear(index:number,gear:number):boolean;
+        static wheelState(index:number,wheel:number):Record<string,number|boolean>;
+        static wheelPose(index:number,wheel:number):Record<string,number|boolean>;
+        static wheelCount(index:number):number;
+        static seatCount(index:number):number;
+        static seatState(index:number,seat:number):Record<string,number|boolean>;
+        static occupy(index:number,seat:number,entityId:number):boolean;
+        static release(index:number,seat:number,entityId:number):boolean;
+        static setDoor(index:number,door:number,open:boolean):boolean;
+        static doorCount(index:number):number;
+        static doorState(index:number,door:number):VehicleDoorState;
+        static detach(index:number):boolean;
+        static provider():string;
+        static count():number;
+    }
+
+    /** Shared creation and acquisition facade: existing native providers only. */
+    export interface EngineFactory {
+        entity(descriptor:SpawnOptions):Entity;
+        prefab(path:string,options?:{position?:Vector3;collision?:boolean;physics?:"authored"|"visual"}):PrefabInstance;
+        existing(name:string,required?:boolean):AuthoredEntityHandle|null;
+        vehicle(index:number):VehicleHandle;
+        weapon(options?:ConstructorParameters<typeof WeaponController>[0]):WeaponController;
+        camera(options?:CameraOptions):CameraViewController;
+        character(options?:CharacterOptions):CharacterController;
+        script<T extends Script>(Type:new (options?:any)=>T,options?:Record<string,unknown>):T;
+        entityScript<T extends EntityScript>(
+            Type:new (options:{entity:Entity | AuthoredEntityHandle;owner?:unknown})=>T,
+            entity:Entity | AuthoredEntityHandle,options?:Record<string,unknown>):T;
+        create(kind:"entity",descriptor:SpawnOptions):Entity;
+        create(kind:"prefab",descriptor:string|{path:string;options?:{position?:Vector3;collision?:boolean;physics?:"authored"|"visual"}}):PrefabInstance;
+        create(kind:"existing",descriptor:string|{name:string;required?:boolean}):AuthoredEntityHandle|null;
+        create(kind:"vehicle",descriptor:number):VehicleHandle;
+        create(kind:"weapon",descriptor?:ConstructorParameters<typeof WeaponController>[0]):WeaponController;
+        create(kind:"camera",descriptor?:CameraOptions):CameraViewController;
+        create(kind:"character",descriptor?:CharacterOptions):CharacterController;
+        create(kind:string,descriptor?:unknown):unknown;
+        register(kind:string,creator:(descriptor:unknown,api:EngineAPI)=>unknown):Readonly<{dispose():boolean}>;
+        kinds():readonly string[];
+    }
+    export const Factory:EngineFactory;
+    export class EngineAPI {
+        private constructor();
+        readonly Factory:EngineFactory;
+        readonly entity:typeof Scene;
+        readonly prefab:typeof Prefab;
+        readonly vehicle:typeof Vehicle;
+        readonly weapon:typeof WeaponController;
+        readonly ballistics:typeof WeaponBallistics;
+        readonly weaponEffects:typeof WeaponEffects;
+        readonly camera:typeof Camera;
+        readonly physics:typeof Physics;
+        readonly collision:typeof Collision;
+        readonly particles:typeof Particles;
+        readonly character:typeof Character;
+        readonly player:typeof Player;
+        readonly events:typeof Events;
+        readonly input:typeof Input;
+        readonly audio:typeof Audio;
+        readonly audioVoice:typeof AudioVoice;
+        readonly ui:typeof UI;
+        readonly session:typeof Session;
+        readonly logger:typeof Logger;
+        readonly ecs:typeof ECS;
+        readonly time:typeof Time;
+        readonly scheduler:typeof Scheduler;
+        readonly assets:typeof Assets;
+        readonly scripts:typeof Script;
+        readonly capabilities:typeof Capabilities;
+        readonly CapabilityError:typeof EngineCapabilityError;
+        readonly storage:typeof Storage;
+        /** All renderer services are grouped under one canonical namespace. */
+        readonly render:typeof Render;
+    }
+    export const API:Readonly<EngineAPI>;
+
+    export class Storage {
+        static read(key:string):string | null;
+        static write(key:string,value:string):boolean;
+    }
+    export interface SkySettings {
+        /** Project-authored source selection, shared by Editor and Player. */
+        mode?:"disabled"|"procedural"|"drawable"|"hybrid";
+        drawable?:string; // VFS asset reference, e.g. worlds/sky.ydd@layer
+        preset?:string;
+        enabled?:boolean;paused?:boolean;
+        sun?:boolean;moon?:boolean;stars?:boolean;clouds?:boolean;
+        /** Local solar time, 0 <= timeOfDay < 24. */
+        timeOfDay?:number;
+        /** Duration of one simulated day, in real seconds. */
+        dayLengthSeconds?:number;
+        latitudeDegrees?:number;
+        dayOfYear?:number;
+        moonPhase?:number;
+        cloudCoverage?:number;cloudSpeed?:number;
+        haze?:number; fogDensity?:number;
+        sunIntensity?:number;moonIntensity?:number;starDensity?:number;
+    }
+    export interface SkyState extends Required<SkySettings> {
+        readonly sunDirection:Readonly<Vector3>;
+        readonly moonDirection:Readonly<Vector3>;
+        readonly sunElevationDegrees:number;
+        readonly moonElevationDegrees:number;
+        readonly moonIllumination:number;
+        readonly daylight:number;
+        readonly cloudOffset:number;
+        readonly revision:number;
+    }
+    /** Built-in atmosphere provider, works with Vulkan/D3D12 sky meshes. */
+    export class Sky {
+        static configure(settings?:SkySettings):Readonly<SkyState>;
+        static state():Readonly<SkyState>;
+        static enable(value?:boolean):Readonly<SkyState>;
+        static setTimeOfDay(hours:number,minutes?:number):Readonly<SkyState>;
+        static pause(paused?:boolean):Readonly<SkyState>;
+        static setCloudCoverage(coverage:number):Readonly<SkyState>;
+        /** Set cloud coverage 0..1 or change enabled, coverage and UV speed. */
+        static setClouds(settings?:number|{enabled?:boolean;coverage?:number;speed?:number}):Readonly<SkyState>;
+        static setSun(settings?:boolean|{enabled?:boolean;intensity?:number}):Readonly<SkyState>;
+        static setMoon(settings?:boolean|{enabled?:boolean;intensity?:number;phase?:number}):Readonly<SkyState>;
+        static setStars(settings?:boolean|{enabled?:boolean;density?:number}):Readonly<SkyState>;
+        static setDayLength(seconds:number):Readonly<SkyState>;
+        static advance(seconds:number):Readonly<SkyState>;
+        static reset():Readonly<SkyState>;
+        static get timeOfDay():number;
+        static get sunDirection():Readonly<Vector3>;
+        static get moonDirection():Readonly<Vector3>;
+        static get daylight():number;
+    }
+    export interface ShaderCatalogEntry {
+        readonly path:string;
+        readonly language:"hlsl"|"glsl";
+        readonly system:string;
+    }
+    export interface ShaderCatalog {
+        readonly provider:string|null;
+        readonly hotReload:boolean;
+        readonly builtin:readonly ShaderCatalogEntry[];
+    }
+    export interface RenderShaderAsset {
+        readonly path:string;
+        readonly language:"hlsl"|"glsl";
+        readonly source:string;
+    }
+    export class RenderShaders {
+        static catalog():Readonly<ShaderCatalog>;
+        static source(path:string):string;
+        static load(path:string):Readonly<RenderShaderAsset>;
+        /** Queue an already compiled project material shader (.spv or .dxil). */
+        static queueCompiled(sourcePath:string,binaryPath:string):number;
+        static poll():Readonly<{pending:boolean;completed:readonly string[]}>;
+        static get supportsHotReload():boolean;
+    }
+    export interface RenderShadowsState {
+        readonly provider:string|null;
+        readonly requested:boolean;
+        readonly filter:"pcss"|"pcf"|"off";
+        readonly cascades:number;
+        readonly verifiedOnGpu:boolean;
+        readonly requiresProviderRestart:boolean;
+    }
+    export interface RenderShadowCapabilities {
+        readonly csm:boolean;
+        readonly pcf:boolean;
+        readonly pcss:boolean;
+        readonly runtimeToggle:boolean;
+    }
+    export class RenderShadows {
+        static state():Readonly<RenderShadowsState>;
+        static capabilities():Readonly<RenderShadowCapabilities>;
+    }
+    export class RenderProvider {
+        static name():string|null;
+        static providerVersion():string|null;
+        static version():string;
+        static setDetailLevel(level:"balanced"|"high"|"ultra"|"cinematic"):unknown;
+        static detailLevel():string;
+    }
+    export class Render {
+        static readonly provider:typeof RenderProvider;
+        static readonly shaders:typeof RenderShaders;
+        static readonly shadows:typeof RenderShadows;
+        static readonly sky:typeof Sky;
+        static version():string;
+        static setDetailLevel(level:"balanced"|"high"|"ultra"|"cinematic"):unknown;
+        static detailLevel():string;
+    }
+    export class Capabilities {
+        private constructor();
+        static has(name:string):boolean;
+        static require(name:string):boolean;
+        static list():Readonly<Record<string,boolean>>;
+    }
+    export class EngineCapabilityError extends Error {
+        readonly code:"CAPABILITY_UNAVAILABLE";
+        readonly capability:string;
+    }
     export class Logger {
         static debug(message: string): void;
         static info(message: string): void;
         static warn(message: string): void;
         static error(message: string): void;
+    }
+
+    export interface ScriptOwner {
+        readonly id?:string;
+        readonly index?:number;
+    }
+    export class Time {
+        private constructor();
+        static readonly delta:number;
+        static readonly elapsed:number;
+        static readonly frame:number;
+    }
+    export class ScheduledTask {
+        private constructor();
+        cancel():boolean;
+    }
+    export class Scheduler {
+        constructor(onError?:(error:unknown)=>void);
+        after(seconds:number,callback:()=>void):ScheduledTask;
+        every(seconds:number,callback:()=>void):ScheduledTask;
+        update(dt:number):void;
+        readonly pending:number;
+        dispose():boolean;
+    }
+    export class ScriptContext {
+        constructor(options?:{entity?:Entity | AuthoredEntityHandle | null;
+            owner?:ScriptOwner | null});
+        readonly entity:Entity | AuthoredEntityHandle | null;
+        readonly owner:ScriptOwner | null;
+        readonly active:boolean;
+        readonly scheduler:Scheduler;
+        own<T extends {dispose?():unknown;cancel?():unknown;
+            uninstall?():unknown;destroy?():unknown} | (()=>unknown)>(resource:T):T;
+        listen(name:string,handler:(payload:any)=>void):()=>boolean;
+        after(seconds:number,callback:()=>void):ScheduledTask;
+        every(seconds:number,callback:()=>void):ScheduledTask;
+        tick(dt:number):void;
+        dispose():boolean;
+    }
+    export class ECS {
+        static available(operation?:string):boolean;
+        static has(entity:string | Entity | AuthoredEntityHandle,name:string):boolean;
+        static get<T=unknown>(entity:string | Entity | AuthoredEntityHandle,name:string):T;
+        static set(entity:string | Entity | AuthoredEntityHandle,
+            name:string,value:Record<string,unknown>):unknown;
+        static remove(entity:string | Entity | AuthoredEntityHandle,name:string):unknown;
+        static query(required:string[]):unknown;
+    }
+    export class Assets {
+        static available(kind:string):boolean;
+        static prefab(path:string,options?:{position?:Vector3;collision?:boolean;physics?:"authored"|"visual"}):PrefabInstance;
+        static ui(path:string,options?:WorldUiOptions):UIRoot;
+        static open(path:string,kind:string,options?:Record<string,unknown>):unknown;
     }
 
     export abstract class PlayerScript extends Script {
@@ -756,11 +1365,35 @@ declare module "@northstar/engine" {
     }
 
     export abstract class Script {
-        readonly installed: boolean;
-        uninstall(): boolean;
-        install(): this;
-        start(): void;
-        update(deltaTime: number): void;
-        stop(): void;
+        constructor(options?:{entity?:Entity | AuthoredEntityHandle | null;
+            owner?:ScriptOwner | null});
+        readonly installed:boolean;
+        readonly context:ScriptContext | null;
+        readonly entity:Entity | AuthoredEntityHandle | null;
+        listen(name:string,handler:(payload:any)=>void):()=>boolean;
+        own<T extends {dispose?():unknown;cancel?():unknown;
+            uninstall?():unknown;destroy?():unknown} | (()=>unknown)>(resource:T):T;
+        after(seconds:number,callback:()=>void):ScheduledTask;
+        every(seconds:number,callback:()=>void):ScheduledTask;
+        uninstall():boolean;
+        install():this;
+        start():void;
+        update(deltaTime:number):void;
+        stop():void;
+        onDestroy():void;
+    }
+
+    export abstract class EntityScript extends Script {
+        constructor(options:{entity:Entity | AuthoredEntityHandle;owner?:ScriptOwner});
+        readonly entity:Entity | AuthoredEntityHandle;
+        onStart():void;
+        onUpdate(dt:number):void;
+        onStop():void;
+    }
+    export abstract class ComponentScript extends EntityScript {
+        constructor(options:{entity:Entity | AuthoredEntityHandle;
+            component:string;owner?:ScriptOwner});
+        readonly componentName:string;
+        readonly component:unknown;
     }
 }

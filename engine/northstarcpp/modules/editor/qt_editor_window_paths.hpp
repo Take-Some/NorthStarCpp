@@ -1,6 +1,7 @@
 // Reusable editor path/camera helpers shared by shell, Play-In-Editor and QA.
 #pragma once
 #include "editor_camera.hpp"
+#include <northstarcpp/asset_roots.hpp>
 #include <QString>
 #include <QVariant>
 #include <filesystem>

@@ -7,9 +7,9 @@
 #include <vector>
 
 namespace northstarcpp::nac::schema {
-constexpr std::uint16_t nef8_kind_audio=12;
+constexpr std::uint16_t nef8_kind_audio=shared_assets::detail::audio_list_file_kind;
 constexpr std::size_t max_tracks=1024;
-constexpr std::uint64_t max_body=64ull*1024*1024;
+constexpr std::uint64_t max_body=max_pcm_bytes;
 constexpr std::size_t nef8_header=128;
 inline std::uint64_t align16(std::uint64_t n) {return (n+15u)&~15ull;}
 struct Record {

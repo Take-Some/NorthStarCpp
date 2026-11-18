@@ -22,6 +22,14 @@ int set_sky(void* ptr,const NorthStarSky* sky) {
     return guarded([&]{if(!ptr)throw std::invalid_argument("Null D3D12 skydome renderer");
         static_cast<Renderer*>(ptr)->set_sky(sky);});
 }
+int set_sky_uniforms(void* ptr,const NorthStarGpuSkyUniforms* data) {
+    return guarded([&] {
+        if(!ptr)throw std::invalid_argument("Null D3D12 GPU Sky renderer");
+        static_cast<Renderer*>(ptr)->set_gpu_sky_uniforms(data);
+    });
+}
+const NorthStarRenderSkyApi sky_gpu_api{
+    NORTHSTARCPP_RENDER_SKY_ABI,sizeof(NorthStarRenderSkyApi),set_sky_uniforms};
 int set_triangles(void* ptr,const NorthStarRenderTriangleVertex* data,UINT count) {
     return guarded([&]{if(!ptr)throw std::invalid_argument("Null D3D12 renderer");
         static_cast<Renderer*>(ptr)->set_triangles(data,count);});
@@ -43,6 +51,55 @@ int set_material_batches_v2(void* renderer,
 }
 const NorthStarRenderMaterialsApiV2 materials_api_v2{
     NORTHSTARCPP_RENDER_MATERIALS_V2_ABI,set_material_batches_v2};
+int rigid_upload(void* instance,NorthStarRigidMesh const* mesh) {
+    return guarded([&]{
+        if(!instance||!mesh)throw std::invalid_argument("Rigid mesh missing");
+        static_cast<Renderer*>(instance)->upload_rigid_mesh(*mesh);
+    });
+}
+int rigid_clear(void* instance) {
+    return guarded([&]{
+        if(!instance)throw std::invalid_argument("Rigid renderer missing");
+        static_cast<Renderer*>(instance)->clear_rigid_meshes();
+    });
+}
+int rigid_instances(void* instance,
+                    NorthStarRigidInstance const* draws,std::uint32_t count) {
+    return guarded([&]{
+        if(!instance)throw std::invalid_argument("Rigid renderer missing");
+        static_cast<Renderer*>(instance)->set_rigid_instances(draws,count);
+    });
+}
+int rigid_stats(void* instance,NorthStarRigidInstanceStats* result) {
+    return guarded([&]{
+        if(!instance||!result||result->struct_size<sizeof(*result))
+            throw std::invalid_argument("Rigid stats buffer invalid");
+        static_cast<Renderer const*>(instance)->read_rigid_stats(*result);
+    });
+}
+int rigid_release_meshes(void* instance,const std::uint64_t* keys,
+                        std::uint32_t count) {
+    return guarded([&]{
+        if(!instance)throw std::invalid_argument("Rigid GPU residency missing");
+        static_cast<Renderer*>(instance)->release_rigid_meshes(keys,count);
+    });
+}
+const NorthStarRenderRigidResidencyApi rigid_residency_api{
+    NORTHSTARCPP_RENDER_RIGID_RESIDENCY_ABI,
+    sizeof(NorthStarRenderRigidResidencyApi),rigid_release_meshes};
+const NorthStarRenderRigidInstancesApi rigid_api{
+    NORTHSTARCPP_RENDER_RIGID_INSTANCES_ABI,
+    sizeof(NorthStarRenderRigidInstancesApi),
+    rigid_upload,rigid_clear,rigid_instances,rigid_stats};
+int set_temporal_instances(void* instance,
+    const NorthStarRenderTemporalInstance* items,std::uint32_t count) {
+    return guarded([&] {
+        if(!instance)throw std::invalid_argument("D3D12 temporal renderer missing");
+        static_cast<Renderer*>(instance)->set_temporal_instances(items,count);
+    });
+}
+const NorthStarRenderTemporalInstancesApi temporal_instances_api{
+    NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_ABI,set_temporal_instances};
 
 const NorthStarRenderShaderReloadApiV2 shader_reload_v2{
     NORTHSTARCPP_RENDER_SHADER_RELOAD_V2_ABI,
@@ -269,17 +326,70 @@ const NorthStarRenderFeaturesApi features_api{
     NS_RENDER_FEATURE_EXPOSURE | NS_RENDER_FEATURE_TONEMAP |
     NS_RENDER_FEATURE_FXAA | NS_RENDER_FEATURE_GPU_TIMING |
     NS_RENDER_FEATURE_GPU_TRANSIENT_ALIASING};
+int request_scene_capture(void* renderer) {
+    return guarded([&] {
+        if(!renderer)throw std::invalid_argument("Null GPU capture renderer");
+        auto& r=*static_cast<Renderer*>(renderer);
+        r.capture_rgba.clear();
+        r.capture_width=r.capture_height=0u;
+        r.capture_pending=true;
+    });
+}
+int read_scene_capture(void* renderer,std::uint8_t* pixels,
+        std::uint32_t capacity,std::uint32_t* width,std::uint32_t* height) {
+    return guarded([&] {
+        if(!renderer||!width||!height)
+            throw std::invalid_argument("Null GPU capture query");
+        auto& r=*static_cast<Renderer*>(renderer);
+        if(r.capture_rgba.empty() || r.capture_pending)
+            throw std::runtime_error("GPU scene capture is not ready");
+        *width=r.capture_width;
+        *height=r.capture_height;
+        if(!pixels && capacity==0)return;
+        if(!pixels||capacity<r.capture_rgba.size())
+            throw std::invalid_argument("GPU capture destination buffer too small");
+        std::memcpy(pixels,r.capture_rgba.data(),r.capture_rgba.size());
+    });
+}
+const NorthStarRenderCaptureApi capture_api{
+    NORTHSTARCPP_RENDER_CAPTURE_ABI,sizeof(NorthStarRenderCaptureApi),
+    request_scene_capture,read_scene_capture
+};
 const NorthStarModule module{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
     NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",NORTHSTARCPP_RENDER_ABI,
     sizeof(api),&api,last_error};
 }
 extern "C" NORTHSTARCPP_MODULE_EXPORT const NorthStarModule*
 northstar_module_query(uint32_t host,const char* capability,uint32_t version) {
+    if(version==NORTHSTARCPP_RENDER_SKY_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_SKY_MODULE_ABI,
+            sizeof(sky_gpu_api),&sky_gpu_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_CAPTURE_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_CAPTURE_MODULE_ABI,
+            sizeof(capture_api),&capture_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI) {
         auto const& api=northstarcpp::diagnostics::frame_memory::api;
         static const NorthStarModule extension{sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
             NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
             NORTHSTARCPP_RENDER_FRAME_MEMORY_MODULE_ABI,sizeof(api),&api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_MODULE_ABI) {
+        static const NorthStarModule extension{
+            sizeof(NorthStarModule),NORTHSTARCPP_MODULE_ABI,
+            NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",
+            NORTHSTARCPP_RENDER_TEMPORAL_INSTANCES_MODULE_ABI,
+            sizeof(temporal_instances_api),&temporal_instances_api,last_error};
         return match(extension,host,capability,version);
     }
     if(version==NORTHSTARCPP_RENDER_POSTFX_MODULE_ABI) {
@@ -363,6 +473,20 @@ northstar_module_query(uint32_t host,const char* capability,uint32_t version) {
         return match(ext,host,capability,version);
     }
 
+    if(version==NORTHSTARCPP_RENDER_RIGID_RESIDENCY_MODULE_ABI) {
+        static const NorthStarModule extension{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "d3d12","1.8.1",NORTHSTARCPP_RENDER_RIGID_RESIDENCY_MODULE_ABI,
+            sizeof(rigid_residency_api),&rigid_residency_api,last_error};
+        return match(extension,host,capability,version);
+    }
+    if(version==NORTHSTARCPP_RENDER_RIGID_INSTANCES_MODULE_ABI) {
+        static const NorthStarModule extension{sizeof(NorthStarModule),
+            NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,
+            "d3d12","1.8.0",NORTHSTARCPP_RENDER_RIGID_INSTANCES_MODULE_ABI,
+            sizeof(rigid_api),&rigid_api,last_error};
+        return match(extension,host,capability,version);
+    }
     if(version==NORTHSTARCPP_RENDER_MATERIALS_V2_MODULE_ABI) {
         static const NorthStarModule extension{sizeof(NorthStarModule),
             NORTHSTARCPP_MODULE_ABI,NORTHSTARCPP_CAPABILITY_RENDER,"d3d12","1.6.0",

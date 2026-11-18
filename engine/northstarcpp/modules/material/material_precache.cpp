@@ -114,9 +114,8 @@ struct Planner {
         try {
             bool instance=ends(path,".material-instance.json");
             bool native=ends(path,".ymat");
-            if(!instance&&!native&&!ends(path,".material.json"))
-                throw std::invalid_argument(
-                    "Material precache expects native YMAT or legacy authored material");
+            if(!instance&&!native)
+                throw std::invalid_argument("Material precache requires native XML YMAT");
             if(native) {
                 auto const& binary=load(path,512*1024);
                 auto const list=shared_assets::load_materials_from_bytes(

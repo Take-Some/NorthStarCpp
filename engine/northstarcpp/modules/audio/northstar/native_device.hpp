@@ -25,8 +25,11 @@ private:
     bool available_ = false;
     std::thread worker_;
 #ifdef _WIN32
-    static constexpr std::size_t count = 4;
+    // 12 x 256 frames = 64 ms of stable ring-buffered audio. The completion
+    // event, rather than coarse Windows Sleep(2), drives every refill.
+    static constexpr std::size_t count = 12;
     HWAVEOUT wave_ = nullptr;
+    HANDLE completion_event_ = nullptr;
     std::array<WAVEHDR,count> headers_{};
     std::array<std::array<std::int16_t,block_frames*2>,count> pcm_{};
     std::array<bool,count> prepared_{};

@@ -1,5 +1,7 @@
 # NorthStarCpp — Standalone Game Distribution
 
+**NorthStarCpp 0.7.0:** pass the separate verified `GameClient/` runtime as `--engine-package` to `tools.build_game`. A unified pre-0.7.0 distribution is still accepted for compatibility. See [ENGINE_CLIENT_SPLIT_0_7_0.md](ENGINE_CLIENT_SPLIT_0_7_0.md).
+
 ## Build and verify the engine
 
 First build and verify the complete Runtime, SDK, and registered module set:

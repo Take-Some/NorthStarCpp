@@ -24,7 +24,7 @@ SCRIPT = r'''import { Prefab, Scene, Events, Physics } from "@northstar/engine";
 let instance = null;
 let frames = 0;
 const save = (slot, payload) =>
-    engine.save.write(slot, JSON.stringify(payload));
+    engine.storage.saves.write(slot, JSON.stringify(payload));
 Events.on("start", () => {
     const before = Scene.objectCount();
     instance = Prefab.instantiate("prefabs/roadblock.nprefab", {
@@ -55,7 +55,7 @@ Events.on("update", () => {
             Physics.sweepSphere({x:48,y:5,z:45},{x:48,y:2,z:45},0.2))
             throw new Error("Prefab group removal left a collider or scene node");
         save("scripting_update", {phase:"update", frames, dt:1/60});
-        engine.session.quit();
+        engine.session.lifecycle.quit();
     }
 });
 Events.on("stop", () => save("scripting_stop", {phase:"stop",frames}));
@@ -66,8 +66,11 @@ def verify(player: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="northstar-prefab-qa-") as td:
         project=Path(td)/"project"
         shutil.copytree(ROOT/"Projects/NorthStarFirstPersonPlatform",project)
-        (project/"scripts/main.js").write_text(SCRIPT,encoding="utf-8")
-        (project/"scripts/playerConfig.js").write_text(
+        # Source of truth: scripts are project assets. Do not write parallel
+        # legacy project/scripts files that the runtime correctly ignores.
+        (project/"assets/scripts").mkdir(parents=True,exist_ok=True)
+        (project/"assets/scripts/main.js").write_text(SCRIPT,encoding="utf-8")
+        (project/"assets/scripts/playerConfig.js").write_text(
             "NorthStar.player.configure({enabled:false});\n",encoding="utf-8")
         (project/"prefabs").mkdir(exist_ok=True)
         (project/"prefabs/roadblock.nprefab").write_text(PREFAB,encoding="utf-8")

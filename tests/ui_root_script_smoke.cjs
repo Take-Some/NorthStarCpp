@@ -14,8 +14,8 @@ const documents=[];
 const sandbox={
     engine:{
         ui:{
-            apply: doc=>{documents.push(doc);return null;},
-            setTitle:()=>null
+            documents:{apply: doc=>{documents.push(doc);return null;}},
+            viewport:{setTitle:()=>null}
         }
     },
     NorthStar:{modules:{engine:{}}}

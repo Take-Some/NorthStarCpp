@@ -1,4 +1,5 @@
 #include "qt_editor_window.hpp"
+#include "qt_editor_window_paths.hpp"
 #include "qt_native_ui_preview.hpp"
 #include "../shared/startup_report.hpp"
 #include "../shared/crash_handler.hpp"
@@ -74,6 +75,8 @@ static int run_editor(int argc,char** argv,
     parser.setApplicationDescription("Cross-platform Qt 6 NorthStar editor shell");
     parser.addHelpOption();
     QCommandLineOption scene({"s","scene"},"Scene file to open (.nscn/.nscene).","file");
+    QCommandLineOption project({"p","project"},
+        "NorthStar project directory (identified by northstarcpp.project.json).","folder");
     QCommandLineOption smoke("smoke","Run dock/scene/binary/asset-drop smoke.");
     QCommandLineOption placeActorsSmoke("place-actors-smoke",
         "Validate Place Actors catalog, camera/light ECS and viewport drag/drop.");
@@ -99,6 +102,8 @@ static int run_editor(int argc,char** argv,
         "Verify Camera Studio project VFS presets, UI preview and atomic saving.");
     QCommandLineOption contentDockSmoke("content-dock-smoke",
         "Verify the project-bound ContentBrowser embedded in the Qt Editor dock.");
+    QCommandLineOption engineSharedSmoke("engine-shared-content-smoke",
+        "Check shared engine asset discovery and Content Browser indexing.");
     QCommandLineOption inspectorLayoutSmoke("inspector-layout-smoke",
         "Verify Details dock scrolls and never overlaps Content Browser at small sizes.");
     QCommandLineOption embeddedGameSmoke("embedded-game-smoke",
@@ -107,12 +112,15 @@ static int run_editor(int argc,char** argv,
         "Run a real WARP Player scene in the full Editor overlay and Escape back.");
     QCommandLineOption focusContentBrowser("focus-content-browser",
         "Show and focus the project Content Browser dock in Qt Editor.");
+    QCommandLineOption captureProjectThumbnail("capture-project-thumbnail",
+        "Capture a real GPU scene preview into project_thumbnail.png and exit.");
     QCommandLineOption qaCaptureEditor("qa-capture-editor",
         "Capture the actual Qt Editor window using isolated QA settings.",
         "filename");
     QCommandLineOption playerCheck("player-check",
         "Verify installed Player can load a scene authored by this editor.");
     parser.addOption(scene);
+    parser.addOption(project);
     parser.addOption(smoke);
     parser.addOption(placeActorsSmoke);
     parser.addOption(nativeUiSmoke);
@@ -122,10 +130,12 @@ static int run_editor(int argc,char** argv,
     parser.addOption(smokeOutput);
     parser.addOption(playerCheck);
     parser.addOption(qaCaptureEditor);
+    parser.addOption(captureProjectThumbnail);
     parser.addOption(materialGraphSmoke);
     parser.addOption(functionSmoke);
     parser.addOption(cameraStudioSmoke);
     parser.addOption(contentDockSmoke);
+    parser.addOption(engineSharedSmoke);
     parser.addOption(inspectorLayoutSmoke);
     parser.addOption(embeddedGameSmoke);
     parser.addOption(embeddedRenderSmoke);
@@ -142,7 +152,9 @@ static int run_editor(int argc,char** argv,
         startup.info("qa.material_function", "mode=isolated_native_gpu");
         return run_material_function_smoke();
     }
-    if(parser.isSet(qaCaptureEditor) || parser.isSet(contentDockSmoke) ||
+    if(parser.isSet(qaCaptureEditor) || parser.isSet(captureProjectThumbnail) ||
+       parser.isSet(contentDockSmoke) ||
+       parser.isSet(engineSharedSmoke) ||
        parser.isSet(placeActorsSmoke)) {
         // Screenshot QA may run while a production editor is open. Never
         // touch that editor's persisted layout or shortcuts/settings.
@@ -153,6 +165,25 @@ static int run_editor(int argc,char** argv,
     auto window=startup.measure("qt.window", [&] {
         return std::make_unique<northstarcpp::editor::QtEditorWindow>();
     });
+    if(parser.isSet(project)) {
+        auto const folder=QFileInfo(parser.value(project)).absoluteFilePath();
+        QFileInfo const root(folder);
+        QFileInfo const manifest(QDir(folder).filePath("northstarcpp.project.json"));
+        if(!root.isDir() || root.isSymLink() || !manifest.isFile() ||
+           manifest.isSymLink()) {
+            startup.info("project.invalid","directory="+folder.toStdString());
+            return 2;
+        }
+        auto const content=QDir(folder).filePath("assets");
+        if(!QFileInfo(content).isDir() || QFileInfo(content).isSymLink()) {
+            startup.info("project.invalid","assets="+content.toStdString());
+            return 2;
+        }
+        window->contentBrowser()->setContentRoot(content);
+        startup.info("project.selected","directory="+folder.toStdString());
+        // A project can have no scene yet. Keep the editor's new blank
+        // scene and bind all asset operations to the selected directory.
+    }
     if(parser.isSet(scene)) {
         auto const file=parser.value(scene).toUtf8().toStdString();
         startup.info("scene.selected","path="+file);
@@ -166,6 +197,96 @@ static int run_editor(int argc,char** argv,
         }
     }
     startup.measure("qt.window_show", [&] {window->show();});
+    if(parser.isSet(engineSharedSmoke)) {
+        bool passed=false;
+        QString detail;
+        try {
+            using northstarcpp::editor::window_detail::native;
+            using northstarcpp::editor::window_detail::qpath;
+            QTemporaryDir fixture;
+            if(!fixture.isValid())
+                throw std::runtime_error("Cannot create content mount fixture");
+            auto const tree=fixture.path()+"/repo";
+            auto const expected=tree+
+                "/engine/northstarcpp/resources/sharedAssets";
+            if(!QDir().mkpath(expected+"/models") ||
+               !QDir().mkpath(tree+"/out/build/Release"))
+                throw std::runtime_error("Failed to create source-tree fixture");
+            auto found=northstarcpp::asset_paths::locate_shared_root(native(tree+"/out/build/Release"));
+            if(QDir::cleanPath(qpath(found))!=
+               QDir::cleanPath(QFileInfo(expected).canonicalFilePath()))
+                throw std::runtime_error("Engine source-tree shared mount was not located");
+            auto const actual=northstarcpp::asset_paths::locate_shared_root(native(
+                QCoreApplication::applicationDirPath()));
+            if(actual.empty() || !QFileInfo(qpath(actual)).isDir())
+                throw std::runtime_error("Installed editor shared asset root is missing");
+            auto* browser=window->contentBrowser();
+            if(!browser)
+                throw std::runtime_error("Editor Content Browser not available");
+            if(QDir::cleanPath(browser->sharedContentRoot())!=
+               QDir::cleanPath(qpath(actual)))
+                throw std::runtime_error("Content Browser was not given the engine mount");
+            browser->selectAssetSource(true);
+            QElapsedTimer elapsed;elapsed.start();
+            while(elapsed.elapsed()<15000 && browser->recordCount()<10) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,30);
+                QThread::msleep(10);
+            }
+            auto* treeWidget=browser->findChild<QTreeWidget*>("folderTree");
+            if(browser->recordCount()<10 || !treeWidget ||
+               treeWidget->topLevelItemCount()<2 ||
+               treeWidget->topLevelItem(1)->text(0)!="Engine Shared Assets")
+                throw std::runtime_error("Engine mount did not index and display");
+            // Prove that actual shared assets (not just a persistent root
+            // label) are selectable via their canonical VFS references.
+            auto const sample=qpath(actual/"models/weapon/pistol/pistol.ydd");
+            if(QFileInfo(sample).isFile()) {
+                browser->revealAsset("models/weapon/pistol/pistol.ydd");
+                QElapsedTimer selection;selection.start();
+                while(selection.elapsed()<3500 &&
+                      browser->currentSelection()!="models/weapon/pistol/pistol.ydd" &&
+                      browser->currentFolder()!="models/weapon/pistol/pistol.ydd") {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents,25);
+                    QThread::msleep(8);
+                }
+                if(browser->currentSelection()!="models/weapon/pistol/pistol.ydd" &&
+                   browser->currentFolder()!="models/weapon/pistol/pistol.ydd")
+                    throw std::runtime_error("Cannot reveal pistol: path="+browser->currentSelection().toStdString()+" reference="+browser->selectedAsset().toStdString());
+            }
+            detail=QString("path=%1 indexed=%2")
+                .arg(qpath(actual)).arg(browser->recordCount());
+            passed=true;
+        }catch(std::exception const& e) {
+            detail=QString::fromUtf8(e.what());
+        }
+        std::cout<<"Qt Engine Shared Assets: "<<(passed?"PASS":"FAIL")
+                 <<" "<<detail.toStdString()<<std::endl;
+        return passed?0:29;
+    }
+    if(parser.isSet(captureProjectThumbnail)) {
+        // On-demand capture of real GPU viewport pixels. Never synthetic art.
+        auto* timer=new QTimer(window.get());
+        timer->setInterval(450);
+        auto tries=std::make_shared<int>(0);
+        QObject::connect(timer,&QTimer::timeout,window.get(),
+                [&app,&window,timer,tries] {
+            ++*tries;
+            QString diagnostic;
+            if(window->captureProjectThumbnail(&diagnostic)) {
+                timer->stop();
+                std::cout<<"NorthStar project scene thumbnail saved: "
+                         <<diagnostic.toStdString()<<std::endl;
+                app->exit(0);
+            } else if(*tries>=20) {
+                timer->stop();
+                std::cerr<<"Scene thumbnail capture failed: "
+                         <<diagnostic.toStdString()<<std::endl;
+                app->exit(19);
+            }
+        });
+        timer->start();
+        return app->exec();
+    }
     if(parser.isSet(qaCaptureEditor)) {
         window->showContentBrowser();
         QString const path=parser.value(qaCaptureEditor);
@@ -501,6 +622,12 @@ static int run_editor(int argc,char** argv,
             auto* roots=browser->findChild<QTreeWidget*>("folderTree");
             auto* addAsset=browser->findChild<QToolButton*>("browserAddAsset");
             auto* importAsset=browser->findChild<QToolButton*>("browserImportAsset");
+            QElapsedTimer treeWait;treeWait.start();
+            while(roots && roots->topLevelItemCount()!=3 &&
+                  treeWait.elapsed()<5000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents,20);
+                QThread::msleep(8);
+            }
             if(!roots || roots->topLevelItemCount()!=3 ||
                roots->topLevelItem(0)->text(0)!="Project Assets" ||
                roots->topLevelItem(1)->text(0)!="Engine Shared Assets" ||
@@ -807,9 +934,9 @@ static int run_editor(int argc,char** argv,
             QJsonObject const base{
                 {"schema",1},{"name","Base"},{"shader","standard_lit"},
                 {"base_color","#8090a0"},{"metallic",0.2},{"roughness",0.7}};
-            ma::save_descriptor(root,"Materials/Base.material.json",base);
+            ma::save_descriptor(root,"Materials/Base.ymat",base);
             QString const a=ma::create_material_instance(root,
-                "Materials/Base.material.json","TestInstance");
+                "Materials/Base.ymat","TestInstance");
             if(!ma::is_material(a) ||
                northstarcpp::editor::kind_from_extension(
                    std::filesystem::u8path(a.toUtf8().toStdString()))!=
@@ -820,8 +947,8 @@ static int run_editor(int argc,char** argv,
             instance["overrides"]=over;
             ma::save_material_instance(root,a,instance);
             auto inherited=ma::resolve_material_instance(root,a);
-            if(inherited.value("metallic").toDouble()!=0.92 ||
-               inherited.value("roughness").toDouble()!=0.7 ||
+            if(std::abs(inherited.value("metallic").toDouble()-0.92)>0.00001 ||
+               std::abs(inherited.value("roughness").toDouble()-0.7)>0.00001 ||
                inherited.value("base_color").toString()!="#8090a0")
                 throw std::runtime_error("Material Instance inheritance failed");
             northstarcpp::AssetStore assets;
@@ -839,7 +966,7 @@ static int run_editor(int argc,char** argv,
                 ma::save_material_instance(root,a,parent);
             }catch(std::exception const&) {rejected=true;}
             if(!rejected || ma::load_material_instance(root,a).value("parent")
-                             .toString()!="Materials/Base.material.json")
+                             .toString()!="Materials/Base.ymat")
                 throw std::runtime_error("Instance cycle not rejected atomically");
             ok=true;
         }catch(std::exception const& e){

@@ -6,9 +6,9 @@ namespace northstarcpp::render::vulkan {
 void Renderer::set_film_look(NorthStarRenderPostFxSettings const& requested) {
     if(!northstarcpp::render::valid_postfx(requested))
         throw std::invalid_argument("Invalid film look parameter or ABI");
-    if(requested.chromatic_pixels!=0.f)
+    if(requested.chromatic_pixels!=0.f && !hdr_enabled_)
         throw std::invalid_argument(
-            "Vulkan chromatic aberration needs a separate scene-color PostFX pass");
+            "Vulkan chromatic aberration requires NORTHSTARCPP_ENABLE_VULKAN_HDR=1");
     if(northstarcpp::render::active_postfx(requested) && !deferred_enabled_)
         throw std::runtime_error(
             "Vulkan Film Look is supported in deferred mode; enable "

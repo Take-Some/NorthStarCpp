@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<NorthStarVehicleRig version="2" mass="4500000" yaw_inertia="600000000" center_of_mass_y="0.8" engine_force="10500000" brake_force="18000000" aerodynamic_drag="10" rolling_resistance="0.012" abs="1" tcs="1" surface_friction="1.2" contact_mode="physics">
+  <Wheel x="-7.5" y="2.5" z="-8" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="-7.5" y="2.5" z="-2" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="-7.5" y="2.5" z="2" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="-7.5" y="2.5" z="8" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="7.5" y="2.5" z="-8" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="7.5" y="2.5" z="-2" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="7.5" y="2.5" z="2" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Wheel x="7.5" y="2.5" z="8" radius="1.0" rest_length="0.55" travel="0.95" spring_rate="16000000" damper_rate="3000000" grip_long="1.9" grip_lat="2.3" brake="1" inertia="80000" steer="0" drive="1" />
+  <Seat x="0" y="3.0" z="0" yaw="0" role="1" />
+</NorthStarVehicleRig>

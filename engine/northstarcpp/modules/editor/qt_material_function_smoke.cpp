@@ -83,14 +83,14 @@ int run_material_function_smoke() {
         QJsonObject material{{"schema",1},{"name","FunctionGpuAcceptance"},
              {"shader","standard_lit"},{"base_color","#c0aabb"},
              {"metallic",0.2},{"roughness",0.5},{"graph",graph}};
-        ma::save_descriptor(root,"Materials/FunctionGpu.material.json",material);
-        auto decoded=ma::load_descriptor(root,"Materials/FunctionGpu.material.json");
+        ma::save_descriptor(root,"Materials/FunctionGpu.ymat",material);
+        auto decoded=ma::load_descriptor(root,"Materials/FunctionGpu.ymat");
         if(!decoded.value("graph").isObject())
             throw std::runtime_error("Saved function call lost");
         northstarcpp::AssetStore assets;
         assets.mount_directory("",root);
         auto loaded=northstarcpp::load_material_definition(
-            assets,"Materials/FunctionGpu.material.json");
+            assets,"Materials/FunctionGpu.ymat");
         if(loaded.graph_shader_defines.find("NS_GRAPH_BASE")==std::string::npos)
             throw std::runtime_error("Runtime VFS did not link Material Function");
 

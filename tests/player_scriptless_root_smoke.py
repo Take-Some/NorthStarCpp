@@ -10,10 +10,10 @@ from tools.v8_provider.player_e2e import run
 
 SESSION = r'''import { Events, Player, Scene } from "@northstar/engine";
 let frames = 0;
-const save = (name, data) => engine.save.write(name, JSON.stringify(data));
+const save = (name, data) => engine.storage.saves.write(name, JSON.stringify(data));
 Events.on("start", () => {
     if (!Player.enabled || Player.index < 0 ||
-        !Scene.get(Player.index)?.player)
+        !Scene.get(Player.index))
         throw new Error("Scriptless scene did not activate authored player");
     save("scripting_start", {phase:"start",
         objects: Scene.objectCount(),
@@ -22,7 +22,7 @@ Events.on("start", () => {
 Events.on("update", dt => {
     if (++frames === 5) {
         save("scripting_update", {phase:"update",frames,dt});
-        engine.session.quit();
+        engine.session.lifecycle.quit();
     }
 });
 Events.on("stop", () => {
@@ -34,11 +34,11 @@ def verify(player):
     with tempfile.TemporaryDirectory(prefix="northstar-scriptless-root-") as tmp:
         project = Path(tmp) / "project"
         shutil.copytree(ROOT / "Projects/NorthStarFirstPersonPlatform", project)
-        (project / "scripts/main.js").unlink()
+        (project / "assets/scripts/main.js").unlink()
         # The shared default config must discover the authored player
         # rather than relying on a project-local Player.configure() script.
-        (project / "scripts/playerConfig.js").unlink()
-        root_script = project / "scripts/player/playerSession.js"
+        (project / "assets/scripts/playerConfig.js").unlink()
+        root_script = project / "assets/scripts/player/playerSession.js"
         root_script.parent.mkdir(parents=True, exist_ok=True)
         root_script.write_text(SESSION, encoding="utf-8")
         output = run(Path(player), None, project, seconds=35)

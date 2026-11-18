@@ -13,8 +13,8 @@
   <a href="https://cmake.org/"><img alt="CMake and Ninja" src="https://img.shields.io/badge/Build-CMake%20%2B%20Ninja-064F8C?style=flat-square&amp;logo=cmake&amp;logoColor=white" /></a>
   <a href="https://gcc.gnu.org/"><img alt="GNU GCC" src="https://img.shields.io/badge/Toolchain-GNU%20GCC-4B6C21?style=flat-square&amp;logo=gnu&amp;logoColor=white" /></a>
   <a href="https://www.qt.io/"><img alt="Qt 6" src="https://img.shields.io/badge/Editor-Qt%206-41CD52?style=flat-square&amp;logo=qt&amp;logoColor=white" /></a>
-  <a href="CMakeLists.txt"><img alt="Version 0.6.2" src="https://img.shields.io/badge/Version-0.6.2-DFAC35?style=flat-square" /></a>
-  <a href="docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md"><img alt="Active development" src="https://img.shields.io/badge/Status-Active%20Development-F59E0B?style=flat-square" /></a>
+  <a href="CMakeLists.txt"><img alt="Version 0.7.1" src="https://img.shields.io/badge/Version-0.7.1-DFAC35?style=flat-square" /></a>
+  <a href="docs/CURRENT_STATUS.md"><img alt="Active development" src="https://img.shields.io/badge/Status-Active%20Development-F59E0B?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 
 Instead of binding the runtime to a single backend, NorthStarCpp resolves capabilities by stable `engine.*` interfaces. Implementations can be linked into the engine as **builtin providers** or delivered as replaceable **external DLL/SO plugins**. The editor, player, SDK, asset pipeline, and test tools share this architecture.
 
-> **Development status:** NorthStarCpp is an actively developed engine, **not a production-certified Unreal Engine alternative**. Individual subsystems and targeted regression tests work; complete release acceptance, advanced rendering, and large-world workflows are still evolving. See the [readiness audit](docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md).
+> **Development status:** NorthStarCpp is an actively developed engine, **not a production-certified Unreal Engine alternative**. Individual subsystems and targeted regression tests work; complete release acceptance, advanced rendering, and large-world workflows are still evolving. See the [current engineering status](docs/CURRENT_STATUS.md).
 
 ## Highlights
 
@@ -200,12 +200,15 @@ A clean release build and packaging workflow is available through:
 .\tools\build_release.cmd
 ~~~
 
-Release packaging includes module and dependency checks, but **a successful local build is not proof of certified production readiness**. Consult the [distribution guide](docs/DISTRIBUTION.md) and [engine readiness audit](docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md) before shipping.
+Release packaging includes module and dependency checks, but **a successful local build is not proof of certified production readiness**. Consult the [distribution guide](docs/DISTRIBUTION.md) and [current status](docs/CURRENT_STATUS.md) and [release execution plan](docs/NORTHSTARCPP_1_0_EXECUTION_PLAN_2026-11-18.md) before shipping.
 
 ## Documentation
 
 | Guide | Topics |
 | :--- | :--- |
+| [Documentation Index](docs/INDEX.md) | All maintained references and historical reports |
+| [Current Status](docs/CURRENT_STATUS.md) | Latest documented engineering results and open production gates |
+| [Documentation Policy](docs/DOC_POLICY.md) | One owner per fact, evidence, formatting and historical QA rules |
 | [Quick Start](docs/START_HERE.md) | First launch, commands, and project setup |
 | [Architecture](docs/ARCHITECTURE.md) | Repository boundaries and dependency direction |
 | [Modules & Plugins](docs/MODULES.md) | ABI contracts, builtin providers, and runtime overrides |
@@ -215,7 +218,7 @@ Release packaging includes module and dependency checks, but **a successful loca
 | [Prefabs](docs/PREFABS.md) | Prefab creation and instantiation |
 | [Scripting](docs/SCRIPTING_API.md) | JavaScript/V8 contracts and scripting API |
 | [Distribution](docs/DISTRIBUTION.md) | Release builder and packaging checks |
-| [Readiness Audit](docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md) | Verified scope, limitations, and remaining work |
+| [Historical Readiness Audit (Nov 14)](docs/FULL_ENGINE_READINESS_AUDIT_2026-11-14.md) | Prior point-in-time snapshot; see Current Status above |
 
 ## Contributing and legal notes
 

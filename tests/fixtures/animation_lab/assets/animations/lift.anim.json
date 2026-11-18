@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "type": "scene-transform",
+  "keyframes": [
+    {
+      "time": 0,
+      "position": {
+        "x": 0,
+        "y": 1,
+        "z": 4
+      }
+    },
+    {
+      "time": 1,
+      "position": {
+        "x": 0,
+        "y": 2,
+        "z": 4
+      }
+    }
+  ]
+}

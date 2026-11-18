@@ -5,6 +5,7 @@
 
 #include <northstarcpp/physics_plugin.h>
 #include <northstarcpp/module.h>
+#include "../engine/northstarcpp/modules/host/physics_residency_guards.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -12,6 +13,8 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -21,6 +24,40 @@ void require(bool condition, char const* problem)
 {
     if (!condition)
         throw std::runtime_error(problem);
+}
+void verify_vehicle_guards() {
+    using northstarcpp::physics_detail::VehicleResidencyGuard;
+    // Differential regression against the original inlined streaming loop.
+    // Covers minimum/maximum velocity clamp, look-ahead and object padding.
+    float const speeds[]{0.f,0.1f,1.f,10.f,30.f,65.f,120.f,-45.f};
+    float const locations[]{-250.f,-100.f,-48.f,0.f,48.f,95.f,250.f};
+    float const sizes[]{0.f,0.5f,5.f,20.f};
+    std::size_t verified=0;
+    for(float vx:speeds) for(float vz:speeds) {
+        NorthStarPhysicsVehiclePose pose{};
+        pose.x=9.f;
+        pose.y=-2.f;
+        pose.z=-7.f;
+        pose.linear_velocity[0]=vx;
+        pose.linear_velocity[2]=vz;
+        auto const guard=VehicleResidencyGuard::from_pose(pose);
+        auto const old_radius=std::clamp(
+            48.f+2.f*std::hypot(vx,vz),48.f,180.f);
+        for(float x:locations) for(float y:locations)
+            for(float z:locations) for(float size:sizes) {
+                float const ahead_x=pose.x+vx*2.f;
+                float const ahead_z=pose.z+vz*2.f;
+                float const radius=old_radius+size;
+                float const dx=x-ahead_x;
+                float const dy=y-pose.y;
+                float const dz=z-ahead_z;
+                bool const old_nearby=dx*dx+dy*dy+dz*dz<=radius*radius;
+                require(guard.contains(x,y,z,size)==old_nearby,
+                        "Vehicle guard changed collision streaming radius");
+                ++verified;
+            }
+    }
+    require(verified>80000,"Insufficient vehicle streaming guard test coverage");
 }
 struct Library {
     explicit Library(std::filesystem::path const& path)
@@ -57,6 +94,7 @@ int main(int argc,char** argv)
 {
     if (argc!=2) return 2;
     try {
+        verify_vehicle_guards();
         Library provider(std::filesystem::u8path(argv[1]));
         auto const query=provider.symbol<NorthStarModuleQuery>(
             "northstar_module_query");

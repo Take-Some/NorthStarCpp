@@ -45,6 +45,10 @@ public:
     // project/assets (+100). Project resources shadow engine defaults.
     void mount_project_assets(std::filesystem::path const& project_root,
                               std::filesystem::path const& shared_root = {});
+    // Unified editor/preview source overlay. Identical NSP + shared + content
+    // provider policy to gameplay, with content overriding engine files.
+    void mount_content_assets(std::filesystem::path const& content_root,
+                              std::filesystem::path const& shared_root = {});
     shared_assets::Material load_material(std::string const& reference) const;
     shared_assets::Drawable load_drawable(std::string const& reference) const;
     shared_assets::Texture load_texture(std::string const& reference) const;
@@ -79,6 +83,9 @@ public:
     bool native_range_reads() const;
 
 private:
+    // Single base-layer resolver for project, preview and thumbnail mounts.
+    void mount_base_assets(std::filesystem::path const& anchor,
+                           std::filesystem::path const& shared_root);
     template<class T, class Loader>
     AssetRequest<T> request(int kind, std::string path, AssetPriority priority, Loader loader) const;
     struct State;

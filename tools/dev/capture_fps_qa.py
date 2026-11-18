@@ -105,9 +105,11 @@ def capture(hwnd,max_width):
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('--player',default='_qa_content_browser_p2/_abby_fps2_qa/northstarcpp_player.exe')
+    parser.add_argument('--player',default='out/build/northstarcpp_player.exe')
     parser.add_argument('--output',default='Projects/AbbyPistolDemo/docs/fps_viewmodel_qa.png')
     parser.add_argument('--preview',action='store_true')
+    parser.add_argument('--topmost',action='store_true',
+                        help='Temporarily show the spawned QA Player above desktop windows')
     args=parser.parse_args()
     player=(R/args.player).resolve(strict=True)
     output=R/args.output
@@ -126,6 +128,8 @@ def main():
             time.sleep(.1)
         if not hwnd:raise RuntimeError('No native Player HWND')
         time.sleep(5)
+        if args.topmost:
+            u.SetWindowPos(hwnd,-1,0,0,0,0,0x0003)
         output.parent.mkdir(parents=True,exist_ok=True)
         png,w,h=capture(hwnd,1280)
         output.write_bytes(png)
@@ -134,6 +138,8 @@ def main():
             reduced,w2,h2=capture(hwnd,512)
             print('BASE64:'+base64.b64encode(reduced).decode(),flush=True)
     finally:
+        if args.topmost and 'hwnd' in locals() and hwnd:
+            u.SetWindowPos(hwnd,-2,0,0,0,0,0x0003)
         if proc.poll() is None:
             subprocess.run(['taskkill','/PID',str(proc.pid),'/T','/F'],
                 capture_output=True,text=True,errors='replace',timeout=8)

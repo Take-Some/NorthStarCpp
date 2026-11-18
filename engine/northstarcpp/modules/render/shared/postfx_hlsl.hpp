@@ -48,9 +48,14 @@ float4 compose_scene(float3 filtered, float2 uv) {
         filtered*=1.0-film_params.y*smoothstep(.03,.55,dot(centered,centered));
     }
     if(film_params.x>0.0) {
-        float2 pixel=floor(uv*viewport_size.xy);
-        float noise=frac(sin(dot(pixel,float2(12.9898,78.233))+
-                             film_extra.w*17.371)*43758.5453)-.5;
+        // Integer avalanche hash replaces costly per-pixel sine noise.
+        // Frame salt decorrelates successive frames; no extra texture/RT.
+        uint2 pixel=uint2(uv*viewport_size.xy);
+        uint seed=(pixel.x*0x9e3779b9u)^(pixel.y*0x85ebca6bu)^
+                  (uint(film_extra.w)*0xc2b2ae35u);
+        seed^=seed>>16; seed*=0x7feb352du;
+        seed^=seed>>15; seed*=0x846ca68bu; seed^=seed>>16;
+        float noise=float(seed&0x00ffffffu)*(1.0/16777216.0)-0.5;
         filtered+=noise*film_params.x;
     }
     return float4(saturate(filtered),1);

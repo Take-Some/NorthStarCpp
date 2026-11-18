@@ -31,6 +31,8 @@ RendererState::~RendererState(){
             tile_index_buffer->Unmap(0,nullptr);
         if(fxaa_constants&&fxaa_constant_data)
             fxaa_constants->Unmap(0,nullptr);
+        if(motion_constants&&motion_constant_data)
+            motion_constants->Unmap(0,nullptr);
         if(sun_shadow_constants&&sun_shadow_constants_data)
             sun_shadow_constants->Unmap(0,nullptr);
         if(event)CloseHandle(event);
@@ -82,6 +84,8 @@ void RendererState::resize(UINT w,UINT h){
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         texture_reuse_pool.recycle(device.Get(),hdr_scene_color,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        texture_reuse_pool.recycle(device.Get(),motion_surface,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         for(auto& exposure:hdr_exposure)
             texture_reuse_pool.recycle(device.Get(),exposure,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -99,6 +103,7 @@ void RendererState::resize(UINT w,UINT h){
         scene_color.Reset();
         bloom_surface.Reset();
         hdr_scene_color.Reset();
+        motion_surface.Reset();
         for(auto& exposure:hdr_exposure)exposure.Reset();
         exposure_frame_index=0;
         exposure_history_valid=false;
@@ -124,6 +129,12 @@ void RendererState::resize(UINT w,UINT h){
         depth_view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
         device->CreateDepthStencilView(depth.Get(),&depth_view,
             dsvs->GetCPUDescriptorHandleForHeapStart());
+        // Forward translucency depth-tests without depth writes.
+        depth_view.Flags=D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        auto readonly_dsv=dsvs->GetCPUDescriptorHandleForHeapStart();
+        readonly_dsv.ptr+=device->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        device->CreateDepthStencilView(depth.Get(),&depth_view,readonly_dsv);
         // Same allocation, separate typed view, legal only after DEPTH_WRITE
         // -> PIXEL_SHADER_RESOURCE transition during the lighting pass.
         D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
@@ -210,6 +221,18 @@ void RendererState::resize(UINT w,UINT h){
                     hdr_scene_color,"Create FP16 HDR scene target");
                 device->CreateRenderTargetView(hdr_scene_color.Get(),nullptr,
                     hdr_rtv_heap->GetCPUDescriptorHandleForHeapStart());
+                if(velocity_enabled) {
+                    D3D12_RESOURCE_DESC motion_desc=hdr_desc;
+                    motion_desc.Format=DXGI_FORMAT_R16G16_FLOAT;
+                    D3D12_CLEAR_VALUE motion_clear{};
+                    motion_clear.Format=motion_desc.Format;
+                    texture_reuse_pool.acquire(device.Get(),motion_desc,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        motion_clear,motion_surface,
+                        "Create D3D12 RG16F GPU motion surface");
+                    device->CreateRenderTargetView(motion_surface.Get(),nullptr,
+                        motion_rtv_heap->GetCPUDescriptorHandleForHeapStart());
+                }
                 D3D12_RESOURCE_DESC exposure_desc=hdr_desc;
                 exposure_desc.Width=1;exposure_desc.Height=1;
                 for(UINT exposure_index=0;exposure_index<2;++exposure_index) {
@@ -381,9 +404,9 @@ void RendererState::set_lights(NorthStarRenderLight const* data,UINT count){
             for(float value:source.direction_cone)
                 if(!std::isfinite(value))throw std::invalid_argument("Invalid spot direction");
             if(source.position_range[3]<=0 || source.position_range[3]>100000.f ||
-               source.direction_cone[3]<-1.f || source.direction_cone[3]>1.f)
+               source.direction_cone[3]<-3.f || source.direction_cone[3]>1.f)
                 throw std::invalid_argument("Invalid light attenuation or cone");
-            if(source.direction_cone[3]>=0) {
+            if(source.direction_cone[3]>=0 || source.direction_cone[3]==-2.f) {
                 float const len=source.direction_cone[0]*source.direction_cone[0]+
                     source.direction_cone[1]*source.direction_cone[1]+
                     source.direction_cone[2]*source.direction_cone[2];

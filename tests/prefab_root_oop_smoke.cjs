@@ -8,15 +8,15 @@ const BASE=path.join(__dirname,"..","engine","northstarcpp","resources","sharedA
 const created=[],destroyed=[],live=[];
 let definitions=[],failAfter=Infinity;
 const engine={
-    scene:{
+    scene:{entities:{
         objects:(start=0,count=256)=>live.slice(start,start+count),
         objectCount:()=>live.length,
-        spawn:(name,x,y,z,size,mass,color,asset,layer,parent)=>{
+        spawn:(name,x,y,z,size,mass,color,asset,layer,parent,collision)=>{
             if(created.length>=failAfter)throw new Error("provider spawn failed");
             const index=live.length;
             const id=String(index+1);
             live.push({name,index,id,position:{x,y,z},mass});
-            created.push({name,index,id,parent});
+            created.push({name,index,id,parent,mass,collision:collision??true});
             return {id,index};
         },
         destroy:id=>{
@@ -25,8 +25,7 @@ const engine={
             live[object.index]=null;
             destroyed.push(id);
         }
-    },
-    prefab:{read:()=>({objects:definitions})}
+    },prefabs:{read:()=>({objects:definitions})}}
 };
 const context=vm.createContext({engine});
 for(const file of ["northstar/bootstrap.js","scene/Entity.js","scene/Prefab.js"]) {
@@ -54,6 +53,26 @@ assert.equal(instance.alive,true);
 assert.equal(instance.destroy(),3);
 assert.deepEqual(destroyed,["3","2","1"]);
 assert.equal(instance.alive,false);
+// One canonical prefab can be spawned free (default physical collision)
+// or equipped (no collision) without a pistol_attached duplicate.
+const restoredDefinitions=definitions;
+definitions=[entity("1","0","Pistol",0)];
+definitions[0].mass=0.65;
+definitions[0].collision=true;
+const physical=Prefab.instantiate("prefabs/weapon/pistol.nprefab");
+assert.equal(created.at(-1).mass,.65,"world gun retains authored mass");
+assert.equal(created.at(-1).collision,true);
+assert.equal(physical.destroy(),1);
+const equipped=Prefab.instantiate("prefabs/weapon/pistol.nprefab",{
+    position:{x:0,y:1.6,z:0},physics:"visual"
+});
+assert.equal(created.at(-1).mass,0,"attached instance must not be a dynamic body");
+assert.equal(created.at(-1).collision,false);
+assert.equal(equipped.destroy(),1);
+assert.throws(()=>Prefab.instantiate("prefabs/weapon/pistol.nprefab",{
+    physics:"visual",collision:true
+}),/valid anchor and physics options/);
+definitions=restoredDefinitions;
 
 created.length=0;
 destroyed.length=0;

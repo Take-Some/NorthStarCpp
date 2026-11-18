@@ -22,19 +22,20 @@ int main(int argc,char** argv) {
     namespace fs=std::filesystem;
     try {
         auto project=fs::u8path(argv[1]);
+        auto shared=project.parent_path().parent_path()/"engine/northstarcpp/resources/sharedAssets";
         AssetCatalog catalog;
-        catalog.scan(project/"assets");
-        auto const* record=catalog.find("prefabs/pistol.nprefab");
+        catalog.scan(shared);
+        auto const* record=catalog.find("prefabs/weapon/pistol.nprefab");
         require(record && record->kind==AssetKind::prefab &&
-                !record->directory,"Native project prefab missing or misclassified");
+                !record->directory,"Engine weapon prefab missing or misclassified");
         require(record->prefab_valid && record->prefab_actor_count==1,
                 "Prefab card did not decode original Scene V3 object count");
         require(catalog.find("prefabs")!=nullptr,
                 "Project prefab virtual folder not indexed");
         require(catalog.resolve(record->virtual_path)==
-                fs::weakly_canonical(project/"prefabs"/"pistol.nprefab"),
-                "Native prefab resolved outside project/prefabs");
-        auto prefab=prefab_preview::load(project/"assets",
+                fs::weakly_canonical(shared/"prefabs/weapon/pistol.nprefab"),
+                "Native prefab resolved outside sharedAssets/prefabs");
+        auto prefab=prefab_preview::load(shared,
                                         record->asset_reference());
         require(prefab.version==3 && prefab.objects.size()==1 &&
                 prefab.objects[0].name=="Pistol" &&
@@ -72,7 +73,7 @@ int main(int argc,char** argv) {
         require(temporary.isValid(),"Cannot create isolated prefab test Content");
         auto sandbox=fs::u8path(temporary.path().toUtf8().toStdString());
         fs::create_directories(sandbox/"assets"/"actors");
-        fs::copy_file(project/"prefabs"/"pistol.nprefab",
+        fs::copy_file(shared/"prefabs/weapon/pistol.nprefab",
             sandbox/"assets"/"actors"/"pistol.nprefab");
         std::ofstream(sandbox/"assets"/"actors"/"broken.nprefab")<<"invalid";
         AssetCatalog nested;
@@ -93,7 +94,7 @@ int main(int argc,char** argv) {
                  "actors/pistol.nprefab").objects.size()==1,
                 "Content subfolder prefab cannot be decoded");
         bool rejected=false;
-        try {(void)prefab_preview::load(project/"assets",
+        try {(void)prefab_preview::load(shared,
                   "prefabs/../outside.nprefab");}
         catch(std::exception const&) {rejected=true;}
         require(rejected,"Prefab directory traversal accepted");

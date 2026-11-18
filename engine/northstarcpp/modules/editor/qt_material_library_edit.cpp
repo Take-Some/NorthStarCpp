@@ -446,7 +446,7 @@ QByteArray patch_xml(QString const& document,QString const& name,
 QJsonObject load(fs::path const& root,QString const& reference) {
     auto ref=split(reference);
     auto original=read(root,ref.file);
-    auto library=shared_assets::read_ymat_library(original);
+    (void)shared_assets::read_ymat_library(original); // XML-only material format
     auto list=shared_assets::load_materials_from_bytes(original,bytes(ref.file));
     auto selected=selected_name(ref.entry,list);
     auto it=std::find_if(list.begin(),list.end(),[&](auto const& material) {
@@ -455,27 +455,6 @@ QJsonObject load(fs::path const& root,QString const& reference) {
     if(it==list.end())
         throw std::invalid_argument("Selected YMAT entry is not in the library");
     auto descriptor=material_descriptor(*it);
-    if(library.kind==30) {
-        auto parsed=QJsonDocument::fromJson(QByteArray::fromStdString(library.body));
-        if(!parsed.isObject())
-            throw std::invalid_argument("Invalid native JSON YMAT body");
-        for(auto const& value:parsed.object().value("materials").toArray()) {
-            auto object=value.toObject();
-            if(object.value("name").toString()!=selected)continue;
-            QJsonParseError error{};
-            auto nested=QJsonDocument::fromJson(
-                object.value("editor_source").toString().toUtf8(),&error);
-            if(error.error==QJsonParseError::NoError && nested.isObject() &&
-               nested.object().value("name").toString()==selected) {
-                auto document=nested.object();
-                // The material may have parameters unknown to the older
-                // single-material editor: expose them without dropping any.
-                document["parameters"]=descriptor.value("parameters");
-                document["textures"]=descriptor.value("textures");
-                return document;
-            }
-        }
-    }
     return descriptor;
 }
 void save(fs::path const& root,QString const& reference,
@@ -499,8 +478,7 @@ void save(fs::path const& root,QString const& reference,
         return QString::fromUtf8(record.name.c_str())==selected;
     });
     if(found!=1)throw std::invalid_argument("Ambiguous YMAT selected material");
-    // All edit paths converge on a single XML YMAT writer. Existing kind30
-    // libraries are read/imported and converted, never written back as JSON.
+    // All edit paths require canonical XML material libraries.
     auto canonical=shared_assets::migrate_ymat_to_xml(original);
     auto xmlLibrary=shared_assets::read_ymat_library(canonical);
     if(xmlLibrary.kind!=4)
@@ -508,8 +486,7 @@ void save(fs::path const& root,QString const& reference,
     auto replacement=patch_xml(
         QString::fromUtf8(xmlLibrary.body.data(),int(xmlLibrary.body.size())),
         selected,document).toStdString();
-    // Single writer for all imports and existing libraries:
-    // XML kind4 with no legacy JSON metadata, regardless of input format.
+    // Single native XML writer (NEF8 kind4 only).
     auto packed=shared_assets::encode_xml_ymat(replacement,before.size());
     auto after=shared_assets::load_materials_from_bytes(packed,bytes(ref.file));
     if(after.size()!=before.size())

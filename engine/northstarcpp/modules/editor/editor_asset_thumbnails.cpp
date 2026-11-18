@@ -65,6 +65,25 @@ public:
             }
             case 103: bcdec_bc3(source,decoded.data(),16);break;
             case 104: bcdec_bc7(source,decoded.data(),16);break;
+            case 105: {
+                // BC5 stores X/Y of a tangent-space normal in two BC4 blocks.
+                // Reconstruct Z for an intelligible purple-blue normal preview.
+                std::array<std::uint8_t,32> channels{};
+                bcdec_bc5(source,channels.data(),8);
+                for(std::size_t i=0;i<16;++i) {
+                    auto const r=channels[(i/4)*8+(i%4)*2];
+                    auto const g=channels[(i/4)*8+(i%4)*2+1];
+                    float const nx=float(r)/127.5f-1.f;
+                    float const ny=float(g)/127.5f-1.f;
+                    auto const nz=std::sqrt(std::max(0.f,1.f-nx*nx-ny*ny));
+                    decoded[i*4]=r;
+                    decoded[i*4+1]=g;
+                    decoded[i*4+2]=static_cast<std::uint8_t>(
+                        std::lround(std::clamp(nz*0.5f+0.5f,0.f,1.f)*255.f));
+                    decoded[i*4+3]=255;
+                }
+                break;
+            }
             default:return 0xff354253u;
             }
             it=blocks_.emplace(key,std::move(decoded)).first;
@@ -117,7 +136,7 @@ Thumbnail thumbnail_texture(shared_assets::Texture const& t) {
     switch(t.format_id) {
     case 1: case 2: block_size=0;break;
     case 101: case 102:block_size=8;break;
-    case 103: case 104:block_size=16;break;
+    case 103: case 104: case 105:block_size=16;break;
     default:return {};
     }
     // Validate first mip before any block access.
@@ -159,7 +178,7 @@ AssetPreviewImage preview_texture(shared_assets::Texture const& texture,
     switch(texture.format_id) {
     case 1: case 2: break;
     case 101: case 102:stride=8;break;
-    case 103: case 104:stride=16;break;
+    case 103: case 104: case 105:stride=16;break;
     default:return output;
     }
     auto const expected=stride ?

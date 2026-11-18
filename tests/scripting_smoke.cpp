@@ -92,7 +92,33 @@ void test_service_override(bool v8) {
         return runtime.evaluate("call " + capability + " " + method);
     };
     check(eval("scene", "objectCount") == "73", "Service did not replace the builtin method");
+    // New nested names retain the old plugin override until a replacement
+    // explicitly registers the new capability.
+    check(eval("scene.entities","objectCount") == "73",
+          "Nested scene route bypassed the legacy plugin");
+    runtime.bind("engine.scene.entities","objectCount",
+        [](std::string_view){return std::string("97");});
+    check(eval("scene.entities","objectCount") == "97",
+          "Native nested handler did not override its legacy service");
+    runtime.unbind("engine.scene.entities","objectCount");
+    check(eval("scene.entities","objectCount") == "73",
+          "Nested service fallback broke after handler unregistration");
     check(eval("scene", "original") == "11", "Unclaimed method lost its builtin implementation");
+    runtime.bind("engine.render.sky","state",[](std::string_view) {
+        return std::string("19");
+    });
+    check(eval("sky","state")=="19",
+          "Legacy engine.sky bypassed the canonical render.sky service");
+    runtime.bind("engine.render.provider","detailLevel",[](std::string_view) {
+        return std::string(R"("ultra")");
+    });
+    check(eval("rendering","detailLevel")=="\"ultra\"",
+          "Legacy rendering quality API bypassed render.provider");
+    runtime.bind("engine.render.shaders","catalog",[](std::string_view) {
+        return std::string("23");
+    });
+    check(eval("render","shaderCatalog")=="23",
+          "Legacy flat shader method bypassed render.shaders");
     check(eval("fixture", "answer") == "42", "Plugin-only namespace could not be called");
     bool rejected = false;
     try { eval("scene", "fail"); }
@@ -128,6 +154,49 @@ void v8_test(char const* asset_root) {
           "V8 proxy-to-host binding failed");
     check(js.evaluate("engine.call('engine.mock','add',4,5)") == "9",
           "V8 direct host call failed");
+    // The full dotted capability must survive the V8 proxy, not be treated
+    // as a call to the flat engine.render namespace.
+    js.bind("engine.render.shadows","state",[](std::string_view args) {
+        if(args!="[]")throw std::runtime_error("Invalid shadow method arguments");
+        return std::string(R"({"requested":true})");
+    });
+    js.bind("engine.render.sky","state",[](std::string_view args) {
+        if(args!="[]")throw std::runtime_error("Invalid sky method arguments");
+        return std::string(R"({"mode":"procedural"})");
+    });
+    js.bind("engine.render.shaders","catalog",[](std::string_view args) {
+        if(args!="[]")throw std::runtime_error("Invalid shader method arguments");
+        return std::string(R"({"builtin":[]})");
+    });
+    check(js.evaluate("engine.render.shadows.state().requested")=="true",
+          "Nested shadow V8 dispatch failed");
+    check(js.evaluate("engine.render.sky.state().mode")=="\"procedural\"",
+          "Nested sky V8 dispatch failed");
+    check(js.evaluate("engine.render.shaders.catalog().builtin.length")=="0",
+          "Nested shader V8 dispatch failed");
+    check(js.evaluate("engine.api('engine.render.sky').state().mode")==
+          "\"procedural\"","Direct nested capability lookup failed");
+    js.bind("engine.audio","playNac",[](std::string_view args) {
+        if(args!=R"(["audio/click.nac",1])")
+            throw std::runtime_error("Nested audio argument mismatch");
+        return std::string("17");
+    });
+    check(js.evaluate("engine.audio.playback.playNac('audio/click.nac',1)")=="17",
+          "Nested audio call failed to reach original provider");
+    js.bind("engine.physics","applyImpulse",[](std::string_view args) {
+        if(args!="[1,0,2,0]")
+            throw std::runtime_error("Nested physics argument mismatch");
+        return std::string("true");
+    });
+    check(js.evaluate("engine.physics.bodies.applyImpulse(1,0,2,0)")=="true",
+          "Nested physics call failed to reach original provider");
+    js.unbind("engine.audio","playNac");
+    bool revoked_alias=false;
+    try { js.evaluate("engine.audio.playback.playNac('audio/click.nac',1)"); }
+    catch(std::runtime_error const& e) {
+        revoked_alias=std::string(e.what()).find("not registered")!=std::string::npos;
+    }
+    check(revoked_alias,"Revoking old audio callback did not revoke its alias");
     check(js.evaluate("typeof engine.physics.applyImpulse") == "\"function\"",
           "V8 engine namespaces are not dynamically visible");
     bool binding_threw = false;

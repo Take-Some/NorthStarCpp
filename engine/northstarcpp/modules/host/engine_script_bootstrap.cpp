@@ -17,9 +17,8 @@
 namespace northstarcpp::script_bootstrap {
 namespace {
 using Clock=std::chrono::steady_clock;
-constexpr std::array<std::string_view,6> fixed_scripts{{
+constexpr std::array<std::string_view,5> fixed_scripts{{
     "scripts/northstar/bootstrap.js",
-    "scripts/northstar/events.js",
     "scripts/input/Keys.js",
     "scripts/input/GamepadButtons.js",
     "scripts/scene/Entity.js",
@@ -30,7 +29,7 @@ struct DefaultScript {
     std::string_view legacy;
     bool sealed;
 };
-constexpr std::array<DefaultScript,12> defaults{{
+constexpr std::array<DefaultScript,11> defaults{{
     {"scripts/ui/UI.js", "scripts/UI.js", true},
     {"scripts/character/Character.js", "scripts/Character.js", true},
     {"scripts/player/playerConfig.js", "scripts/playerConfig.js", false},
@@ -39,8 +38,7 @@ constexpr std::array<DefaultScript,12> defaults{{
     {"scripts/camera/playerCamera.js", "scripts/playerCamera.js", false},
     {"scripts/camera/playerLook.js", "scripts/playerLook.js", false},
     {"scripts/player/playerMovement.js", "scripts/playerMovement.js", false},
-    {"scripts/audio/footsteps.js", "scripts/footsteps.js", false},
-    {"scripts/player/playerFootsteps.js", "scripts/playerFootsteps.js", false},
+    {"scripts/character/footsteps.js", "scripts/playerFootsteps.js", false},
     {"scripts/character/playerCharacter.js", "scripts/playerCharacter.js", false},
     {"scripts/player/playerInteraction.js", "scripts/playerInteraction.js", false}
 }};
@@ -125,14 +123,14 @@ Report load(ScriptRuntime& runtime,AssetStore const& project_assets,
         }
     };
     try {
-        // Engine/bootstrap and event contracts are not replaceable by VFS.
+        // Only the universal engine bootstrap is sealed.
+        // Character-specific event schemas are registered by character scripts.
         evaluate(fixed_scripts[0],true,"bootstrap");
-        evaluate(fixed_scripts[1],true,"events");
         runtime.evaluate(
             "void engine.on('northstar._entityBatch', function(packet) {"
             " for (const entity of packet.items) engine.emit(packet.event, entity);"
             "});void 0;", "<engine-entity-batch-bridge>");
-        for(std::size_t i=2;i<fixed_scripts.size();++i)
+        for(std::size_t i=1;i<fixed_scripts.size();++i)
             evaluate(fixed_scripts[i],true,"sdk");
         for(auto const& entry:defaults) {
             if(entry.sealed) {

@@ -184,12 +184,36 @@ struct Context {
     "use strict";
     const native = globalThis.__northstar_native;
     const subscriptions = new Map();
-    const exposed = (namespaceName) => new Proxy(Object.create(null), {
-        get(_target, method) {
-            if (typeof method !== "string" || method === "then") return undefined;
-            return (...args) => native(namespaceName, method, args);
-        }
-    });
+    // Generic multi-level engine API. A member is both a native method and
+    // a potential child namespace; only invocation crosses the host boundary.
+    // No hard-coded list of render/audio/physics subsystem names is required.
+    const namespaces = new Map();
+    const exposed = (namespaceName) => {
+        const existing = namespaces.get(namespaceName);
+        if (existing) return existing;
+        const methods = new Map();
+        const proxy = new Proxy(Object.create(null), {
+            get(_target, method) {
+                if (typeof method !== "string" || method === "then")
+                    return undefined;
+                let member = methods.get(method);
+                if (!member) {
+                    const child = namespaceName + "." + method;
+                    member = new Proxy((...args) => native(namespaceName, method, args), {
+                        get(_callable, nested) {
+                            if (typeof nested !== "string" || nested === "then")
+                                return undefined;
+                            return exposed(child)[nested];
+                        }
+                    });
+                    methods.set(method, member);
+                }
+                return member;
+            }
+        });
+        namespaces.set(namespaceName, proxy);
+        return proxy;
+    };
     const host = {
         call(namespaceName, method, ...args) {
             return native(namespaceName, method, args);

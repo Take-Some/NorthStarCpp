@@ -19,6 +19,13 @@ int main(int argc,char** argv) {
         auto rig=northstarcpp::load_skeleton(store,"characters/abby/models/abby.ymt");
         if(rig.mirrored_helpers.size()<40)
             throw std::runtime_error("Auxiliary skeleton mirror mapping missing");
+        if(rig.joint_name_order.size()!=rig.joints.size())
+            throw std::runtime_error("Imported skeleton joint lookup missing");
+        for(std::size_t i=0;i<rig.joints.size();++i)
+            if(rig.joint_index(rig.joints[i].name)!=i)
+                throw std::runtime_error("Imported joint lookup mismatch");
+        if(rig.joint_index("__not_a_joint__")!=rig.joints.size())
+            throw std::runtime_error("Missing joint lookup returned a bone");
         northstarcpp::SkeletonPose pose(rig);
         if(rig.joints.empty() || rig.inverse_bind.size()!=rig.joints.size() ||
            pose.palette().size()!=rig.joints.size())

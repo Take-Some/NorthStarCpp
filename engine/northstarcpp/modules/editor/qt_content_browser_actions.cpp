@@ -6,11 +6,23 @@
 #include "asset_browser_collections.hpp"
 #include "asset_team_collections.hpp"
 #include <northstarcpp/scene.hpp>
+#include <northstarcpp/sky_project_config.hpp>
 #include <QApplication>
 #include <QClipboard>
 #include <QCursor>
 #include <QDesktopServices>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLabel>
+#include <QPushButton>
+#include <QSaveFile>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -32,6 +44,143 @@ namespace northstarcpp::editor {
 namespace fs=std::filesystem;
 using browser_internal::qt;
 using browser_internal::native;
+namespace {
+QJsonObject readSkyDocument(QString const& path) {
+    QFile input(path);
+    if(!input.exists())return {};
+    if(!input.open(QIODevice::ReadOnly) || input.size()>128*1024)
+        throw std::runtime_error("Cannot read sky settings");
+    auto const document=QJsonDocument::fromJson(input.readAll());
+    if(!document.isObject())throw std::runtime_error("Invalid sky settings JSON");
+    return document.object();
+}
+}
+
+void QtContentBrowser::editSceneSky(QString const& selectedDrawable) {
+    try {
+        QString scene=sky_scene_provider_?sky_scene_provider_():sky_scene_;
+        if(scene.isEmpty() && !sky_scene_provider_ && !project_root_.isEmpty()) {
+            auto const root=QDir(project_root_+"/..");
+            auto const manifest=readSkyDocument(root.filePath("northstarcpp.project.json"));
+            auto const startup=manifest.value("startup_scene").toString();
+            if(!startup.isEmpty()) {
+                auto const startupPath=root.absoluteFilePath(startup);
+                if(!project_sky::scene_reference(native(root.absolutePath()),
+                                                 native(startupPath)).empty())
+                    scene=startupPath;
+            }
+        }
+        if(scene.isEmpty() || !QFileInfo(scene).isFile()) {
+            QMessageBox::information(this,"Scene Sky","Open a saved scene to configure its sky.");
+            return;
+        }
+        auto const root=project_sky::find_root(native(scene));
+        auto const relative=project_sky::scene_reference(root,native(scene));
+        QString const path=scene+".sky.json";
+        bool const hasProfile=QFileInfo::exists(path);
+        auto document=readSkyDocument(hasProfile?path:qt(root/"northstarcpp.project.json"));
+        bool const useLegacy=!hasProfile && !relative.empty() &&
+            std::filesystem::u8path(document.value("startup_scene").toString().toUtf8().toStdString())
+                .lexically_normal().generic_u8string()==relative;
+        auto sky=(hasProfile || useLegacy)?document.value("sky").toObject():QJsonObject{};
+        auto const defaults=project_sky::parse(QJsonDocument(QJsonObject{{"sky",sky}})
+            .toJson(QJsonDocument::Compact).toStdString());
+        auto const& settings=defaults.settings;
+
+        QDialog dialog(this);
+        dialog.setObjectName("sceneSkySettings");
+        dialog.setWindowTitle("Scene Sky");
+        dialog.setMinimumWidth(470);
+        QFormLayout form(&dialog);
+        form.addRow("Scene",new QLabel(QFileInfo(scene).fileName(),&dialog));
+        QComboBox mode;
+        mode.setObjectName("sceneSkyMode");
+        mode.addItem("Disabled","disabled");
+        mode.addItem("Procedural atmosphere","procedural");
+        mode.addItem("Authored sky dome","drawable");
+        mode.addItem("Atmosphere with sky dome","hybrid");
+        auto const modeValue=sky.value("mode").toString(sky.isEmpty()?"disabled":"procedural");
+        mode.setCurrentIndex(std::max(0,mode.findData(modeValue)));
+        if(!selectedDrawable.isEmpty() && mode.currentData()!="hybrid")
+            mode.setCurrentIndex(mode.findData("drawable"));
+        form.addRow("Mode",&mode);
+        QLineEdit drawable(selectedDrawable.isEmpty()?
+            sky.value("drawable").toString():selectedDrawable);
+        drawable.setObjectName("sceneSkyDrawable");
+        drawable.setPlaceholderText("models/sky.ydd@dome or models/sky.ydr");
+        form.addRow("Sky dome asset",&drawable);
+        QCheckBox sunlight,moon,clouds;
+        sunlight.setChecked(settings.sun);moon.setChecked(settings.moon);
+        clouds.setChecked(settings.clouds);
+        form.addRow("Sun",&sunlight);
+        form.addRow("Moon",&moon);
+        form.addRow("Volumetric clouds",&clouds);
+        QDoubleSpinBox time,coverage,speed,haze,fog;
+        auto setup=[&](QString const& label,QDoubleSpinBox& input,double max,
+                       double step,double value,int decimals=2) {
+            input.setDecimals(decimals);
+            input.setRange(0.0,max);
+            input.setSingleStep(step);
+            input.setValue(value);
+            form.addRow(label,&input);
+        };
+        setup("Solar time (hours)",time,23.9999,.25,settings.time_of_day,4);
+        setup("Cloud coverage",coverage,1.,.025,settings.cloud_coverage,4);
+        setup("Cloud speed",speed,1.,.005,settings.cloud_speed,4);
+        setup("Atmospheric haze",haze,1.,.025,settings.haze,4);
+        setup("Aerial fog density",fog,.25,.005,
+            sky.contains("fogDensity")?settings.fog_density:.035,4);
+
+        QDialogButtonBox buttons(QDialogButtonBox::Save|QDialogButtonBox::Cancel);
+        auto* reveal=buttons.addButton("Reveal Dome",QDialogButtonBox::ActionRole);
+        form.addRow(&buttons);
+        auto updateFields=[&] {
+            auto const selectedMode=mode.currentData().toString();
+            bool const usesDrawable=selectedMode=="drawable" || selectedMode=="hybrid";
+            bool const atmosphere=selectedMode=="procedural" || selectedMode=="hybrid";
+            drawable.setEnabled(usesDrawable);
+            for(QWidget* widget:std::array<QWidget*,8>{&sunlight,&moon,&clouds,&time,
+                                                      &coverage,&speed,&haze,&fog})
+                widget->setEnabled(atmosphere);
+            reveal->setEnabled(!drawable.text().trimmed().isEmpty());
+        };
+        connect(&mode,&QComboBox::currentIndexChanged,&dialog,updateFields);
+        connect(&drawable,&QLineEdit::textChanged,&dialog,updateFields);
+        connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        connect(reveal,&QPushButton::clicked,&dialog,[&] {dialog.done(2);});
+        connect(&buttons,&QDialogButtonBox::accepted,&dialog,[&] {
+            try {
+                sky["mode"]=mode.currentData().toString();
+                sky["drawable"]=drawable.text().trimmed();
+                sky["sun"]=sunlight.isChecked();
+                sky["moon"]=moon.isChecked();
+                sky["clouds"]=clouds.isChecked();
+                sky["timeOfDay"]=time.value();
+                sky["cloudCoverage"]=coverage.value();
+                sky["cloudSpeed"]=speed.value();
+                sky["haze"]=haze.value();
+                sky["fogDensity"]=fog.value();
+                if(!hasProfile)document={};
+                document["sky"]=sky;
+                auto const data=QJsonDocument(document).toJson();
+                (void)project_sky::parse(data.toStdString());
+                QSaveFile output(path);
+                if(!output.open(QIODevice::WriteOnly) || output.write(data)!=data.size() ||
+                   !output.commit())throw std::runtime_error("Cannot save scene sky settings");
+                dialog.accept();
+            } catch(std::exception const& error) {
+                QMessageBox::warning(&dialog,"Scene Sky",QString::fromUtf8(error.what()));
+            }
+        });
+        updateFields();
+        auto const result=dialog.exec();
+        if(result==QDialog::Accepted)emit sceneSkyChanged();
+        else if(result==2)revealAsset(drawable.text().trimmed());
+    } catch(std::exception const& error) {
+        QMessageBox::warning(this,"Scene Sky",QString::fromUtf8(error.what()));
+    }
+}
+
 bool QtContentBrowser::isSafeBasename(QString const& name) const {
     if(name.isEmpty() || name=="." || name==".." || name.size()>120 ||
        name.contains('/') || name.contains('\\') || name.contains(':') ||
@@ -68,45 +217,6 @@ void QtContentBrowser::createFolder() {
     if(!QDir().mkpath(target))
         QMessageBox::warning(this,"Folder","Unable to create this folder.");
     else refresh();
-}
-void QtContentBrowser::importFiles() {
-    // Engine shared content is a read-only authoring mount. Use a
-    // project override instead of mutating the engine installation.
-    if(engine_selected_)return;
-    if(root_.isEmpty())return;
-    if(auto const* folder=activeCatalog().find(folder_.toUtf8().toStdString());
-       folder && folder->is_list_file()) {
-        QMessageBox::information(this,"NEF8 ListFile",
-            "Dictionary entries are read-only. Edit the source asset with an importer.");
-        return;
-    }
-    QFileDialog dialog(this,"Import Project Assets");
-    dialog.setFileMode(QFileDialog::ExistingFiles);
-    dialog.setOption(QFileDialog::DontUseNativeDialog,true);
-    if(dialog.exec()!=QDialog::Accepted)return;
-    int imported=0;
-    for(auto const& source:dialog.selectedFiles()) {
-        auto file=QFileInfo(source);
-        if(!file.isFile() || file.size()>512ll*1024*1024)continue;
-        QString dest;
-        try {
-            auto parent=folder_.isEmpty()?native(root_):
-                activeCatalog().resolve(folder_.toUtf8().toStdString());
-            dest=qt(parent/native(file.fileName()));
-        }catch(std::exception const& e) {
-            QMessageBox::warning(this,"Import Files",QString::fromUtf8(e.what()));
-            break;
-        }
-        if(QFileInfo::exists(dest)) {
-            auto choice=QMessageBox::question(this,"Existing Asset",
-                "The asset "+file.fileName()+" already exists. Skip it?",
-                QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Yes);
-            if(choice==QMessageBox::Cancel)break;
-            continue;
-        }
-        if(QFile::copy(source,dest))++imported;
-    }
-    if(imported)refresh();
 }
 void QtContentBrowser::createNativeModelPrefab() {
     if(engine_selected_ || project_root_.isEmpty())return;
@@ -272,6 +382,7 @@ void QtContentBrowser::showMenu(QPoint point) {
     auto* open=menu.addAction("Preview / Browse");
     auto* insert=menu.addAction("Add to Scene");
     auto* copy=menu.addAction("Copy Asset Reference");
+    auto* skySettings=menu.addAction("Scene Sky...");
     auto selection=selectedPaths();
     auto* copyAll=menu.addAction(
         QString("Copy %1 Asset References").arg(selection.size()));
@@ -340,6 +451,18 @@ void QtContentBrowser::showMenu(QPoint point) {
     auto* remove=menu.addAction("Delete...");
     open->setEnabled(!selected.isEmpty());
     auto const* chosen=activeCatalog().find(selected.toUtf8().toStdString());
+    QAction* setSky=nullptr;
+    QString skyReference;
+    if(chosen && !chosen->directory && chosen->kind==AssetKind::mesh &&
+       selection.size()==1) {
+        try {
+            auto const reference=chosen->asset_reference();
+            project_sky::validate_drawable_reference(reference);
+            skyReference=QString::fromUtf8(reference.c_str());
+            setSky=new QAction("Use as Sky Dome...",&menu);
+            menu.insertAction(skySettings,setSky);
+        } catch(std::invalid_argument const&) {}
+    }
     insert->setEnabled(chosen && !chosen->directory &&
         (chosen->kind==AssetKind::mesh || chosen->kind==AssetKind::prefab));
     if(chosen && chosen->kind==AssetKind::prefab)
@@ -378,7 +501,9 @@ void QtContentBrowser::showMenu(QPoint point) {
         if(chosen && (chosen->kind==AssetKind::mesh ||
                       chosen->kind==AssetKind::prefab))
             emit assetActivated(QString::fromUtf8(chosen->asset_reference().c_str()));
-    } else if(selectedAction==copy)copyReference();
+    } else if(setSky && selectedAction==setSky)editSceneSky(skyReference);
+    else if(selectedAction==skySettings)editSceneSky();
+    else if(selectedAction==copy)copyReference();
     else if(selectedAction==copyAll)copySelectedReferences();
     else if(selectedAction==duplicateBatch)duplicateSelectedBatch();
     else if(selectedAction==deleteBatch)deleteSelectedBatch();
